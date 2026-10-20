@@ -17,6 +17,8 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+import pytest
+
 MODEL_PATH = "/mnt/opslag/deurbel/backend/yolov8n.onnx"
 
 PERSON_CLASSES = {0}
@@ -29,14 +31,19 @@ COCO_NAMES = {
 }
 
 
-def test_model_loading():
-    print("▶ Test 1: Loading YOLOv8n ONNX model...")
+@pytest.fixture(scope="module")
+def sess():
     assert os.path.exists(MODEL_PATH), f"Model file not found at {MODEL_PATH}"
-    sess = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+    return ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+
+
+def test_model_loading(sess):
+    print("▶ Test 1: Loading YOLOv8n ONNX model...")
     input_name = sess.get_inputs()[0].name
     output_name = sess.get_outputs()[0].name
+    assert input_name
+    assert output_name
     print(f"  ✓ Session initialized: input='{input_name}', output='{output_name}'")
-    return sess
 
 
 def test_inference_and_classes(sess):

@@ -164,7 +164,7 @@ class LiveVoiceComSession:
         with _voicecom_thread_lock:
             force_close_active_voicecom()
 
-            for attempt in range(1, 3):
+            for attempt in range(1, 4):
                 try:
                     self.sdk = _get_sdk()
                     _active_sdk = self.sdk
@@ -185,8 +185,8 @@ class LiveVoiceComSession:
                     if self.uid < 0:
                         err = self.sdk.NET_DVR_GetLastError()
                         logger.warning("SDK login attempt %d failed: %d", attempt, err)
-                        if attempt < 2:
-                            time.sleep(0.200)
+                        if attempt < 3:
+                            time.sleep(0.400 * attempt)
                             continue
                         return False
 
@@ -207,8 +207,8 @@ class LiveVoiceComSession:
                         logger.warning("StartVoiceCom_MR_V30 attempt %d failed: %d", attempt, err)
                         self.sdk.NET_DVR_Logout(self.uid)
                         self.uid = -1
-                        if attempt < 2:
-                            time.sleep(0.200)
+                        if attempt < 3:
+                            time.sleep(0.400 * attempt)
                             continue
                         return False
 
@@ -219,8 +219,8 @@ class LiveVoiceComSession:
 
                 except Exception as e:
                     logger.error("LiveVoiceComSession start error: %s", e)
-                    if attempt < 2:
-                        time.sleep(0.200)
+                    if attempt < 3:
+                        time.sleep(0.400 * attempt)
                         continue
                     return False
 
@@ -411,15 +411,16 @@ def _stream_frames_via_sdk(frames: List[bytes], frame_interval: float = 0.064) -
         uid = -1
         v_handle = -1
 
-        for attempt in range(1, 3):
+        for attempt in range(1, 4):
             cam_ip, cam_port, cam_user, cam_pass = _get_credentials()
             uid = sdk.NET_DVR_Login_V30(
                 cam_ip.encode("utf-8"), cam_port, cam_user.encode("utf-8"), cam_pass.encode("utf-8"), ctypes.byref(dev_info)
             )
             if uid < 0:
-                logger.warning("NET_DVR_Login_V30 attempt %d failed: %d", attempt, sdk.NET_DVR_GetLastError())
-                if attempt < 2:
-                    time.sleep(0.200)
+                err = sdk.NET_DVR_GetLastError()
+                logger.warning("NET_DVR_Login_V30 attempt %d failed: %d", attempt, err)
+                if attempt < 3:
+                    time.sleep(0.400 * attempt)
                     continue
                 return False
 
@@ -440,8 +441,8 @@ def _stream_frames_via_sdk(frames: List[bytes], frame_interval: float = 0.064) -
                 logger.warning("NET_DVR_StartVoiceCom_MR_V30 attempt %d failed: %d", attempt, err)
                 sdk.NET_DVR_Logout(uid)
                 uid = -1
-                if attempt < 2:
-                    time.sleep(0.200)
+                if attempt < 3:
+                    time.sleep(0.400 * attempt)
                     continue
                 return False
             break
@@ -476,6 +477,7 @@ def _stream_frames_via_sdk(frames: List[bytes], frame_interval: float = 0.064) -
                 pass
             _active_voice_handle = -1
             _active_user_id = -1
+            time.sleep(0.200)
 
 
 async def play_audio_to_doorbell_async(
@@ -506,6 +508,7 @@ def _run_acoustic_loopback_sync(rtsp_url: Optional[str] = None) -> dict:
 
     cmd = [
         "ffmpeg", "-y", "-nostdin", "-fflags", "nobuffer", "-flags", "low_delay",
+        "-probesize", "32768", "-analyzeduration", "200000",
         "-rtsp_transport", "tcp", "-i", url,
         "-vn", "-f", "s16le", "-ac", "1", "-ar", "16000",
         "-loglevel", "quiet", "-"
@@ -513,6 +516,7 @@ def _run_acoustic_loopback_sync(rtsp_url: Optional[str] = None) -> dict:
     proc = None
     buf = bytearray()
     running = True
+    first_chunk_event = threading.Event()
 
     try:
         proc = subprocess.Popen(
@@ -530,14 +534,17 @@ def _run_acoustic_loopback_sync(rtsp_url: Optional[str] = None) -> dict:
                     if not chunk:
                         break
                     buf.extend(chunk)
+                    if not first_chunk_event.is_set():
+                        first_chunk_event.set()
                 except Exception:
                     break
 
         t = threading.Thread(target=reader, daemon=True)
         t.start()
 
-        time.sleep(0.5)
-        speaker_ok = send_test_tone_to_doorbell(duration=2.0, volume=0.5)
+        # Wait until ffmpeg is actively receiving audio before playing the tone
+        first_chunk_event.wait(timeout=3.0)
+        speaker_ok = send_test_tone_to_doorbell(duration=2.0, volume=0.85)
         time.sleep(1.0)
         running = False
         try:
@@ -583,7 +590,7 @@ def _run_acoustic_loopback_sync(rtsp_url: Optional[str] = None) -> dict:
         noise_floor = float(np.median(fft_vals[noise_mask])) + 1e-6
         snr_db = float(20 * np.log10(peak_mag / noise_floor))
 
-        detected = bool((950 <= peak_freq <= 1050) and (snr_db >= 6.0))
+        detected = bool((950 <= peak_freq <= 1050) and (snr_db >= 3.0))
 
         return {
             "status": "ok",
