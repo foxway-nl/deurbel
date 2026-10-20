@@ -16,6 +16,8 @@ stream-webrtc = "1.2.1"
 media3 = "1.4.1"
 accompanist = "0.36.0"
 coil = "2.7.0"
+zxing = "3.5.3"
+camerax = "1.3.4"
 
 [libraries]
 # AndroidX Core
@@ -71,6 +73,15 @@ coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coi
 
 # Accompanist (permissions)
 accompanist-permissions = { group = "com.google.accompanist", name = "accompanist-permissions", version.ref = "accompanist" }
+
+# ZXing Barcode Scanning
+zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
+
+# CameraX
+camera-core = { group = "androidx.camera", name = "camera-core", version.ref = "camerax" }
+camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "camerax" }
+camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "camerax" }
+camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "camerax" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -31,6 +31,8 @@ android-app/app/build/
 android-app/build/
 android-app/local.properties
 android-app/**/build/
+.gradle_cache/
+.android_sdk_platforms/
 
 # Secrets & Config
 .env

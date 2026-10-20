@@ -162,12 +162,13 @@ class WebSocketForegroundService : Service() {
 
         return NotificationCompat.Builder(this, FoxwayApp.CHANNEL_SERVICE)
             .setContentTitle("Foxway Deurbel")
-            .setContentText("Verbonden — wacht op bellen")
+            .setContentText("Achtergrondverbinding actief")
             .setSmallIcon(android.R.drawable.ic_menu_call)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setSilent(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setShowWhen(false)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
     }
 }

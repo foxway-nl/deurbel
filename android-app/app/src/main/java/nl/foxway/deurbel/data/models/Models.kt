@@ -67,6 +67,7 @@ data class ClipItem(
     val id: String,
     val timestamp: String,
     val duration: Double,
+    @SerializedName("size_bytes") val sizeBytes: Long = 0L,
     @SerializedName("snapshot_url") val snapshotUrl: String,
     @SerializedName("video_url") val videoUrl: String,
     @SerializedName("answered_by") val answeredBy: String?,
@@ -266,4 +267,15 @@ data class EndpointConfig(
         )
     }
 }
+
+data class AudioLoopbackResponse(
+    val status: String = "",
+    val passed: Boolean = false,
+    @SerializedName("speaker_sent") val speakerSent: Boolean = false,
+    @SerializedName("mic_loopback_detected") val micLoopbackDetected: Boolean = false,
+    @SerializedName("peak_hz") val peakHz: Double = 0.0,
+    @SerializedName("snr_db") val snrDb: Double = 0.0,
+    val message: String = ""
+)
+
 

@@ -13,8 +13,8 @@ android {
         applicationId = "nl.foxway.deurbel"
         minSdk = 28
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.3.0"
+        versionCode = 5
+        versionName = "1.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -108,4 +108,13 @@ dependencies {
 
     // ── Permissions ──────────────────────────────────────────────
     implementation(libs.accompanist.permissions)
+
+    // ── QR & Barcode Scanning ─────────────────────────────────────
+    implementation(libs.zxing.core)
+
+    // ── CameraX ───────────────────────────────────────────────────
+    implementation(libs.camera.core)
+    implementation(libs.camera.camera2)
+    implementation(libs.camera.lifecycle)
+    implementation(libs.camera.view)
 }

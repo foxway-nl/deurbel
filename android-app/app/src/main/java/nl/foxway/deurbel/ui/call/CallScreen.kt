@@ -23,8 +23,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import kotlinx.coroutines.flow.MutableStateFlow
 import nl.foxway.deurbel.ui.theme.*
 import nl.foxway.deurbel.webrtc.WebRtcSession
 import org.webrtc.SurfaceViewRenderer
@@ -48,6 +56,7 @@ fun CallScreen(
     webRtcSession: WebRtcSession?,
     isMicMuted: Boolean,
     isSpeakerOn: Boolean,
+    videoStreamUrl: String = "",
     onAnswer: () -> Unit,
     onDecline: () -> Unit,
     onHangup: () -> Unit,
@@ -55,6 +64,10 @@ fun CallScreen(
     onToggleSpeaker: () -> Unit,
     onQuickReply: (String) -> Unit
 ) {
+    val context = LocalContext.current
+    val hasWebRtcVideo by (webRtcSession?.hasVideoTrack ?: remember { MutableStateFlow(false) }).collectAsState()
+    var isExoBuffering by remember { mutableStateOf(true) }
+
     // Pulse animation for the green Answer button
     val infiniteTransition = rememberInfiniteTransition(label = "answerPulse")
     val answerPulseScale by infiniteTransition.animateFloat(
@@ -69,6 +82,46 @@ fun CallScreen(
 
     var isFitMode by remember { mutableStateOf(true) }
 
+    val exoPlayer = remember {
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(500, 1500, 250, 500)
+            .build()
+        ExoPlayer.Builder(context)
+            .setLoadControl(loadControl)
+            .build().apply {
+                playWhenReady = true
+                repeatMode = Player.REPEAT_MODE_OFF
+            }
+    }
+
+    DisposableEffect(exoPlayer) {
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                isExoBuffering = (state == Player.STATE_BUFFERING)
+            }
+        }
+        exoPlayer.addListener(listener)
+        onDispose {
+            exoPlayer.removeListener(listener)
+            exoPlayer.stop()
+            exoPlayer.release()
+        }
+    }
+
+    LaunchedEffect(isActive, videoStreamUrl, hasWebRtcVideo) {
+        if (isActive && !hasWebRtcVideo && videoStreamUrl.isNotBlank()) {
+            val mediaItem = MediaItem.fromUri(videoStreamUrl)
+            exoPlayer.setMediaItem(mediaItem)
+            exoPlayer.prepare()
+        } else if (!isActive) {
+            exoPlayer.stop()
+        }
+    }
+
+    LaunchedEffect(isSpeakerOn) {
+        exoPlayer.volume = if (isSpeakerOn) 1f else 0f
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -79,10 +132,10 @@ fun CallScreen(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
         ) {
-            if (webRtcSession != null) {
+            if (isActive && webRtcSession != null && hasWebRtcVideo) {
                 AndroidView(
-                    factory = { context ->
-                        SurfaceViewRenderer(context).apply {
+                    factory = { ctx ->
+                        SurfaceViewRenderer(ctx).apply {
                             val scaling = if (isFitMode) org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT
                             else org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FILL
                             setScalingType(scaling)
@@ -106,6 +159,32 @@ fun CallScreen(
                         Modifier.fillMaxSize()
                     }
                 )
+            } else if (isActive && (!hasWebRtcVideo || webRtcSession == null)) {
+                AndroidView(
+                    factory = { ctx ->
+                        PlayerView(ctx).apply {
+                            player = exoPlayer
+                            useController = false
+                            resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
+                            else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                        }
+                    },
+                    update = { view ->
+                        view.player = exoPlayer
+                        view.resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                    },
+                    modifier = if (isFitMode) {
+                        Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(16f / 9f)
+                    } else {
+                        Modifier.fillMaxSize()
+                    }
+                )
+                if (isExoBuffering) {
+                    CircularProgressIndicator(color = EmeraldPrimary, modifier = Modifier.size(32.dp))
+                }
             } else if (snapshotUrl.isNotBlank()) {
                 AsyncImage(
                     model = snapshotUrl,

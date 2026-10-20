@@ -300,6 +300,14 @@ class WebRtcSession(
     }
 
     /**
+     * Mute or unmute remote audio from doorbell outdoor microphone.
+     */
+    fun setRemoteAudioMuted(muted: Boolean) {
+        remoteAudioTrack?.setEnabled(!muted)
+        _isRemoteAudioMuted.value = muted
+    }
+
+    /**
      * Set local microphone mute state (used by Push-to-Talk / Mute button).
      * Connects live audio streaming directly to the doorbell speaker via Port 8000 SDK.
      */

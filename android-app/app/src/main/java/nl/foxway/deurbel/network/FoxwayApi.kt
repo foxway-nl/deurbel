@@ -85,7 +85,7 @@ interface FoxwayApi {
     suspend fun testAudio(): Response<Map<String, String>>
 
     @POST("/api/v1/test/audio-loopback")
-    suspend fun testAudioLoopback(): Response<Map<String, Any>>
+    suspend fun testAudioLoopback(): Response<AudioLoopbackResponse>
 
     @POST("/api/v1/audio/speak")
     suspend fun speakAudio(
@@ -161,5 +161,12 @@ interface FoxwayApi {
 
     @POST("/api/v1/webhook/shelly-ring")
     suspend fun triggerShellyWebhook(): Response<Map<String, Any>>
+
+    // ── Junk Clips Cleanup ────────────────────────────────────────────
+
+    @POST("/api/v1/clips/cleanup-unclassified")
+    suspend fun cleanupUnclassifiedClips(
+        @Query("include_unstarred_vehicles") includeVehicles: Boolean = true
+    ): Response<Map<String, Any>>
 }
 

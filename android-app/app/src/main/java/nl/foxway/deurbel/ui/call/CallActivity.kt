@@ -65,6 +65,15 @@ class CallActivity : ComponentActivity() {
                 var answeredByElsewhere by remember { mutableStateOf<String?>(null) }
                 var isMicMuted by remember { mutableStateOf(true) }
                 var isSpeakerOn by remember { mutableStateOf(true) }
+                val resolver = remember { EndpointResolver(FoxwayApp.instance.preferencesManager) }
+                var streamUrl by remember { mutableStateOf("https://deurbel.foxway.nl/api/v1/stream.mp4?src=deurbel") }
+
+                LaunchedEffect(Unit) {
+                    try {
+                        val resolved = resolver.resolve()
+                        streamUrl = "${resolved.apiBaseUrl}/api/v1/stream.mp4?src=deurbel"
+                    } catch (_: Exception) {}
+                }
 
                 // Listen for multi-user claim events
                 LaunchedEffect(Unit) {
@@ -95,6 +104,7 @@ class CallActivity : ComponentActivity() {
                     webRtcSession = session,
                     isMicMuted = isMicMuted,
                     isSpeakerOn = isSpeakerOn,
+                    videoStreamUrl = streamUrl,
                     onAnswer = {
                         isActive = true
                         handleAnswer()

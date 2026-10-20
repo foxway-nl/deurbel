@@ -50,14 +50,16 @@ class FoxwayApp : Application() {
         }
         manager.createNotificationChannel(ringChannel)
 
-        // Low-priority service channel
+        // Min-priority service channel — completely silent and minimized
         val serviceChannel = NotificationChannel(
             CHANNEL_SERVICE,
             getString(R.string.channel_service_name),
-            NotificationManager.IMPORTANCE_LOW
+            NotificationManager.IMPORTANCE_MIN
         ).apply {
             description = getString(R.string.channel_service_description)
             setShowBadge(false)
+            enableLights(false)
+            enableVibration(false)
         }
         manager.createNotificationChannel(serviceChannel)
 

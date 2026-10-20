@@ -29,12 +29,20 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import nl.foxway.deurbel.FoxwayApp
+import nl.foxway.deurbel.audio.DoorbellAudioStreamer
 import nl.foxway.deurbel.data.models.ManualRecordStart
 import nl.foxway.deurbel.network.ApiClientFactory
 import nl.foxway.deurbel.network.EndpointResolver
+import nl.foxway.deurbel.network.EndpointResolver.ConnectionType
 import nl.foxway.deurbel.ui.theme.*
 import nl.foxway.deurbel.webrtc.WebRtcSession
 import org.webrtc.RendererCommon
@@ -42,11 +50,13 @@ import org.webrtc.SurfaceViewRenderer
 
 /**
  * Production-Grade Live View Screen:
- *  - Lifecycle-bound: Stream and talk strictly disconnect/mute on ON_PAUSE/ON_STOP.
- *  - Adaptive Quality: Toggle between SD (fast 5G load, 432p) and HD (1080p).
- *  - Manual Live Recording: Prominent "Opnemen" toggle with red pulsing timer (00:12).
- *  - Stealth Talkback: Mic is muted by default; Push-to-Talk pipes to Port 8000 AAC-LC.
- *  - Dynamic LAN 🟢 / 5G 🌐 indicator.
+ *  - 5G / WAN Resilience: Automatically streams buffer-free HTTPS MP4 over Port 443 via ExoPlayer
+ *    when on 5G/WAN or when WebRTC UDP fails to connect.
+ *  - LAN Ultra Low Latency: Hardware-accelerated WebRTC via go2rtc WHEP with fallback to ExoPlayer.
+ *  - Unmistakable loading feedback: "Verbinden met 5G live stream..." and retry on error.
+ *  - Two-way Talkback: Push-to-Talk works over WebRTC on LAN and over WebSocket audio stream on 5G.
+ *  - Fullscreen / Aspect Ratio toggle (Fit vs Fill) and Speaker Mute / Unmute.
+ *  - Manual Live Recording: Prominent "Opnemen" toggle with red pulsing timer.
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -59,10 +69,18 @@ fun LiveScreen() {
 
     val connectionType by resolver.connectionType.collectAsState()
     var session by remember { mutableStateOf<WebRtcSession?>(null) }
+    val audioStreamer = remember { DoorbellAudioStreamer() }
     var activeBaseUrl by remember { mutableStateOf("") }
+
     var isPttActive by remember { mutableStateOf(false) }
     var isFitMode by remember { mutableStateOf(true) }
-    var isHd by remember { mutableStateOf(false) } // Default SD on mobile for ultra-fast 5G load
+    var isHd by remember { mutableStateOf(false) } // Default SD for fast mobile & 5G loading
+    var isSpeakerMuted by remember { mutableStateOf(false) }
+
+    // Stream mode: WebRTC or ExoPlayer (for 5G/WAN)
+    var isExoMode by remember { mutableStateOf(false) }
+    var isStreamBuffering by remember { mutableStateOf(true) }
+    var streamErrorMessage by remember { mutableStateOf<String?>(null) }
 
     // Manual recording state
     var isRecording by remember { mutableStateOf(false) }
@@ -79,6 +97,50 @@ fun LiveScreen() {
         ),
         label = "pulse_alpha"
     )
+
+    // ExoPlayer instance for 5G / WAN playback
+    val exoPlayer = remember {
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                500,  // minBufferMs
+                1500, // maxBufferMs
+                250,  // bufferForPlaybackMs
+                500   // bufferForPlaybackAfterRebufferMs
+            )
+            .build()
+        ExoPlayer.Builder(context)
+            .setLoadControl(loadControl)
+            .build().apply {
+                playWhenReady = true
+                repeatMode = Player.REPEAT_MODE_OFF
+            }
+    }
+
+    DisposableEffect(exoPlayer) {
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                isStreamBuffering = (state == Player.STATE_BUFFERING)
+                if (state == Player.STATE_READY) {
+                    streamErrorMessage = null
+                }
+            }
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                isStreamBuffering = false
+                streamErrorMessage = "5G live stream onderbroken (${error.localizedMessage ?: "Verbindingsfout"})"
+            }
+        }
+        exoPlayer.addListener(listener)
+        onDispose {
+            exoPlayer.removeListener(listener)
+            exoPlayer.stop()
+            exoPlayer.release()
+        }
+    }
+
+    LaunchedEffect(isSpeakerMuted) {
+        exoPlayer.volume = if (isSpeakerMuted) 0f else 1f
+        session?.setRemoteAudioMuted(isSpeakerMuted)
+    }
 
     // Timer effect while recording is active
     LaunchedEffect(isRecording) {
@@ -98,20 +160,58 @@ fun LiveScreen() {
                 session?.setMicrophoneMuted(true)
                 session?.close()
                 session = null
+                exoPlayer.stop()
+                streamErrorMessage = null
+                isStreamBuffering = true
 
                 val resolved = resolver.resolve()
                 activeBaseUrl = resolved.apiBaseUrl
-                val s = WebRtcSession(context.applicationContext)
-                session = s
-                s.setMicrophoneMuted(true)
                 val streamName = if (isHd) "deurbel" else "deurbel_sub"
-                s.start(
-                    signalingUrl = resolved.apiBaseUrl,
-                    streamName = streamName,
-                    isPrewarm = false
-                )
+
+                // Check connection type: On WAN/5G, use ExoPlayer over HTTPS port 443 directly
+                if (connectionType == ConnectionType.WAN) {
+                    isExoMode = true
+                    val streamUrl = "${resolved.apiBaseUrl}/api/v1/stream.mp4?src=$streamName"
+                    val mediaItem = MediaItem.Builder()
+                        .setUri(streamUrl)
+                        .setLiveConfiguration(
+                            MediaItem.LiveConfiguration.Builder()
+                                .setMaxPlaybackSpeed(1.02f)
+                                .build()
+                        )
+                        .build()
+                    exoPlayer.setMediaItem(mediaItem)
+                    exoPlayer.prepare()
+                } else {
+                    // LAN mode: try direct WebRTC with 2.5s fallback to ExoPlayer
+                    isExoMode = false
+                    val s = WebRtcSession(context.applicationContext)
+                    session = s
+                    s.setMicrophoneMuted(true)
+                    s.setRemoteAudioMuted(isSpeakerMuted)
+                    s.start(
+                        signalingUrl = resolved.apiBaseUrl,
+                        streamName = streamName,
+                        isPrewarm = false
+                    )
+
+                    // Watchdog: If WebRTC does not receive video within 2.5s, fall back to ExoPlayer
+                    delay(2500L)
+                    if (session == s && !s.hasVideoTrack.value) {
+                        isExoMode = true
+                        s.close()
+                        session = null
+                        val streamUrl = "${resolved.apiBaseUrl}/api/v1/stream.mp4?src=$streamName"
+                        val mediaItem = MediaItem.fromUri(streamUrl)
+                        exoPlayer.setMediaItem(mediaItem)
+                        exoPlayer.prepare()
+                    } else if (session == s) {
+                        isStreamBuffering = false
+                    }
+                }
             } catch (e: Exception) {
-                // Handled gracefully
+                streamErrorMessage = "Verbindingsfout: ${e.localizedMessage}"
+                isStreamBuffering = false
             }
         }
     }
@@ -147,18 +247,17 @@ fun LiveScreen() {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
-                    // Mute and disconnect immediately when leaving screen or locking phone
                     if (isRecording) {
                         isRecording = false
                     }
+                    audioStreamer.stopStreaming()
                     session?.setMicrophoneMuted(true)
                     session?.close()
                     session = null
+                    exoPlayer.stop()
                 }
                 Lifecycle.Event.ON_RESUME -> {
-                    if (session == null) {
-                        startStream()
-                    }
+                    startStream()
                 }
                 else -> {}
             }
@@ -166,9 +265,11 @@ fun LiveScreen() {
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+            audioStreamer.stopStreaming()
             session?.setMicrophoneMuted(true)
             session?.close()
             session = null
+            exoPlayer.stop()
         }
     }
 
@@ -177,29 +278,25 @@ fun LiveScreen() {
             .fillMaxSize()
             .background(BackgroundDark)
     ) {
-        // ── Video Renderer ──
-        session?.let { activeSession ->
+        // ── Video Renderer (WebRTC or ExoPlayer) ──
+        if (isExoMode) {
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
                 AndroidView(
                     factory = { ctx ->
-                        SurfaceViewRenderer(ctx).apply {
-                            val scaling = if (isFitMode) RendererCommon.ScalingType.SCALE_ASPECT_FIT
-                            else RendererCommon.ScalingType.SCALE_ASPECT_FILL
-                            setScalingType(scaling)
-                            setEnableHardwareScaler(true)
-                            activeSession.attachRenderer(this, scaling)
-                            requestLayout()
+                        PlayerView(ctx).apply {
+                            player = exoPlayer
+                            useController = false
+                            resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
+                            else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                         }
                     },
                     update = { view ->
-                        val scaling = if (isFitMode) RendererCommon.ScalingType.SCALE_ASPECT_FIT
-                        else RendererCommon.ScalingType.SCALE_ASPECT_FILL
-                        view.setScalingType(scaling)
-                        view.requestLayout()
-                        activeSession.setScalingType(scaling)
+                        view.player = exoPlayer
+                        view.resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                     },
                     modifier = if (isFitMode) {
                         Modifier
@@ -210,12 +307,108 @@ fun LiveScreen() {
                     }
                 )
             }
-        } ?: run {
+        } else {
+            session?.let { activeSession ->
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    AndroidView(
+                        factory = { ctx ->
+                            SurfaceViewRenderer(ctx).apply {
+                                val scaling = if (isFitMode) RendererCommon.ScalingType.SCALE_ASPECT_FIT
+                                else RendererCommon.ScalingType.SCALE_ASPECT_FILL
+                                setScalingType(scaling)
+                                setEnableHardwareScaler(true)
+                                activeSession.attachRenderer(this, scaling)
+                                requestLayout()
+                            }
+                        },
+                        update = { view ->
+                            val scaling = if (isFitMode) RendererCommon.ScalingType.SCALE_ASPECT_FIT
+                            else RendererCommon.ScalingType.SCALE_ASPECT_FILL
+                            view.setScalingType(scaling)
+                            view.requestLayout()
+                            activeSession.setScalingType(scaling)
+                        },
+                        modifier = if (isFitMode) {
+                            Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(16f / 9f)
+                        } else {
+                            Modifier.fillMaxSize()
+                        }
+                    )
+                }
+            }
+        }
+
+        // ── Loading & Buffering Indicator ──
+        if (isStreamBuffering && streamErrorMessage == null) {
             Box(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.45f)),
                 contentAlignment = Alignment.Center
             ) {
-                CircularProgressIndicator(color = EmeraldPrimary)
+                Surface(
+                    color = SurfaceGlass,
+                    shape = RoundedCornerShape(16.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, DividerDark)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        CircularProgressIndicator(color = EmeraldPrimary, modifier = Modifier.size(22.dp), strokeWidth = 2.5.dp)
+                        Text(
+                            text = if (connectionType == ConnectionType.WAN) "Verbinden met 5G live stream…" else "Verbinden met deurbel…",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = TextPrimary
+                        )
+                    }
+                }
+            }
+        }
+
+        // ── Stream Error Banner with Retry ──
+        streamErrorMessage?.let { err ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.7f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Surface(
+                    color = SurfaceDark,
+                    shape = RoundedCornerShape(16.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, CoralDecline),
+                    modifier = Modifier.padding(24.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(20.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(Icons.Default.WifiOff, contentDescription = null, tint = CoralDecline, modifier = Modifier.size(36.dp))
+                        Text(
+                            text = err,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextPrimary,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                        Button(
+                            onClick = { startStream() },
+                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Opnieuw verbinden", color = BackgroundDark, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
         }
 
@@ -234,7 +427,7 @@ fun LiveScreen() {
                 )
         )
 
-        // ── Top Bar: Connection Badge, Quality (SD/HD), and Aspect Ratio ──
+        // ── Top Bar: Connection Badge, Quality (SD/HD), Audio Mute & Aspect Ratio ──
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -258,61 +451,69 @@ fun LiveScreen() {
                         modifier = Modifier
                             .size(10.dp)
                             .background(
-                                if (connectionType == EndpointResolver.ConnectionType.LAN) LanGreen else WanBlue,
+                                if (connectionType == ConnectionType.LAN) LanGreen else CyanAccent,
                                 CircleShape
                             )
                     )
                     Text(
-                        text = if (connectionType == EndpointResolver.ConnectionType.LAN) "LAN (Thuis)" else "5G (Onderweg)",
-                        style = MaterialTheme.typography.labelMedium,
+                        text = if (connectionType == ConnectionType.LAN) "🟢 Direct LAN" else "🌐 5G / WAN Live",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                         color = TextPrimary
                     )
                 }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                // Adaptive SD / HD Quality Toggle
+            // Controls: Mute Speaker + SD/HD Toggle + Fit/Fill
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Speaker Mute Toggle
+                Surface(
+                    color = if (isSpeakerMuted) CoralDecline.copy(alpha = 0.3f) else SurfaceGlass,
+                    shape = RoundedCornerShape(20.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, if (isSpeakerMuted) CoralDecline else DividerDark),
+                    modifier = Modifier.clickable { isSpeakerMuted = !isSpeakerMuted }
+                ) {
+                    Box(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                        Icon(
+                            imageVector = if (isSpeakerMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                            contentDescription = "Deurbel Geluid",
+                            tint = if (isSpeakerMuted) CoralDecline else EmeraldPrimary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
+                // SD / HD Toggle
                 Surface(
                     color = SurfaceGlass,
                     shape = RoundedCornerShape(20.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, if (isHd) EmeraldPrimary else DividerDark),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, DividerDark),
                     modifier = Modifier.clickable {
                         isHd = !isHd
                         startStream()
                     }
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Icon(
-                            imageVector = if (isHd) Icons.Default.HighQuality else Icons.Default.Speed,
-                            contentDescription = "Kwaliteit",
-                            tint = if (isHd) EmeraldPrimary else CyanAccent,
-                            modifier = Modifier.size(16.dp)
-                        )
                         Text(
-                            text = if (isHd) "HD 1080p" else "SD (5G)",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (isHd) EmeraldPrimary else TextPrimary,
-                            fontWeight = FontWeight.Bold
+                            text = if (isHd) "HD 1080p" else "SD 432p",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = if (isHd) EmeraldPrimary else CyanAccent
                         )
                     }
                 }
 
-                // Aspect ratio toggle button (Fit vs Fill)
+                // Fit / Fill Toggle
                 Surface(
                     color = SurfaceGlass,
                     shape = RoundedCornerShape(20.dp),
                     border = androidx.compose.foundation.BorderStroke(1.dp, DividerDark),
-                    modifier = Modifier.clickable {
-                        isFitMode = !isFitMode
-                        session?.setScalingType(
-                            if (isFitMode) RendererCommon.ScalingType.SCALE_ASPECT_FIT
-                            else RendererCommon.ScalingType.SCALE_ASPECT_FILL
-                        )
-                    }
+                    modifier = Modifier.clickable { isFitMode = !isFitMode }
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -429,12 +630,20 @@ fun LiveScreen() {
                         when (motionEvent.action) {
                             MotionEvent.ACTION_DOWN -> {
                                 isPttActive = true
-                                session?.setMicrophoneMuted(false)
+                                if (isExoMode) {
+                                    audioStreamer.startStreaming(activeBaseUrl)
+                                } else {
+                                    session?.setMicrophoneMuted(false)
+                                }
                                 true
                             }
                             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                                 isPttActive = false
-                                session?.setMicrophoneMuted(true)
+                                if (isExoMode) {
+                                    audioStreamer.stopStreaming()
+                                } else {
+                                    session?.setMicrophoneMuted(true)
+                                }
                                 true
                             }
                             else -> false
@@ -449,15 +658,15 @@ fun LiveScreen() {
                     Icon(
                         imageVector = if (isPttActive) Icons.Default.Mic else Icons.Default.MicOff,
                         contentDescription = "Push-to-Talk",
-                        tint = if (isPttActive) Color.White else TextPrimary,
-                        modifier = Modifier.size(26.dp)
+                        tint = if (isPttActive) Color.White else EmeraldPrimary,
+                        modifier = Modifier.size(24.dp)
                     )
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = if (isPttActive) "AAN HET SPREKEN… (LOSLATEN = MUTE)" else "HOUD INGEDRUKT OM TE PRATEN",
+                        text = if (isPttActive) "Laat los om te stoppen met praten" else "Ingedrukt houden om te praten",
                         color = if (isPttActive) Color.White else TextPrimary,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp
+                        fontSize = 14.sp
                     )
                 }
             }

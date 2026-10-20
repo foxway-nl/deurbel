@@ -157,7 +157,7 @@ class SmartDetector:
             max_scores = np.max(classes_scores, axis=0)
             class_ids = np.argmax(classes_scores, axis=0)
 
-            threshold = 0.40  # Confidence threshold
+            threshold = 0.45  # Stricter confidence threshold to prevent false positives
             valid_indices = np.where(max_scores >= threshold)[0]
 
             for idx in valid_indices:
@@ -322,6 +322,10 @@ class SmartDetector:
     ) -> None:
         """Handle confirmed AI detection: save clip and notify."""
         # 1. Check if category is enabled for recording
+        if category in ("person", "vehicle", "animal") and confidence < 0.45:
+            logger.info("Category '%s' confidence %.2f below 0.45 threshold, skipping clip", category, confidence)
+            return
+
         should_record = False
         should_notify = False
 

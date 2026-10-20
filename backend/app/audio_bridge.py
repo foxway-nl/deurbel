@@ -37,14 +37,14 @@ def _get_credentials() -> tuple[str, int, str, str]:
         ip = res.get("camera_ip") or os.getenv("FOXWAY_DOORBELL_IP", "192.168.2.31")
         port = int(res.get("camera_sdk_port") or os.getenv("FOXWAY_DOORBELL_SDK_PORT", "8000"))
         user = res.get("camera_user") or os.getenv("FOXWAY_DOORBELL_USER", "admin")
-        pw = res.get("camera_pass") or os.getenv("FOXWAY_DOORBELL_PASS", "")
+        pw = res.get("camera_pass") or os.getenv("FOXWAY_DOORBELL_PASS", "aero2006Mo_")
         return ip, port, user, pw
     except Exception:
         return (
             os.getenv("FOXWAY_DOORBELL_IP", "192.168.2.31"),
             int(os.getenv("FOXWAY_DOORBELL_SDK_PORT", "8000")),
             os.getenv("FOXWAY_DOORBELL_USER", "admin"),
-            os.getenv("FOXWAY_DOORBELL_PASS", ""),
+            os.getenv("FOXWAY_DOORBELL_PASS", "aero2006Mo_"),
         )
 
 # Master locks and active session tracking
@@ -485,3 +485,131 @@ async def play_audio_to_doorbell_async(
     """Async wrapper ensuring single-access lock to the doorbell speaker."""
     async with _speak_lock:
         return await asyncio.to_thread(send_audio_to_doorbell, audio_data, file_path)
+
+
+async def run_acoustic_loopback_test(rtsp_url: Optional[str] = None) -> dict:
+    """
+    True End-to-End Acoustic Loopback Verification:
+    1. Simultaneously opens RTSP incoming microphone audio stream via ffmpeg to capture 3.5s.
+    2. While recording, transmits 1000 Hz sine wave via Port 8000 SDK to doorbell outdoor speaker for 2.0s.
+    3. Runs FFT frequency analysis (numpy.fft.rfft) on captured mic audio.
+    4. Verifies peak at 950 Hz - 1050 Hz with SNR calculation.
+    """
+    async with _speak_lock:
+        return await asyncio.to_thread(_run_acoustic_loopback_sync, rtsp_url)
+
+
+def _run_acoustic_loopback_sync(rtsp_url: Optional[str] = None) -> dict:
+    import numpy as np
+    from app.config import settings
+    url = rtsp_url or settings.GO2RTC_RTSP_URL
+
+    cmd = [
+        "ffmpeg", "-y", "-nostdin", "-fflags", "nobuffer", "-flags", "low_delay",
+        "-rtsp_transport", "tcp", "-i", url,
+        "-vn", "-f", "s16le", "-ac", "1", "-ar", "16000",
+        "-loglevel", "quiet", "-"
+    ]
+    proc = None
+    buf = bytearray()
+    running = True
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=65536
+        )
+
+        def reader():
+            while running and proc and proc.stdout:
+                try:
+                    chunk = proc.stdout.read(4000)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+                except Exception:
+                    break
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+
+        time.sleep(0.5)
+        speaker_ok = send_test_tone_to_doorbell(duration=2.0, volume=0.5)
+        time.sleep(1.0)
+        running = False
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        t.join(timeout=1.0)
+
+        if len(buf) < 16000:
+            logger.warning("Acoustic loopback capture buffer incomplete: %d bytes", len(buf))
+            return {
+                "status": "error",
+                "passed": False,
+                "speaker_sent": bool(speaker_ok),
+                "mic_loopback_detected": False,
+                "peak_hz": 0.0,
+                "snr_db": 0.0,
+                "message": "Microfoon opname via RTSP mislukt of onvoldoende data",
+            }
+
+        pcm = np.frombuffer(buf, dtype=np.int16)
+        rate = 16000
+        fft_vals = np.abs(np.fft.rfft(pcm))
+        freqs = np.fft.rfftfreq(len(pcm), 1.0 / rate)
+
+        target_idx = np.where((freqs >= 950) & (freqs <= 1050))[0]
+        if len(target_idx) == 0:
+            return {
+                "status": "error",
+                "passed": False,
+                "speaker_sent": bool(speaker_ok),
+                "mic_loopback_detected": False,
+                "peak_hz": 0.0,
+                "snr_db": 0.0,
+                "message": "Frequentie bereik 950-1050 Hz niet gevonden in FFT",
+            }
+
+        peak_idx = target_idx[np.argmax(fft_vals[target_idx])]
+        peak_freq = float(freqs[peak_idx])
+        peak_mag = float(fft_vals[peak_idx])
+
+        noise_mask = (freqs >= 300) & (freqs <= 3000) & ~((freqs >= 900) & (freqs <= 1100))
+        noise_floor = float(np.median(fft_vals[noise_mask])) + 1e-6
+        snr_db = float(20 * np.log10(peak_mag / noise_floor))
+
+        detected = bool((950 <= peak_freq <= 1050) and (snr_db >= 6.0))
+
+        return {
+            "status": "ok",
+            "passed": detected,
+            "speaker_sent": bool(speaker_ok),
+            "mic_loopback_detected": detected,
+            "peak_hz": round(peak_freq, 1),
+            "snr_db": round(snr_db, 1),
+            "message": f"✅ Test Geslaagd: Piek {peak_freq:.0f} Hz ({snr_db:.1f} dB)" if detected else f"❌ Geen duidelijke piek waargenomen ({peak_freq:.0f} Hz, {snr_db:.1f} dB)",
+        }
+    except Exception as e:
+        logger.error("Acoustic loopback test exception: %s", e)
+        return {
+            "status": "error",
+            "passed": False,
+            "speaker_sent": False,
+            "mic_loopback_detected": False,
+            "peak_hz": 0.0,
+            "snr_db": 0.0,
+            "message": f"Fout tijdens loopback test: {e}",
+        }
+    finally:
+        running = False
+        if proc and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+

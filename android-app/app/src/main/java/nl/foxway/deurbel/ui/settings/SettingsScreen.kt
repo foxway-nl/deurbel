@@ -44,6 +44,7 @@ import nl.foxway.deurbel.data.AppLogger
 import nl.foxway.deurbel.data.LogCategory
 import nl.foxway.deurbel.data.LogEntry
 import nl.foxway.deurbel.data.models.*
+import coil.compose.AsyncImage
 import nl.foxway.deurbel.network.ApiClientFactory
 import nl.foxway.deurbel.network.EndpointResolver
 import nl.foxway.deurbel.ui.theme.*
@@ -97,6 +98,8 @@ fun SettingsScreen(
     // Smart AI Detection & Storage settings state
     var detectionSettings by remember { mutableStateOf(DetectionSettingsDto()) }
     var storageStats by remember { mutableStateOf(StorageStatsDto()) }
+    var currentApiBaseUrl by remember { mutableStateOf("http://192.168.2.1:8090") }
+    var isCleaningJunk by remember { mutableStateOf(false) }
 
     // Dialogs
     var showHardwareTestDialog by remember { mutableStateOf(false) }
@@ -117,6 +120,7 @@ fun SettingsScreen(
         coroutineScope.launch {
             try {
                 val resolved = resolver.resolve()
+                currentApiBaseUrl = resolved.apiBaseUrl
                 val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
                 val det = api.getDetectionSettings()
                 if (det.isSuccessful) {
@@ -575,24 +579,202 @@ fun SettingsScreen(
                         )
                     }
 
-                    // Activiteitszone Masker
-                    Surface(
-                        color = SurfaceVariantDark,
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.fillMaxWidth()
+                    // Activiteitszone Slider & Live Voorbeeld
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(imageVector = Icons.Default.Crop, contentDescription = null, tint = TextSecondary)
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Icon(imageVector = Icons.Default.Crop, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(18.dp))
+                                Text("Activiteitszone (Bovenkant negeren)", fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                            }
                             Text(
-                                text = "Activiteitszone: Straatfilter negeert bovenste ${detectionSettings.activityZoneTopIgnorePercent}% van het beeld.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary
+                                text = "${detectionSettings.activityZoneTopIgnorePercent}%",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = CyanAccent
                             )
                         }
+                        Text(
+                            text = "Negeert beweging op straat of overhangende bomen in de bovenste zone van het camerabeeld (0% - 70%).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
+                        )
+
+                        Slider(
+                            value = detectionSettings.activityZoneTopIgnorePercent.toFloat(),
+                            onValueChange = { newPct ->
+                                detectionSettings = detectionSettings.copy(activityZoneTopIgnorePercent = newPct.toInt())
+                            },
+                            onValueChangeFinished = {
+                                saveDetection(detectionSettings)
+                            },
+                            valueRange = 0f..70f,
+                            steps = 13,
+                            colors = SliderDefaults.colors(
+                                thumbColor = CyanAccent,
+                                activeTrackColor = CyanAccent,
+                                inactiveTrackColor = SurfaceVariantDark
+                            )
+                        )
+
+                        // Live Snapshot Preview with Red Line Overlay
+                        var previewTimestamp by remember { mutableLongStateOf(System.currentTimeMillis()) }
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = BackgroundDark,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(180.dp)
+                                .border(1.dp, DividerDark, RoundedCornerShape(12.dp))
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                val previewUrl = "$currentApiBaseUrl/api/v1/activity-zone/preview?top_pct=${detectionSettings.activityZoneTopIgnorePercent}&t=$previewTimestamp"
+                                AsyncImage(
+                                    model = previewUrl,
+                                    contentDescription = "Activiteitszone Voorbeeld",
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                                )
+                                IconButton(
+                                    onClick = { previewTimestamp = System.currentTimeMillis() },
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(6.dp)
+                                        .size(32.dp)
+                                        .background(BackgroundDark.copy(alpha = 0.6f), CircleShape)
+                                ) {
+                                    Icon(Icons.Default.Refresh, contentDescription = "Vernieuw snapshot", tint = TextPrimary, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── 3a2. Meldingen bij Beweging & AI Detectie ──────────────────────
+            Text("Meldingen bij Beweging & AI Detectie", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+            Card(
+                colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, DividerDark, RoundedCornerShape(16.dp))
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Text("Stel in voor welke gedetecteerde gebeurtenissen je een pushmelding op je telefoon ontvangt:", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+
+                    // 1. Mensen melding
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f).padding(end = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Person, contentDescription = null, tint = EmeraldPrimary, modifier = Modifier.size(20.dp))
+                            Column {
+                                Text("Melding bij Persoon", color = TextPrimary, fontWeight = FontWeight.Medium)
+                                Text("Directe pushmelding als er iemand bij de voordeur loopt", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                            }
+                        }
+                        Switch(
+                            checked = detectionSettings.notifyPerson,
+                            onCheckedChange = { saveDetection(detectionSettings.copy(notifyPerson = it)) },
+                            enabled = detectionSettings.detectionEnabled && detectionSettings.recordPerson,
+                            colors = modernSwitchColors
+                        )
+                    }
+
+                    HorizontalDivider(color = DividerDark)
+
+                    // 2. Voertuigen melding
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f).padding(end = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.DirectionsCar, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(20.dp))
+                            Column {
+                                Text("Melding bij Voertuig", color = TextPrimary, fontWeight = FontWeight.Medium)
+                                Text("Pushmelding bij auto's, bezorgbussen of fietsers", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                            }
+                        }
+                        Switch(
+                            checked = detectionSettings.notifyVehicle,
+                            onCheckedChange = { saveDetection(detectionSettings.copy(notifyVehicle = it)) },
+                            enabled = detectionSettings.detectionEnabled && detectionSettings.recordVehicle,
+                            colors = modernSwitchColors
+                        )
+                    }
+
+                    HorizontalDivider(color = DividerDark)
+
+                    // 3. Dieren melding
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f).padding(end = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Pets, contentDescription = null, tint = Color(0xFFF59E0B), modifier = Modifier.size(20.dp))
+                            Column {
+                                Text("Melding bij Dier", color = TextPrimary, fontWeight = FontWeight.Medium)
+                                Text("Pushmelding bij katten, honden of vogels", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                            }
+                        }
+                        Switch(
+                            checked = detectionSettings.notifyAnimal,
+                            onCheckedChange = { saveDetection(detectionSettings.copy(notifyAnimal = it)) },
+                            enabled = detectionSettings.detectionEnabled && detectionSettings.recordAnimal,
+                            colors = modernSwitchColors
+                        )
+                    }
+
+                    HorizontalDivider(color = DividerDark)
+
+                    // 4. Overige beweging melding
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f).padding(end = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.MotionPhotosOn, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(20.dp))
+                            Column {
+                                Text("Melding bij Overige Beweging", color = TextPrimary, fontWeight = FontWeight.Medium)
+                                Text("Pushmelding bij pixelbeweging zonder objectherkenning", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                            }
+                        }
+                        Switch(
+                            checked = detectionSettings.notifyMotion,
+                            onCheckedChange = { saveDetection(detectionSettings.copy(notifyMotion = it)) },
+                            enabled = detectionSettings.detectionEnabled && detectionSettings.recordMotion,
+                            colors = modernSwitchColors
+                        )
                     }
                 }
             }
@@ -712,6 +894,49 @@ fun SettingsScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = TextPrimary
                             )
+                        }
+                    }
+
+                    HorizontalDivider(color = DividerDark)
+
+                    OutlinedButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                try {
+                                    isCleaningJunk = true
+                                    val resolved = resolver.resolve()
+                                    val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                                    val resp = api.cleanupUnclassifiedClips(includeVehicles = true)
+                                    if (resp.isSuccessful) {
+                                        val body = resp.body()
+                                        val del = (body?.get("deleted_count") as? Number)?.toInt() ?: 0
+                                        val freed = (body?.get("freed_mb") as? Number)?.toDouble() ?: 0.0
+                                        Toast.makeText(context, "🧹 Opschonen voltooid: $del opnames gewist (${String.format(java.util.Locale.US, "%.1f", freed)} MB vrijgemaakt)", Toast.LENGTH_LONG).show()
+                                        loadRemoteSettings()
+                                    } else {
+                                        Toast.makeText(context, "Opschonen mislukt: HTTP ${resp.code()}", Toast.LENGTH_SHORT).show()
+                                    }
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Fout: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                } finally {
+                                    isCleaningJunk = false
+                                }
+                            }
+                        },
+                        enabled = !isCleaningJunk,
+                        modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 44.dp),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = CoralDecline),
+                        border = BorderStroke(1.dp, CoralDecline.copy(alpha = 0.5f))
+                    ) {
+                        if (isCleaningJunk) {
+                            CircularProgressIndicator(color = CoralDecline, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Bezig met opschonen...")
+                        } else {
+                            Icon(imageVector = Icons.Default.DeleteSweep, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("🧹 Wis alle niet-geclassificeerde / oude bewegingsopnames", fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
@@ -1199,7 +1424,7 @@ private fun HardwareTestDialog(
                 }
 
                 Text(
-                    text = "Stuurt een zuivere 1000 Hz pieptoon (2-3s) via de FastAPI audio-bridge (Hikvision poort 8000 / ISAPI) direct naar de buiten-luidspreker van de deurbel (192.168.2.31). Ga buiten bij de deurbel staan om de luidspreker te controleren.",
+                    text = "Voert een volledige akoestische loopback test uit: de backend zendt een 1000 Hz pieptoon naar de deurbel-luidspreker (192.168.2.31:8000), luistert gelijktijdig via de microfoon (RTSP) en berekent de frequentiepiek via FFT en de signaal-ruisverhouding (SNR).",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )
@@ -1213,18 +1438,18 @@ private fun HardwareTestDialog(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(
-                            text = "Audio stream naar deurbel speaker:",
+                            text = "Akoestische loopback verificatie:",
                             style = MaterialTheme.typography.labelMedium,
                             color = TextPrimary
                         )
                         Text(
-                            text = if (isTestingAudio) "Bezig met streamen…" else if (testPassed == true) "Verzonden" else "Gereed",
+                            text = if (isTestingAudio) "Bezig met loopback analyse…" else if (testPassed == true) "Geslaagd" else if (testPassed == false) "Mislukt" else "Gereed",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (isTestingAudio) CyanAccent else if (testPassed == true) LanGreen else TextSecondary
+                            color = if (isTestingAudio) CyanAccent else if (testPassed == true) LanGreen else if (testPassed == false) CoralDecline else TextSecondary
                         )
                     }
                     LinearProgressIndicator(
-                        progress = if (isTestingAudio) (testElapsedSec / 3f).coerceIn(0f, 1f) else if (testPassed == true) 1f else 0f,
+                        progress = if (isTestingAudio) (testElapsedSec / 4f).coerceIn(0f, 1f) else if (testPassed == true) 1f else 0f,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(10.dp)
@@ -1268,15 +1493,22 @@ private fun HardwareTestDialog(
                             try {
                                 isTestingAudio = true
                                 testPassed = null
-                                audioTestResult = "Bezig met verzenden van 1000 Hz pieptoon naar deurbel…"
-                                audioTestDetail = "Audio-pakketjes worden via de backend bridge naar 192.168.2.31:8000 gestreamd."
+                                audioTestResult = "Bezig met akoestische loopback test…"
+                                audioTestDetail = "Toon wordt verzonden naar 192.168.2.31:8000 en microfoon-audio wordt geanalyseerd..."
                                 val resolved = resolver.resolve()
                                 val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
-                                val resp = api.speakAudio(replyId = "test_tone")
-                                if (resp.isSuccessful) {
-                                    testPassed = true
-                                    audioTestResult = "✅ Geluid Verzonden naar Luidspreker!"
-                                    audioTestDetail = "De 1000 Hz test-pieptoon is succesvol naar de buiten-luidspreker gestuurd. Heb je het geluid buiten bij de deurbel gehoord?"
+                                val resp = api.testAudioLoopback()
+                                if (resp.isSuccessful && resp.body() != null) {
+                                    val b = resp.body()!!
+                                    if (b.passed) {
+                                        testPassed = true
+                                        audioTestResult = "✅ Akoestische Loopback Geslaagd!"
+                                        audioTestDetail = "• Luidspreker: Succesvol verzonden\n• Microfoon loopback: Waargenomen!\n• Frequentiepiek: ${b.peakHz} Hz (doel: 950-1050 Hz)\n• Signaal-ruisverhouding: ${b.snrDb} dB"
+                                    } else {
+                                        testPassed = false
+                                        audioTestResult = "⚠️ Geen akoestische piek waargenomen"
+                                        audioTestDetail = "• Luidspreker: ${if (b.speakerSent) "Verzonden" else "Mislukt"}\n• Microfoon: ${b.message}\n• Piek: ${b.peakHz} Hz (${b.snrDb} dB)"
+                                    }
                                 } else {
                                     testPassed = false
                                     audioTestResult = "❌ Fout: HTTP ${resp.code()}"

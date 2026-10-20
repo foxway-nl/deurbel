@@ -47,6 +47,7 @@ from app.audio_bridge import (
     send_test_tone_to_doorbell,
     send_audio_to_doorbell,
     play_audio_to_doorbell_async,
+    run_acoustic_loopback_test,
     LiveVoiceComSession,
 )
 
@@ -789,8 +790,8 @@ async def serve_snapshot(filename: str):
 
 @app.get("/api/v1/clips")
 @app.get("/api/clips")
-async def get_clips(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
-    """List all clips sorted newest first."""
+async def get_clips(limit: int = Query(200, ge=1, le=1000), offset: int = Query(0, ge=0)):
+    """List all clips sorted newest first with duration and file size."""
     clips = await list_clips(limit=limit, offset=offset)
     result = []
     for c in clips:
@@ -800,10 +801,19 @@ async def get_clips(limit: int = Query(100, ge=1, le=500), offset: int = Query(0
         if not snap_path.exists() or snap_path.stat().st_size == 0:
             asyncio.create_task(ensure_thumbnail(clip_id, c.get("video_path")))
 
+        size_bytes = 0
+        v_path = c.get("video_path") or str(settings.CLIPS_DIR / f"{clip_id}.mp4")
+        if os.path.exists(v_path):
+            try:
+                size_bytes = os.path.getsize(v_path)
+            except Exception:
+                pass
+
         result.append({
             "id": clip_id,
             "timestamp": c["created_at"],
             "duration": c.get("duration", 0.0),
+            "size_bytes": size_bytes,
             "snapshot_url": f"/api/v1/snapshots/{clip_id}.jpg",
             "video_url": f"/api/v1/clips/{clip_id}/stream",
             "answered_by": c.get("answered_by"),
@@ -888,6 +898,53 @@ async def delete_clip_endpoint(clip_id: str):
             except Exception:
                 pass
     return {"status": "deleted", "clip_id": clean_id}
+
+
+@app.post("/api/v1/clips/cleanup-unclassified")
+@app.post("/api/clips/cleanup-unclassified")
+async def cleanup_unclassified_clips(include_unstarred_vehicles: bool = Query(True)):
+    """
+    Cleans up junk unclassified and unstarred motion/vehicle clips to free server storage.
+    """
+    import aiosqlite
+    deleted_count = 0
+    freed_bytes = 0
+
+    where_clause = "(answered_by = '' OR answered_by LIKE '%Beweging%' OR clip_id LIKE 'motion_%' OR clip_id LIKE 'ai_motion_%')"
+    if include_unstarred_vehicles:
+        where_clause += " OR (starred = 0 AND clip_id LIKE 'ai_vehicle_%')"
+
+    async with aiosqlite.connect(settings.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(f"SELECT clip_id, video_path, snapshot_path FROM clips WHERE {where_clause}")
+        rows = await cur.fetchall()
+
+        for r in rows:
+            clip_id = r["clip_id"]
+            v_path = r["video_path"] or str(settings.CLIPS_DIR / f"{clip_id}.mp4")
+            s_path = r["snapshot_path"] or str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg")
+
+            for p in [v_path, s_path, str(settings.CLIPS_DIR / f"{clip_id}.mp4"), str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg")]:
+                if os.path.exists(p):
+                    try:
+                        freed_bytes += os.path.getsize(p)
+                        os.remove(p)
+                    except Exception:
+                        pass
+
+            await db.execute("DELETE FROM clips WHERE clip_id = ?", (clip_id,))
+            deleted_count += 1
+
+        await db.commit()
+
+    logger.info("Cleaned up %d junk clips (freed %.1f MB)", deleted_count, freed_bytes / (1024 * 1024))
+    return {
+        "status": "ok",
+        "deleted_count": deleted_count,
+        "freed_mb": round(freed_bytes / (1024 * 1024), 2),
+        "message": f"Succesvol {deleted_count} niet-geclassificeerde/oude opnames verwijderd ({round(freed_bytes / (1024 * 1024), 1)} MB vrijgemaakt)"
+    }
+
 
 
 @app.get("/clips/foxway-deurbel.apk")
@@ -1069,6 +1126,57 @@ async def update_detection_settings_endpoint(body: DetectionSettingsModel):
     return body
 
 
+@app.get("/api/v1/activity-zone/preview", tags=["Smart AI Detection"])
+@app.get("/api/activity-zone/preview", tags=["Smart AI Detection"])
+async def activity_zone_preview(top_pct: int = Query(20, ge=0, le=80)):
+    """Live preview snapshot showing the ignored activity zone overlay (0% to 80%)."""
+    import cv2
+    import numpy as np
+    snap_data = None
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            resp = await client.get(f"{settings.GO2RTC_API_URL}/api/frame.jpeg?src=deurbel")
+            if resp.status_code == 200:
+                snap_data = resp.content
+    except Exception:
+        pass
+
+    if not snap_data:
+        # Fallback to local snapshot file if any exists
+        existing = sorted(settings.SNAPSHOTS_DIR.glob("*.jpg"), key=os.path.getmtime, reverse=True)
+        if existing:
+            snap_data = existing[0].read_bytes()
+
+    if not snap_data:
+        raise HTTPException(502, "Could not capture camera frame for preview")
+
+    nparr = np.frombuffer(snap_data, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(500, "Failed to decode camera frame")
+
+    h, w = img.shape[:2]
+    ignore_h = int(h * (top_pct / 100.0))
+
+    if ignore_h > 0:
+        overlay = img.copy()
+        # Red semi-transparent overlay
+        cv2.rectangle(overlay, (0, 0), (w, ignore_h), (0, 0, 220), -1)
+        cv2.addWeighted(overlay, 0.40, img, 0.60, 0, img)
+        # Red dividing line
+        cv2.line(img, (0, ignore_h), (w, ignore_h), (0, 0, 255), 3)
+        # Text label
+        label = f"Genegeerde straat-zone ({top_pct}%)"
+        cv2.putText(img, label, (20, max(35, ignore_h - 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+
+    success, encoded = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not success:
+        raise HTTPException(500, "Failed to encode preview image")
+
+    return Response(content=encoded.tobytes(), media_type="image/jpeg")
+
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  ROUTES: Storage Management & Retention Days
 # ══════════════════════════════════════════════════════════════════════
@@ -1176,85 +1284,18 @@ def _goertzel_mag(samples: tuple[int, ...], sample_rate: int, target_freq: float
     return max(0.0, power / n)
 
 
+@app.post("/api/v1/audio/test")
+@app.post("/api/v1/test/audio")
 @app.post("/api/v1/test/audio-loopback")
 async def test_audio_loopback_endpoint():
     """
-    Acoustic Loopback & Frequency Test (Requirement #3):
-    1. Injects a 5-second alternating 1000Hz and 1800Hz test pattern into the outdoor speaker.
-    2. Concurrently captures 5s of incoming audio from the RTSP stream.
-    3. Runs Goertzel frequency band-pass filters to verify speaker and mic functionality.
+    True End-to-End Acoustic Loopback Verification:
+    1. Simultaneously opens RTSP incoming microphone audio stream via ffmpeg to capture 3.5s.
+    2. While recording, transmits 1000 Hz sine wave via Port 8000 SDK to doorbell outdoor speaker for 2.0s.
+    3. Runs FFT frequency analysis (numpy.fft.rfft) on captured mic audio.
+    4. Verifies peak at 950 Hz - 1050 Hz with SNR calculation.
     """
-    # 1. Start audio pattern playback on outside speaker via hardware audio bridge
-    playback_task = asyncio.create_task(play_audio_to_doorbell_async(file_path=settings.AUDIO_REPLIES_DIR / "test_loopback.wav"))
-
-    # 2. Capture 5 seconds of RTSP audio
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-rtsp_transport", "tcp",
-        "-i", settings.GO2RTC_RTSP_URL,
-        "-t", "5.2",
-        "-vn",
-        "-f", "s16le",
-        "-ac", "1",
-        "-ar", "16000",
-        "pipe:1"
-    ]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await proc.communicate()
-        await playback_task
-
-        sample_count = len(stdout) // 2
-        if sample_count < 1600:
-            return {
-                "status": "success",
-                "passed": True,
-                "detected_ratio": 0.85,
-                "tone_1000_detected": True,
-                "tone_1800_detected": True,
-                "message": "✅ Test Geslaagd (Speaker & Microfoon 100% geverifieerd)",
-            }
-
-        samples = struct.unpack(f"<{sample_count}h", stdout[:sample_count * 2])
-        window_size = 3200  # 200ms per window
-        detected_windows = 0
-        total_windows = max(1, sample_count // window_size)
-
-        for i in range(total_windows):
-            chunk = samples[i * window_size : (i + 1) * window_size]
-            p1000 = _goertzel_mag(chunk, 16000, 1000.0)
-            p1800 = _goertzel_mag(chunk, 16000, 1800.0)
-            total_power = sum(s * s for s in chunk) / len(chunk) + 1e-6
-            tone_ratio = (p1000 + p1800) / total_power
-            if tone_ratio > 0.02 or p1000 > 500 or p1800 > 500:
-                detected_windows += 1
-
-        pass_ratio = detected_windows / total_windows
-        passed = pass_ratio >= 0.20 or detected_windows >= 2
-
-        return {
-            "status": "success" if passed else "failed",
-            "passed": passed,
-            "detected_ratio": round(pass_ratio, 2),
-            "tone_1000_detected": True,
-            "tone_1800_detected": True,
-            "message": "✅ Test Geslaagd (Speaker & Microfoon 100% geverifieerd)" if passed else "❌ Signaal te zwak / niet gehoord",
-        }
-    except Exception as e:
-        logger.exception("Loopback test error: %s", e)
-        return {
-            "status": "success",
-            "passed": True,
-            "detected_ratio": 0.80,
-            "tone_1000_detected": True,
-            "tone_1800_detected": True,
-            "message": "✅ Test Geslaagd (Speaker & Microfoon 100% geverifieerd)",
-        }
+    return await run_acoustic_loopback_test()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1295,14 +1336,6 @@ async def audio_speak_endpoint(
         }
     raise HTTPException(status_code=500, detail="Failed to stream audio to doorbell speaker")
 
-
-@app.post("/api/v1/test/audio")
-async def test_audio_endpoint():
-    """Simple test: sends pre-recorded greeting directly to the doorbell outdoor speaker."""
-    ok = await play_audio_to_doorbell_async(file_path=settings.AUDIO_REPLIES_DIR / "pakketje.wav")
-    if ok:
-        return {"status": "ok", "message": "Test audio played through doorbell speaker"}
-    raise HTTPException(500, "Failed to stream test audio to doorbell speaker")
 
 
 @app.websocket("/api/v1/ws/talk")
