@@ -1,0 +1,8 @@
+*.apk
+clips/*.mp4
+clips/*.jpg
+__pycache__/
+.gradle/
+build/
+.env
+*.onnx
