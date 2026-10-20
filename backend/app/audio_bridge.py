@@ -34,17 +34,19 @@ def _get_credentials() -> tuple[str, int, str, str]:
         cur = con.cursor()
         res = dict(cur.execute("SELECT key, value FROM app_settings WHERE key LIKE 'camera_%'").fetchall())
         con.close()
-        ip = res.get("camera_ip") or os.getenv("FOXWAY_DOORBELL_IP", "192.168.2.31")
-        port = int(res.get("camera_sdk_port") or os.getenv("FOXWAY_DOORBELL_SDK_PORT", "8000"))
-        user = res.get("camera_user") or os.getenv("FOXWAY_DOORBELL_USER", "admin")
-        pw = res.get("camera_pass") or os.getenv("FOXWAY_DOORBELL_PASS", "aero2006Mo_")
+        from app.config import settings
+        ip = res.get("camera_ip") or settings.DOORBELL_IP
+        port = int(res.get("camera_sdk_port") or settings.DOORBELL_SDK_PORT)
+        user = res.get("camera_user") or settings.DOORBELL_USER
+        pw = res.get("camera_pass") or settings.DOORBELL_PASS
         return ip, port, user, pw
     except Exception:
+        from app.config import settings
         return (
-            os.getenv("FOXWAY_DOORBELL_IP", "192.168.2.31"),
-            int(os.getenv("FOXWAY_DOORBELL_SDK_PORT", "8000")),
-            os.getenv("FOXWAY_DOORBELL_USER", "admin"),
-            os.getenv("FOXWAY_DOORBELL_PASS", "aero2006Mo_"),
+            settings.DOORBELL_IP,
+            int(settings.DOORBELL_SDK_PORT),
+            settings.DOORBELL_USER,
+            settings.DOORBELL_PASS,
         )
 
 # Master locks and active session tracking

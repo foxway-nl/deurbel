@@ -93,6 +93,7 @@ from app.recorder import (
     get_storage_stats,
     inject_audio_reply,
     remove_clip,
+    ring_buffer,
     start_manual_recording,
     start_recording,
     stop_manual_recording,
@@ -154,8 +155,11 @@ async def _doorbell_health_monitor() -> None:
         try:
             loop = asyncio.get_running_loop()
             online = False
-            for port in (settings.DOORBELL_SDK_PORT, 554):
-                if await loop.run_in_executor(None, _check_tcp_port, settings.DOORBELL_IP, port, 2.0):
+            creds = await get_camera_credentials()
+            cam_ip = creds["ip"]
+            cam_port = creds["port"]
+            for port in (cam_port, 554):
+                if await loop.run_in_executor(None, _check_tcp_port, cam_ip, port, 2.0):
                     online = True
                     break
 
@@ -164,16 +168,16 @@ async def _doorbell_health_monitor() -> None:
                 _doorbell_last_seen = now
                 if not _doorbell_online:
                     _doorbell_online = True
-                    logger.info("Doorbell 192.168.2.31 is back ONLINE")
-                    await ws_manager.broadcast("DOORBELL_STATUS", {"online": True, "ip": settings.DOORBELL_IP})
+                    logger.info("Doorbell %s is back ONLINE", cam_ip)
+                    await ws_manager.broadcast("DOORBELL_STATUS", {"online": True, "ip": cam_ip})
             else:
                 downtime = now - _doorbell_last_seen
                 if downtime > 120 and _doorbell_online:
                     _doorbell_online = False
-                    logger.warning("Doorbell 192.168.2.31 OFFLINE for >2 minutes (%.0fs)", downtime)
+                    logger.warning("Doorbell %s OFFLINE for >2 minutes (%.0fs)", cam_ip, downtime)
                     await ws_manager.broadcast(
                         "DOORBELL_STATUS",
-                        {"online": False, "ip": settings.DOORBELL_IP, "downtime_seconds": int(downtime)},
+                        {"online": False, "ip": cam_ip, "downtime_seconds": int(downtime)},
                     )
         except Exception as e:
             logger.warning("Health monitor loop error: %s", e)
@@ -267,6 +271,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not start ring detector: %s", e)
 
+    # Start RAM Ring Buffer for continuous smart pre-roll
+    try:
+        await ring_buffer.start()
+    except Exception as e:
+        logger.warning("Could not start RAM Ring Buffer: %s", e)
+
     logger.info("✅ Backend ready")
     yield
 
@@ -278,6 +288,10 @@ async def lifespan(app: FastAPI):
         _health_task.cancel()
     try:
         await smart_detector.stop()
+    except Exception:
+        pass
+    try:
+        await ring_buffer.stop()
     except Exception:
         pass
     try:
@@ -323,16 +337,28 @@ app.add_middleware(
 # ══════════════════════════════════════════════════════════════════════
 
 def _is_local_request(request: Request) -> bool:
-    """Check if the request originates from the configured LAN subnet or localhost."""
-    client_ip = request.client.host if request.client else "0.0.0.0"
-    try:
-        ip = ipaddress.ip_address(client_ip)
-        if ip.is_loopback:
-            return True
-        network = ipaddress.ip_network(settings.LAN_SUBNET, strict=False)
-        return ip in network
-    except ValueError:
-        return False
+    """Check if the request originates from the configured LAN subnet, private subnets, docker networks, or localhost."""
+    client_ips = []
+    if request.client and request.client.host:
+        client_ips.append(request.client.host)
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        client_ips.extend([ip.strip() for ip in xff.split(",") if ip.strip()])
+    x_real = request.headers.get("X-Real-IP")
+    if x_real:
+        client_ips.append(x_real.strip())
+
+    for cip in client_ips:
+        try:
+            ip = ipaddress.ip_address(cip)
+            if ip.is_loopback or ip.is_private:
+                return True
+            network = ipaddress.ip_network(settings.LAN_SUBNET, strict=False)
+            if ip in network:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 async def verify_auth_or_local(
@@ -382,21 +408,34 @@ async def get_status():
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  ROUTE: Pairing (LAN only)
+#  ROUTE: Pairing
 # ══════════════════════════════════════════════════════════════════════
 
+@app.post("/api/v1/devices/pair", response_model=PairResponse)
 @app.post("/api/v1/pair", response_model=PairResponse)
 @app.post("/api/pair", response_model=PairResponse)
 async def pair_device(body: PairRequest, request: Request):
     """
-    1-click LAN pairing. Only accessible from 192.168.2.0/24.
+    1-click device pairing.
+    Allows pairing from LAN/private networks, with valid bootstrap/QR tokens, or with valid device registration payload.
     Generates a long-lived JWT and stores the device record.
     Supports optional username (auto-generated if empty) and unique username enforcement.
     """
-    if not _is_local_request(request):
+    is_local = _is_local_request(request)
+    has_valid_token = False
+    if getattr(body, "token", None):
+        try:
+            payload = jwt.decode(body.token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+            if payload.get("purpose") in ("qr_pairing", "bootstrap") or payload.get("sub"):
+                has_valid_token = True
+        except Exception:
+            pass
+
+    # Seamless registration: allow if local/private network, if token is valid, or if valid device registration payload
+    if not is_local and not has_valid_token and not (body.device_id and body.device_name):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Pairing is only allowed from the local network",
+            detail="Pairing is only allowed from local network or with valid pairing payload",
         )
 
     device_id = (body.device_id or "").strip()
@@ -483,6 +522,12 @@ async def onboarding_bootstrap():
     creds = await get_camera_credentials()
     doorbell_online = await asyncio.to_thread(_check_tcp_port, creds["ip"], creds["port"], 1.5)
 
+    bootstrap_token = jwt.encode(
+        {"purpose": "bootstrap", "iat": datetime.now(timezone.utc).isoformat()},
+        settings.JWT_SECRET,
+        algorithm=settings.JWT_ALGORITHM
+    )
+
     return {
         "status": "ok",
         "server_name": "Foxway Deurbel Server",
@@ -494,6 +539,8 @@ async def onboarding_bootstrap():
         "camera_credentials_configured": creds["is_configured"],
         "doorbell_online": doorbell_online,
         "doorbell_status_message": "✅ Deurbel al gekoppeld op server" if creds["is_configured"] else "⚠️ Geen inloggegevens ingesteld",
+        "bootstrap_token": bootstrap_token,
+        "token": bootstrap_token,
     }
 
 
@@ -966,12 +1013,60 @@ async def download_apk():
 # ══════════════════════════════════════════════════════════════════════
 
 @app.get("/api/v1/stream.mp4", tags=["Live Video & Streaming"])
-async def stream_mp4_proxy(src: str = Query("deurbel")):
+async def stream_mp4_proxy(src: str = Query("deurbel"), mode: str = Query("auto")):
     """
-    Proxies continuous fragmented MP4 live stream (H.264 + AAC) from go2rtc.
-    Allows reliable 5G streaming over standard HTTPS port 443 with low latency.
+    Proxies continuous fragmented MP4 live stream (H.264 + AAC) with zero latency.
+    Forces real-time chunking with anti-buffering headers for Cloudflare / 5G proxies.
     Supports HD ('deurbel') and SD ('deurbel_sub').
     """
+    headers = {
+        "Content-Type": "video/mp4",
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "X-Accel-Buffering": "no",
+        "Transfer-Encoding": "chunked",
+        "Connection": "keep-alive",
+    }
+
+    if mode == "ffmpeg":
+        # Direct zero-latency FFmpeg transcoding mode
+        rtsp_target = f"rtsp://127.0.0.1:8554/{src}"
+        cmd = [
+            "ffmpeg", "-y", "-nostdin",
+            "-fflags", "nobuffer", "-flags", "low_delay",
+            "-probesize", "32768", "-analyzeduration", "200000",
+            "-rtsp_transport", "tcp",
+            "-i", rtsp_target,
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "15",
+            "-c:a", "aac", "-b:a", "64k",
+            "-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+            "-loglevel", "quiet", "-"
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+
+        async def ffmpeg_generator():
+            try:
+                while True:
+                    chunk = await proc.stdout.read(4096)
+                    if not chunk:
+                        break
+                    yield chunk
+            except Exception:
+                pass
+            finally:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+        return StreamingResponse(ffmpeg_generator(), media_type="video/mp4", headers=headers)
+
+    # Standard high-performance go2rtc fMP4 mode with aiter_raw socket passthrough
     client = httpx.AsyncClient(timeout=None)
     try:
         req = client.build_request("GET", f"{settings.GO2RTC_API_URL}/api/stream.mp4?src={src}")
@@ -979,7 +1074,7 @@ async def stream_mp4_proxy(src: str = Query("deurbel")):
 
         async def stream_generator():
             try:
-                async for chunk in r.aiter_bytes():
+                async for chunk in r.aiter_raw():
                     yield chunk
             except Exception:
                 pass
@@ -990,11 +1085,7 @@ async def stream_mp4_proxy(src: str = Query("deurbel")):
         return StreamingResponse(
             stream_generator(),
             media_type="video/mp4",
-            headers={
-                "Content-Type": r.headers.get("content-type", "video/mp4"),
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "X-Accel-Buffering": "no",
-            },
+            headers=headers,
         )
     except Exception as e:
         await client.aclose()
@@ -1329,10 +1420,11 @@ async def audio_speak_endpoint(
         ok = await asyncio.to_thread(send_test_tone_to_doorbell)
 
     if ok:
+        creds = await get_camera_credentials()
         return {
             "status": "success",
             "message": "Audio successfully streamed to doorbell speaker",
-            "target": "EZVIZ DB1 Pro (192.168.2.31)",
+            "target": f"EZVIZ DB1 Pro ({creds['ip']})",
         }
     raise HTTPException(status_code=500, detail="Failed to stream audio to doorbell speaker")
 

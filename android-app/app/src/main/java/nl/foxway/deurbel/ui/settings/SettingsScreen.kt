@@ -104,7 +104,6 @@ fun SettingsScreen(
     // Dialogs
     var showHardwareTestDialog by remember { mutableStateOf(false) }
     var showLogsDialog by remember { mutableStateOf(false) }
-    var showQrDialog by remember { mutableStateOf(false) }
     var isTriggeringShelly by remember { mutableStateOf(false) }
     var shellyTriggerResult by remember { mutableStateOf<String?>(null) }
 
@@ -416,21 +415,6 @@ fun SettingsScreen(
                                 HorizontalDivider(color = DividerDark)
                             }
                         }
-                    }
-
-                    HorizontalDivider(color = DividerDark)
-                    OutlinedButton(
-                        onClick = { showQrDialog = true },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .defaultMinSize(minHeight = 44.dp),
-                        shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanAccent),
-                        border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.5f))
-                    ) {
-                        Icon(imageVector = Icons.Default.QrCode, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Toon Koppel QR-Code voor Gezinslid", fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
@@ -1253,13 +1237,6 @@ fun SettingsScreen(
         )
     }
 
-    // ── Dialog 3: Koppel QR-Code Dialog ──────────────────────────────
-    if (showQrDialog) {
-        QrCodeDialog(
-            resolver = resolver,
-            onDismiss = { showQrDialog = false }
-        )
-    }
 }
 
 // ──────────────────────────────────────────────────────────────────

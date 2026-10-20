@@ -13,13 +13,16 @@ Handles every media operation the backend needs:
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import os
 import shutil
+import struct
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 
 import httpx
 from fastapi import Request
@@ -58,6 +61,186 @@ async def fetch_snapshot(call_id: str) -> str:
 
     logger.info("Snapshot saved: %s (%d bytes)", snapshot_path, len(resp.content))
     return snapshot_path
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  RAM-based Circular Ring Buffer (Pre-Roll & Post-Roll)
+# ──────────────────────────────────────────────────────────────────────
+
+class RamRingBuffer:
+    """
+    RAM-based circular buffer continuously retaining the last ~7-8 seconds of fMP4 video.
+    Provides instant pre-roll extraction (5s before trigger) and real-time fragment piping.
+    """
+    def __init__(self, buffer_seconds: float = 7.0):
+        self.buffer_seconds = buffer_seconds
+        self.init_segment = bytearray()
+        self.fragments: collections.deque[tuple[float, bytes]] = collections.deque()
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+        self._lock = asyncio.Lock()
+        self._subscribers: list[asyncio.Queue] = []
+
+    async def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._task = asyncio.create_task(self._ingest_loop())
+        logger.info("RAM Ring Buffer started (capacity: %.1fs)", self.buffer_seconds)
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        logger.info("RAM Ring Buffer stopped")
+
+    async def get_preroll_bytes(self, duration: float = 5.0) -> bytes:
+        """Extract init segment + last `duration` seconds of video fragments from RAM."""
+        async with self._lock:
+            if not self.init_segment:
+                return b""
+            cutoff = time.time() - duration
+            selected = [frag for ts, frag in self.fragments if ts >= cutoff]
+            return bytes(self.init_segment) + b"".join(selected)
+
+    def subscribe(self) -> asyncio.Queue:
+        q = asyncio.Queue()
+        self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        if q in self._subscribers:
+            self._subscribers.remove(q)
+
+    async def _ingest_loop(self) -> None:
+        url = f"{settings.GO2RTC_API_URL}/api/stream.mp4?src={settings.GO2RTC_STREAM_NAME}"
+        while self._running:
+            try:
+                async with httpx.AsyncClient(timeout=None) as client:
+                    async with client.stream("GET", url) as resp:
+                        if resp.status_code != 200:
+                            await asyncio.sleep(2)
+                            continue
+
+                        buf = bytearray()
+
+                        async def read_exact(n: int) -> bytes:
+                            while len(buf) < n:
+                                chunk = await resp.aread(min(4096, n - len(buf)))
+                                if not chunk:
+                                    raise EOFError("Stream closed")
+                                buf.extend(chunk)
+                            res = bytes(buf[:n])
+                            del buf[:n]
+                            return res
+
+                        # Read init segment: ftyp + moov
+                        init_bytes = bytearray()
+                        for _ in range(2):
+                            hdr = await read_exact(8)
+                            sz, _ = struct.unpack(">I4s", hdr)
+                            body = await read_exact(sz - 8)
+                            init_bytes.extend(hdr)
+                            init_bytes.extend(body)
+
+                        async with self._lock:
+                            self.init_segment = init_bytes
+
+                        # Continuously read moof + mdat
+                        while self._running:
+                            hdr = await read_exact(8)
+                            sz, _ = struct.unpack(">I4s", hdr)
+                            body = await read_exact(sz - 8)
+                            frag = hdr + body
+
+                            now = time.time()
+                            async with self._lock:
+                                self.fragments.append((now, frag))
+                                cutoff = now - (self.buffer_seconds + 1.0)
+                                while self.fragments and self.fragments[0][0] < cutoff:
+                                    self.fragments.popleft()
+
+                            for sub in list(self._subscribers):
+                                try:
+                                    sub.put_nowait((now, frag))
+                                except Exception:
+                                    pass
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug("RAM Ring Buffer reconnecting in 2s: %s", e)
+                await asyncio.sleep(2)
+
+
+ring_buffer = RamRingBuffer()
+
+
+async def record_smart_clip(
+    clip_id: str,
+    clip_path: str,
+    preroll_seconds: float = 5.0,
+    postroll_seconds: float = 5.0,
+    motion_active_func: Optional[Callable[[], bool]] = None,
+    max_duration: float = 45.0,
+) -> float:
+    """
+    Stitches RAM pre-roll buffer (5s before trigger) + active motion duration + post-roll (5s after motion stops).
+    Compresses via FFmpeg into the final MP4 file.
+    Returns the final duration in seconds.
+    """
+    raw_path = f"/dev/shm/{clip_id}_raw.mp4" if os.path.exists("/dev/shm") else f"/tmp/{clip_id}_raw.mp4"
+    preroll = await ring_buffer.get_preroll_bytes(preroll_seconds)
+    if not preroll:
+        await _record(clip_id, clip_path)
+        return 15.0
+
+    q = ring_buffer.subscribe()
+    start_time = time.time()
+    last_motion_time = time.time()
+
+    try:
+        with open(raw_path, "wb") as f:
+            f.write(preroll)
+
+            while (time.time() - start_time) < max_duration:
+                try:
+                    ts, frag = await asyncio.wait_for(q.get(), timeout=1.0)
+                    f.write(frag)
+                except asyncio.TimeoutError:
+                    pass
+
+                if motion_active_func and motion_active_func():
+                    last_motion_time = time.time()
+                elif (time.time() - last_motion_time) >= postroll_seconds:
+                    break
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", raw_path,
+            "-c", "copy",
+            "-movflags", "+faststart",
+            clip_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+
+        dur = await _probe_duration(clip_path)
+        return dur if dur > 0 else (time.time() - start_time + preroll_seconds)
+    finally:
+        ring_buffer.unsubscribe(q)
+        if os.path.exists(raw_path):
+            try:
+                os.remove(raw_path)
+            except Exception:
+                pass
 
 
 # ──────────────────────────────────────────────────────────────────────

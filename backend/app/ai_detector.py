@@ -41,7 +41,13 @@ COCO_NAMES = {
 }
 
 _MODEL_PATH = "/mnt/opslag/deurbel/backend/yolov8n.onnx"
-_SUBSTREAM_RTSP = f"rtsp://{settings.DOORBELL_USER}:{settings.DOORBELL_PASS}@{settings.DOORBELL_IP}:554/H.264/ch1/sub/av_stream"
+
+
+async def get_substream_rtsp() -> str:
+    """Dynamically resolve camera substream RTSP URL from SQLite app_settings or configuration."""
+    from app.models import get_camera_credentials
+    creds = await get_camera_credentials()
+    return f"rtsp://{creds['user']}:{creds['pass']}@{creds['ip']}:554/H.264/ch1/sub/av_stream"
 
 
 class DetectionSettings:
@@ -81,6 +87,11 @@ class SmartDetector:
         self._task: Optional[asyncio.Task] = None
         self._last_trigger_time = 0.0
         self._cooldown_seconds = 25.0
+        self._last_motion_seen = 0.0
+
+    def is_motion_active(self) -> bool:
+        """Check if active motion was detected in the camera frame within the last 1.5 seconds."""
+        return (time.time() - self._last_motion_seen) < 1.5
 
     def init_model(self) -> bool:
         """Initialize ONNXRuntime session for YOLOv8n."""
@@ -238,7 +249,8 @@ class SmartDetector:
             cap = None
             try:
                 # Open substream (768x432 H.264 @ 10fps)
-                cap = cv2.VideoCapture(_SUBSTREAM_RTSP, cv2.CAP_FFMPEG)
+                substream_url = await get_substream_rtsp()
+                cap = cv2.VideoCapture(substream_url, cv2.CAP_FFMPEG)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
                 if not cap.isOpened():
@@ -276,6 +288,7 @@ class SmartDetector:
                         # Check threshold
                         sensitivity = cfg["motion_sensitivity"]
                         if motion_ratio >= sensitivity:
+                            self._last_motion_seen = time.time()
                             now_t = time.time()
                             if (now_t - self._last_trigger_time) > self._cooldown_seconds:
                                 self._last_trigger_time = now_t
@@ -383,28 +396,16 @@ class SmartDetector:
             }
         )
 
-        # 4. Record 15-second HD clip via FFmpeg
-        cmd = [
-            "ffmpeg", "-y",
-            "-rtsp_transport", "tcp",
-            "-i", settings.GO2RTC_RTSP_URL,
-            "-t", "15",
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-movflags", "+faststart",
-            clip_path,
-        ]
-
+        # 4. Smart Pre-Roll & Post-Roll recording via RAM Ring Buffer
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+            from app.recorder import record_smart_clip
+            duration = await record_smart_clip(
+                clip_id=clip_id,
+                clip_path=clip_path,
+                preroll_seconds=5.0,
+                postroll_seconds=5.0,
+                motion_active_func=self.is_motion_active,
             )
-            await proc.communicate()
-
-            # Probe duration & ensure thumbnail
-            duration = 15.0
             await ensure_thumbnail(clip_id, clip_path)
 
             category_dutch = {

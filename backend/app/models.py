@@ -40,6 +40,7 @@ class PairRequest(BaseModel):
     device_id: Optional[str] = Field("", description="Stable Android device identifier (Settings.Secure.ANDROID_ID)")
     android_version: Optional[str] = Field("", description="Android OS version (e.g. 15 / API 35)")
     connection_type: Optional[str] = Field("", description="LAN or 5G")
+    token: Optional[str] = Field("", description="Optional bootstrap / QR pairing token")
 
 
 class PairResponse(BaseModel):

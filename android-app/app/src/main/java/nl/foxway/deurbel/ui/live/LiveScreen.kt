@@ -7,6 +7,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -18,8 +20,11 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -273,72 +278,162 @@ fun LiveScreen() {
         }
     }
 
+    // Native Pinch-to-Zoom & Drag-Panning state
+    var zoomScale by remember { mutableFloatStateOf(1f) }
+    var panOffsetX by remember { mutableFloatStateOf(0f) }
+    var panOffsetY by remember { mutableFloatStateOf(0f) }
+
+    // Reset zoom when toggling fit mode or stream quality
+    LaunchedEffect(isFitMode, isHd) {
+        zoomScale = 1f
+        panOffsetX = 0f
+        panOffsetY = 0f
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(BackgroundDark)
     ) {
-        // ── Video Renderer (WebRTC or ExoPlayer) ──
-        if (isExoMode) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                AndroidView(
-                    factory = { ctx ->
-                        PlayerView(ctx).apply {
-                            player = exoPlayer
-                            useController = false
-                            resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
-                            else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                        }
-                    },
-                    update = { view ->
-                        view.player = exoPlayer
-                        view.resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                    },
-                    modifier = if (isFitMode) {
-                        Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(16f / 9f)
-                    } else {
-                        Modifier.fillMaxSize()
-                    }
-                )
-            }
-        } else {
-            session?.let { activeSession ->
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    AndroidView(
-                        factory = { ctx ->
-                            SurfaceViewRenderer(ctx).apply {
-                                val scaling = if (isFitMode) RendererCommon.ScalingType.SCALE_ASPECT_FIT
-                                else RendererCommon.ScalingType.SCALE_ASPECT_FILL
-                                setScalingType(scaling)
-                                setEnableHardwareScaler(true)
-                                activeSession.attachRenderer(this, scaling)
-                                requestLayout()
-                            }
-                        },
-                        update = { view ->
-                            val scaling = if (isFitMode) RendererCommon.ScalingType.SCALE_ASPECT_FIT
-                            else RendererCommon.ScalingType.SCALE_ASPECT_FILL
-                            view.setScalingType(scaling)
-                            view.requestLayout()
-                            activeSession.setScalingType(scaling)
-                        },
-                        modifier = if (isFitMode) {
-                            Modifier
-                                .fillMaxWidth()
-                                .aspectRatio(16f / 9f)
+        // ── Zoomable Video Container (Pinch-to-Zoom + Drag-Panning) ──
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clipToBounds()
+                .pointerInput(Unit) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        val newScale = (zoomScale * zoom).coerceIn(1f, 5f)
+                        zoomScale = newScale
+                        if (newScale > 1f) {
+                            val maxPanX = (size.width * (newScale - 1f)) / 2f
+                            val maxPanY = (size.height * (newScale - 1f)) / 2f
+                            panOffsetX = (panOffsetX + pan.x).coerceIn(-maxPanX, maxPanX)
+                            panOffsetY = (panOffsetY + pan.y).coerceIn(-maxPanY, maxPanY)
                         } else {
-                            Modifier.fillMaxSize()
+                            panOffsetX = 0f
+                            panOffsetY = 0f
+                        }
+                    }
+                }
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onDoubleTap = {
+                            if (zoomScale > 1.05f) {
+                                zoomScale = 1f
+                                panOffsetX = 0f
+                                panOffsetY = 0f
+                            } else {
+                                zoomScale = 2.5f
+                            }
                         }
                     )
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = zoomScale
+                        scaleY = zoomScale
+                        translationX = panOffsetX
+                        translationY = panOffsetY
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                // ── Video Renderer (WebRTC or ExoPlayer) ──
+                if (isExoMode) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AndroidView(
+                            factory = { ctx ->
+                                PlayerView(ctx).apply {
+                                    player = exoPlayer
+                                    useController = false
+                                    resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                    else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                }
+                            },
+                            update = { view ->
+                                view.player = exoPlayer
+                                view.resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                            },
+                            modifier = if (isFitMode) {
+                                Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(16f / 9f)
+                            } else {
+                                Modifier.fillMaxSize()
+                            }
+                        )
+                    }
+                } else {
+                    session?.let { activeSession ->
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            AndroidView(
+                                factory = { ctx ->
+                                    SurfaceViewRenderer(ctx).apply {
+                                        val scaling = if (isFitMode) RendererCommon.ScalingType.SCALE_ASPECT_FIT
+                                        else RendererCommon.ScalingType.SCALE_ASPECT_FILL
+                                        setScalingType(scaling)
+                                        setEnableHardwareScaler(true)
+                                        activeSession.attachRenderer(this, scaling)
+                                        requestLayout()
+                                    }
+                                },
+                                update = { view ->
+                                    val scaling = if (isFitMode) RendererCommon.ScalingType.SCALE_ASPECT_FIT
+                                    else RendererCommon.ScalingType.SCALE_ASPECT_FILL
+                                    view.setScalingType(scaling)
+                                    view.requestLayout()
+                                    activeSession.setScalingType(scaling)
+                                },
+                                modifier = if (isFitMode) {
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .aspectRatio(16f / 9f)
+                                } else {
+                                    Modifier.fillMaxSize()
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            // ── Floating Zoom Badge with Tap-to-Reset ──
+            if (zoomScale > 1.05f) {
+                Surface(
+                    color = Color.Black.copy(alpha = 0.70f),
+                    shape = RoundedCornerShape(20.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, DividerDark),
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 64.dp)
+                        .clickable {
+                            zoomScale = 1f
+                            panOffsetX = 0f
+                            panOffsetY = 0f
+                        }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(Icons.Default.ZoomIn, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(16.dp))
+                        Text(
+                            text = "${String.format("%.1fx", zoomScale)} (Tik om te resetten)",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = TextPrimary
+                        )
+                    }
                 }
             }
         }
