@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Foxway Deurbel</string>
+
+    <!-- Onboarding -->
+    <string name="onboarding_title">Welkom bij Foxway</string>
+    <string name="onboarding_subtitle">Slimme Video Deurbel</string>
+    <string name="onboarding_scanning">Zoeken naar deurbel op je netwerk…</string>
+    <string name="onboarding_found">Foxway Deurbel gevonden op %1$s</string>
+    <string name="onboarding_name_hint">Jouw naam (bijv. Mohamed)</string>
+    <string name="onboarding_connect_button">Verbinden</string>
+    <string name="onboarding_pairing">Koppelen…</string>
+    <string name="onboarding_paired_title">Gekoppeld!</string>
+    <string name="onboarding_paired_message">Je ontvangt nu meldingen wanneer er wordt aangebeld.</string>
+    <string name="onboarding_error_no_name">Vul je naam in</string>
+    <string name="onboarding_error_pair_failed">Koppelen mislukt. Probeer opnieuw.</string>
+    <string name="onboarding_retry">Opnieuw zoeken</string>
+
+    <!-- Call screen -->
+    <string name="call_incoming_title">Voordeur</string>
+    <string name="call_incoming_subtitle">Er wordt aangebeld</string>
+    <string name="call_answer">Opnemen</string>
+    <string name="call_decline">Weigeren</string>
+    <string name="call_hangup">Ophangen</string>
+    <string name="call_mute">Dempen</string>
+    <string name="call_unmute">Microfoon aan</string>
+    <string name="call_speaker">Speaker</string>
+    <string name="call_snapshot">Foto</string>
+    <string name="call_answered_by">Beantwoord door %1$s</string>
+    <string name="call_missed">Gemiste oproep</string>
+
+    <!-- Quick replies -->
+    <string name="quick_reply_package">📦 Zet pakketje bij de deur</string>
+    <string name="quick_reply_coming">🏃 Ik kom eraan</string>
+
+    <!-- Live view -->
+    <string name="live_view_title">Live Kijken</string>
+    <string name="live_view_ptt">Houd ingedrukt om te spreken</string>
+    <string name="live_view_mic_on">Microfoon Aan</string>
+    <string name="live_view_stealth">Stealth modus — bezoeker hoort je niet</string>
+
+    <!-- Clips -->
+    <string name="clips_title">Opnames</string>
+    <string name="clips_trim_save">Knippen &amp; Opslaan</string>
+    <string name="clips_download">Downloaden</string>
+    <string name="clips_share">Delen</string>
+    <string name="clips_delete">Verwijderen</string>
+    <string name="clips_delete_confirm">Weet je zeker dat je deze opname wilt verwijderen?</string>
+    <string name="clips_empty">Nog geen opnames</string>
+
+    <!-- Connection status -->
+    <string name="status_lan">LAN 🟢</string>
+    <string name="status_wan">5G 🌐</string>
+    <string name="status_disconnected">Niet verbonden</string>
+
+    <!-- Permissions -->
+    <string name="permission_fullscreen_title">Volledig scherm meldingen</string>
+    <string name="permission_fullscreen_desc">Nodig om de belweergave op je vergrendelscherm te tonen</string>
+    <string name="permission_battery_title">Batterijoptimalisatie uitschakelen</string>
+    <string name="permission_battery_desc">Nodig om meldingen betrouwbaar te ontvangen</string>
+    <string name="permission_notifications_title">Meldingen</string>
+    <string name="permission_notifications_desc">Ontvang een melding wanneer er wordt aangebeld</string>
+    <string name="permission_microphone_title">Microfoon</string>
+    <string name="permission_microphone_desc">Nodig om te praten via de deurbel</string>
+
+    <!-- Notification channels -->
+    <string name="channel_ring_name">Deurbel</string>
+    <string name="channel_ring_description">Inkomende deurbel oproepen</string>
+    <string name="channel_service_name">Achtergrondservice</string>
+    <string name="channel_service_description">Houdt de verbinding met de deurbel actief</string>
+
+    <!-- General -->
+    <string name="ok">OK</string>
+    <string name="cancel">Annuleren</string>
+    <string name="settings">Instellingen</string>
+</resources>

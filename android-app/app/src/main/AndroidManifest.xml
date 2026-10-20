@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ══════════════════════════════════════════════════════════════
+         PERMISSIONS (per SPEC.md §4.1)
+         ══════════════════════════════════════════════════════════════ -->
+
+    <!-- TelecomManager / ConnectionService -->
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+
+    <!-- Full-screen intent for lockscreen call UI (Samsung One UI) -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
+    <!-- System alert window fallback for overlay call UI -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Audio for WebRTC two-way voice -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- Notifications (Android 13+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Foreground services -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- Network -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <!-- Battery optimisation exemption (reliable background delivery) -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Wake lock for incoming call screen -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Start on boot -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Vibrate on ring -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- Camera (future: snapshot from app) -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- Storage for clip download to Movies/Deurbel -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28"
+        tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!-- NSD / mDNS discovery -->
+    <uses-permission android:name="android.permission.NSD"
+        tools:ignore="ProtectedPermissions" />
+
+    <application
+        android:name=".FoxwayApp"
+        android:allowBackup="true"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@drawable/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.FoxwayDeurbel"
+        android:usesCleartextTraffic="true"
+        android:enableOnBackInvokedCallback="true"
+        tools:targetApi="35">
+
+        <!-- ════════════════════════════════════════════════════════
+             MAIN ACTIVITY
+             ════════════════════════════════════════════════════════ -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.FoxwayDeurbel"
+            android:windowSoftInputMode="adjustResize"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ════════════════════════════════════════════════════════
+             CALL ACTIVITY (full-screen intent target, Milestone 3)
+             ════════════════════════════════════════════════════════ -->
+        <activity
+            android:name=".ui.call.CallActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:showOnLockScreen="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:taskAffinity="nl.foxway.deurbel.call"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.FoxwayDeurbel" />
+
+        <!-- ════════════════════════════════════════════════════════
+             TELECOM CONNECTION SERVICE (Milestone 3)
+             ════════════════════════════════════════════════════════ -->
+        <service
+            android:name=".telecom.DoorbellConnectionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
+
+        <!-- ════════════════════════════════════════════════════════
+             CALL FOREGROUND SERVICE
+             ════════════════════════════════════════════════════════ -->
+        <service
+            android:name=".telecom.CallForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall|microphone" />
+
+        <!-- ════════════════════════════════════════════════════════
+             WEBSOCKET PERSISTENT SERVICE
+             ════════════════════════════════════════════════════════ -->
+        <service
+            android:name=".network.WebSocketForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- ════════════════════════════════════════════════════════
+             FIREBASE CLOUD MESSAGING SERVICE
+             ════════════════════════════════════════════════════════ -->
+        <service
+            android:name=".network.FcmService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Boot receiver for restarting WebSocket service -->
+        <receiver
+            android:name=".telecom.BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+        <!-- FCM default notification channel -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="foxway_doorbell_ring" />
+
+    </application>
+
+</manifest>

@@ -1,8 +1,40 @@
+# Video, Audio, and Binary Media
+clips/
+snapshots/
+*.mp4
+*.adts
+*.wav
 *.apk
-clips/*.mp4
-clips/*.jpg
-__pycache__/
-.gradle/
-build/
-.env
 *.onnx
+*.db
+*.db-journal
+foxway.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+venv/
+env/
+
+# Android & Gradle
+.gradle/
+.gradle-cache/
+build/
+app/build/
+android-app/.gradle/
+android-app/.kotlin/
+android-app/app/build/
+android-app/build/
+android-app/local.properties
+android-app/**/build/
+
+# Secrets & Config
+.env
+firebase-sa.json
+*.pem
+*.key
+*.log

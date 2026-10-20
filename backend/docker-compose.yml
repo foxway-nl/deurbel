@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  foxway-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: foxway-doorbell-backend
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # go2rtc media engine (already running on the host)
+      - FOXWAY_GO2RTC_API_URL=http://192.168.2.1:1984
+      - FOXWAY_GO2RTC_RTSP_URL=rtsp://192.168.2.1:8554/deurbel
+      - FOXWAY_GO2RTC_STREAM_NAME=deurbel
+      # Storage
+      - FOXWAY_STORAGE_PATH=/mnt/opslag/deurbel
+      - FOXWAY_CLIPS_DIR=/mnt/opslag/deurbel/clips
+      - FOXWAY_SNAPSHOTS_DIR=/mnt/opslag/deurbel/snapshots
+      - FOXWAY_DB_PATH=/mnt/opslag/deurbel/foxway.db
+      # Auth
+      - FOXWAY_JWT_SECRET=change-me-in-production-please
+      # FCM (optional: set path to service-account.json)
+      # - FOXWAY_FCM_CREDENTIALS_PATH=/app/firebase-sa.json
+      # Networking
+      - FOXWAY_LAN_SUBNET=192.168.2.0/24
+      - FOXWAY_LAN_URL=http://192.168.2.1:8090
+      - FOXWAY_WAN_URL=https://deurbel.foxway.nl
+      - FOXWAY_GO2RTC_LAN_WS=ws://192.168.2.1:1984
+      - FOXWAY_GO2RTC_WAN_WS=wss://deurbel.foxway.nl/api/ws
+      - FOXWAY_HOST_PORT=8090
+      # Call behaviour
+      - FOXWAY_RING_COOLDOWN_SECONDS=5
+      - FOXWAY_RING_TIMEOUT_SECONDS=35
+      - FOXWAY_RECORDING_DURATION_SECONDS=60
+      - FOXWAY_POST_HANGUP_RECORD_SECONDS=5
+      # Clip retention
+      - FOXWAY_CLIP_RETENTION_DAYS=30
+    volumes:
+      # NAS storage mount — clips, snapshots, and SQLite database
+      - /mnt/opslag/deurbel:/mnt/opslag/deurbel
+      # Live app code and audio replies mount
+      - ./app:/app/app
+      - ./audio_replies:/app/audio_replies
+      # Optional: Firebase service account credentials
+      # - ./firebase-sa.json:/app/firebase-sa.json:ro
+    ports:
+      # Explicit port mapping (redundant with network_mode: host, but
+      # documents the port for reference and works if you switch to
+      # bridge networking)
+      - "8090:8090"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/api/v1/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

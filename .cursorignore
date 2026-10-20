@@ -1,0 +1,12 @@
+clips/
+snapshots/
+audio/
+__pycache__/
+*.pyc
+.venv/
+venv/
+build/
+.gradle/
+*.apk
+*.mp4
+*.jpg
