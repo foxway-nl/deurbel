@@ -87,6 +87,7 @@ fun OnboardingScreen(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var cameraConfiguredMessage by remember { mutableStateOf<String?>(null) }
     var showQrScanDialog by remember { mutableStateOf(false) }
+    var bootstrapToken by remember { mutableStateOf<String?>(null) }
 
     val isNameValid = userName.trim().length >= 2
 
@@ -106,6 +107,7 @@ fun OnboardingScreen(
                 }
                 if (bootResp.isSuccessful && bootResp.body() != null) {
                     val boot = bootResp.body()!!
+                    bootstrapToken = boot.token.ifBlank { boot.bootstrapToken }
                     discoveredDoorbell = DiscoveredDoorbell(
                         hostAddress = boot.cameraIp.ifBlank { "192.168.2.1" },
                         port = 8090,
@@ -416,7 +418,8 @@ fun OnboardingScreen(
                                 fcmToken = fcmToken,
                                 deviceId = androidId,
                                 androidVersion = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
-                                connectionType = "LAN/WAN"
+                                connectionType = "LAN/WAN",
+                                token = bootstrapToken
                             )
 
                             // 1. Probeer eerst LAN
@@ -453,7 +456,12 @@ fun OnboardingScreen(
                                     .info("Apparaat succesvol gekoppeld als ${body.userName}")
                                 onPairingSuccess()
                             } else {
-                                errorMessage = "Koppelen mislukt (${resp?.code() ?: "Geen verbinding met LAN of WAN"})"
+                                val errorDetail = try {
+                                    resp?.errorBody()?.string()?.let { errStr ->
+                                        org.json.JSONObject(errStr).optString("detail", errStr)
+                                    }
+                                } catch (_: Exception) { null }
+                                errorMessage = errorDetail ?: "Koppelen mislukt (${resp?.code() ?: "Geen verbinding met LAN of WAN"})"
                             }
                         } catch (e: Exception) {
                             errorMessage = "Fout bij verbinden: ${e.localizedMessage}"
@@ -664,12 +672,14 @@ private fun QrScanDialog(
                 val trimmed = rawCode.trim()
                 var targetLan = "http://192.168.2.1:8090"
                 var targetWan = "https://deurbel.foxway.nl"
+                var qrToken: String? = null
 
                 if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
                     try {
                         val obj = JSONObject(trimmed)
                         if (obj.has("lan_url")) targetLan = obj.getString("lan_url")
                         if (obj.has("wan_url")) targetWan = obj.getString("wan_url")
+                        if (obj.has("token")) qrToken = obj.getString("token")
                     } catch (_: Exception) {}
                 }
 
@@ -681,7 +691,8 @@ private fun QrScanDialog(
                     fcmToken = fcmToken,
                     deviceId = androidId,
                     androidVersion = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
-                    connectionType = "QR"
+                    connectionType = "QR",
+                    token = qrToken
                 )
 
                 // 1. Probeer eerst LAN
@@ -714,7 +725,12 @@ private fun QrScanDialog(
                     onPairSuccess()
                 } else {
                     isError = true
-                    statusMessage = "❌ Koppelen mislukt (${resp?.code() ?: "Geen verbinding met server"})"
+                    val errorDetail = try {
+                        resp?.errorBody()?.string()?.let { errStr ->
+                            JSONObject(errStr).optString("detail", errStr)
+                        }
+                    } catch (_: Exception) { null }
+                    statusMessage = "❌ " + (errorDetail ?: "Koppelen mislukt (${resp?.code() ?: "Geen verbinding met server"})")
                 }
             } catch (e: Exception) {
                 isError = true

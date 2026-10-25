@@ -443,19 +443,23 @@ async def pair_device(body: PairRequest, request: Request):
     if not user_name:
         user_name = await get_next_default_username()
 
-    # Enforce unique usernames across different physical devices
-    if await is_username_taken(user_name, device_id=device_id):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"De naam '{user_name}' is al gekoppeld aan een ander toestel. Kies een unieke naam.",
-        )
-
     # Deduplication: check if this device already exists to avoid duplicate entries
     existing = await find_existing_device(
         device_id=device_id,
         user_name=user_name,
         device_name=body.device_name,
     )
+
+    # Enforce unique usernames across different physical devices:
+    # If this device is already known (re-pairing), or request was validated with a QR/bootstrap token,
+    # allow it. Only reject if an unrelated device tries to take an already-claimed username.
+    if not existing and not has_valid_token:
+        if await is_username_taken(user_name, device_id=device_id, device_name=body.device_name):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"De naam '{user_name}' is al gekoppeld aan een ander toestel. Kies een unieke naam.",
+            )
+
     if existing:
         user_id = existing["user_id"]
         logger.info("Re-pairing existing device: %s (%s) → %s", user_name, body.device_name, user_id)
@@ -615,13 +619,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "1.5.0",
-        "version_code": 6,
-        "build_time": "2026-10-25T15:00:00Z",
+        "version": "1.5.1",
+        "version_code": 7,
+        "build_time": "2026-10-25T15:50:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "Zero-latency 5G stream, native pinch-to-zoom (1x-5x), 5s pre/post-roll RAM recording, dynamic config",
+        "changelog": "Fix 409 pairing conflict, support tokenized bootstrap/QR registration & re-pairing",
     }
 
 

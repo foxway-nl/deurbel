@@ -214,17 +214,20 @@ async def find_existing_device(
     device_name: str = "",
 ) -> Optional[dict]:
     """Find existing device by unique hardware ID or matching user and device name."""
+    clean_user = (user_name or "").strip().lower()
+    clean_dev_id = (device_id or "").strip()
+    clean_dev_name = (device_name or "").strip().lower()
     async with aiosqlite.connect(_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        if device_id:
-            cursor = await db.execute("SELECT * FROM devices WHERE device_id = ?", (device_id,))
+        if clean_dev_id:
+            cursor = await db.execute("SELECT * FROM devices WHERE device_id = ?", (clean_dev_id,))
             row = await cursor.fetchone()
             if row:
                 return dict(row)
-        if user_name and device_name:
+        if clean_user and clean_dev_name:
             cursor = await db.execute(
-                "SELECT * FROM devices WHERE user_name = ? AND device_name = ? ORDER BY rowid DESC LIMIT 1",
-                (user_name, device_name),
+                "SELECT * FROM devices WHERE LOWER(TRIM(user_name)) = ? AND LOWER(TRIM(device_name)) = ? ORDER BY rowid DESC LIMIT 1",
+                (clean_user, clean_dev_name),
             )
             row = await cursor.fetchone()
             if row:
@@ -232,14 +235,21 @@ async def find_existing_device(
         return None
 
 
-async def is_username_taken(user_name: str, device_id: str = "") -> bool:
+async def is_username_taken(user_name: str, device_id: str = "", device_name: str = "") -> bool:
     """Return True if user_name is already registered to a DIFFERENT physical device."""
+    clean_user = (user_name or "").strip().lower()
+    clean_dev_id = (device_id or "").strip()
+    clean_dev_name = (device_name or "").strip().lower()
     async with aiosqlite.connect(_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT * FROM devices WHERE LOWER(user_name) = LOWER(?)", (user_name.strip(),))
+        cursor = await db.execute("SELECT * FROM devices WHERE LOWER(TRIM(user_name)) = ?", (clean_user,))
         rows = await cursor.fetchall()
         for r in rows:
-            if device_id and r["device_id"] == device_id:
+            r_dev_id = (r["device_id"] or "").strip()
+            r_dev_name = (r["device_name"] or "").strip().lower()
+            if clean_dev_id and r_dev_id and clean_dev_id == r_dev_id:
+                continue
+            if clean_dev_name and r_dev_name and clean_dev_name == r_dev_name:
                 continue
             return True
         return False

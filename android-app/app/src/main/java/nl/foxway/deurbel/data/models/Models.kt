@@ -13,7 +13,8 @@ data class PairRequest(
     @SerializedName("fcm_token") val fcmToken: String = "",
     @SerializedName("device_id") val deviceId: String = "",
     @SerializedName("android_version") val androidVersion: String = "",
-    @SerializedName("connection_type") val connectionType: String = ""
+    @SerializedName("connection_type") val connectionType: String = "",
+    @SerializedName("token") val token: String? = null
 )
 
 /** POST /api/v1/pair response */
@@ -121,7 +122,9 @@ data class OnboardingBootstrapResponse(
     @SerializedName("camera_user") val cameraUser: String = "admin",
     @SerializedName("camera_credentials_configured") val cameraCredentialsConfigured: Boolean = false,
     @SerializedName("doorbell_online") val doorbellOnline: Boolean = true,
-    @SerializedName("doorbell_status_message") val doorbellStatusMessage: String = ""
+    @SerializedName("doorbell_status_message") val doorbellStatusMessage: String = "",
+    @SerializedName("token") val token: String = "",
+    @SerializedName("bootstrap_token") val bootstrapToken: String = ""
 )
 
 data class OnboardingQrResponse(
