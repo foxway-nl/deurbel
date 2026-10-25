@@ -28,7 +28,7 @@ class EndpointResolver(
 
     companion object {
         private const val TAG = "EndpointResolver"
-        private const val LAN_PROBE_TIMEOUT_MS = 1500L
+        private const val LAN_PROBE_TIMEOUT_MS = 600L
         private const val LAN_HEALTH_PATH = "/api/v1/status"
     }
 

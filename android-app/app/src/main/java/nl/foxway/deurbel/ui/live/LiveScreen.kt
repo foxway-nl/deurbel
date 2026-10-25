@@ -173,8 +173,8 @@ fun LiveScreen() {
                 activeBaseUrl = resolved.apiBaseUrl
                 val streamName = if (isHd) "deurbel" else "deurbel_sub"
 
-                // Check connection type: On WAN/5G, use ExoPlayer over HTTPS port 443 directly
-                if (connectionType == ConnectionType.WAN) {
+                // Check connection type: On WAN/5G, immediately use ExoPlayer over HTTPS port 443 with zero delay
+                if (!resolved.isLan) {
                     isExoMode = true
                     val streamUrl = "${resolved.apiBaseUrl}/api/v1/stream.mp4?src=$streamName"
                     val mediaItem = MediaItem.Builder()
@@ -299,35 +299,7 @@ fun LiveScreen() {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .clipToBounds()
-                .pointerInput(Unit) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        val newScale = (zoomScale * zoom).coerceIn(1f, 5f)
-                        zoomScale = newScale
-                        if (newScale > 1f) {
-                            val maxPanX = (size.width * (newScale - 1f)) / 2f
-                            val maxPanY = (size.height * (newScale - 1f)) / 2f
-                            panOffsetX = (panOffsetX + pan.x).coerceIn(-maxPanX, maxPanX)
-                            panOffsetY = (panOffsetY + pan.y).coerceIn(-maxPanY, maxPanY)
-                        } else {
-                            panOffsetX = 0f
-                            panOffsetY = 0f
-                        }
-                    }
-                }
-                .pointerInput(Unit) {
-                    detectTapGestures(
-                        onDoubleTap = {
-                            if (zoomScale > 1.05f) {
-                                zoomScale = 1f
-                                panOffsetX = 0f
-                                panOffsetY = 0f
-                            } else {
-                                zoomScale = 2.5f
-                            }
-                        }
-                    )
-                },
+                .clipToBounds(),
             contentAlignment = Alignment.Center
         ) {
             Box(
@@ -352,6 +324,8 @@ fun LiveScreen() {
                                 PlayerView(ctx).apply {
                                     player = exoPlayer
                                     useController = false
+                                    isClickable = false
+                                    isFocusable = false
                                     resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
                                     else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                                 }
@@ -379,6 +353,8 @@ fun LiveScreen() {
                             AndroidView(
                                 factory = { ctx ->
                                     SurfaceViewRenderer(ctx).apply {
+                                        isClickable = false
+                                        isFocusable = false
                                         val scaling = if (isFitMode) RendererCommon.ScalingType.SCALE_ASPECT_FIT
                                         else RendererCommon.ScalingType.SCALE_ASPECT_FILL
                                         setScalingType(scaling)
@@ -406,6 +382,40 @@ fun LiveScreen() {
                     }
                 }
             }
+
+            // ── Transparent Gesture Overlay (Intercepts Pinch, Pan, and Double-Tap over Native Video Views) ──
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onDoubleTap = {
+                                if (zoomScale > 1.05f) {
+                                    zoomScale = 1f
+                                    panOffsetX = 0f
+                                    panOffsetY = 0f
+                                } else {
+                                    zoomScale = 2.5f
+                                }
+                            }
+                        )
+                    }
+                    .pointerInput(Unit) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            val newScale = (zoomScale * zoom).coerceIn(1f, 5f)
+                            zoomScale = newScale
+                            if (newScale > 1f) {
+                                val maxPanX = (size.width * (newScale - 1f)) / 2f
+                                val maxPanY = (size.height * (newScale - 1f)) / 2f
+                                panOffsetX = (panOffsetX + pan.x).coerceIn(-maxPanX, maxPanX)
+                                panOffsetY = (panOffsetY + pan.y).coerceIn(-maxPanY, maxPanY)
+                            } else {
+                                panOffsetX = 0f
+                                panOffsetY = 0f
+                            }
+                        }
+                    }
+            )
 
             // ── Floating Zoom Badge with Tap-to-Reset ──
             if (zoomScale > 1.05f) {

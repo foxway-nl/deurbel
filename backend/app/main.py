@@ -615,13 +615,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "1.3.0",
-        "version_code": 4,
-        "build_time": "2026-10-20T15:30:00Z",
+        "version": "1.5.0",
+        "version_code": 6,
+        "build_time": "2026-10-25T15:00:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "QR-Onboarding, Smart Auto-Fill, Granular AI Push Notifications, Hardware Tracking, Self-Updater",
+        "changelog": "Zero-latency 5G stream, native pinch-to-zoom (1x-5x), 5s pre/post-roll RAM recording, dynamic config",
     }
 
 
@@ -995,7 +995,9 @@ async def cleanup_unclassified_clips(include_unstarred_vehicles: bool = Query(Tr
 
 
 @app.get("/clips/foxway-deurbel.apk")
+@app.head("/clips/foxway-deurbel.apk")
 @app.get("/foxway-deurbel.apk")
+@app.head("/foxway-deurbel.apk")
 async def download_apk():
     """Direct download for the compiled Foxway Deurbel Android APK."""
     apk_path = Path("/mnt/opslag/deurbel/clips/foxway-deurbel.apk")
@@ -1005,6 +1007,11 @@ async def download_apk():
         str(apk_path),
         media_type="application/vnd.android.package-archive",
         filename="foxway-deurbel.apk",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
     )
 
 
