@@ -173,35 +173,33 @@ class WebRtcSession(
             RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.RECV_ONLY)
         )
 
-        val isHttpSignaling = signalingUrl.startsWith("http://") || signalingUrl.startsWith("https://")
-        if (isHttpSignaling) {
-            Log.i(TAG, "Using WHEP HTTP signaling proxy to $signalingUrl")
-            createWhepOffer(signalingUrl, streamName)
-        } else {
-            // WebSocket fallback
-            signaling.connect(signalingUrl, streamName) {
-                createOffer()
-            }
+        // Native go2rtc WebSocket signaling (exact match to browser video-rtc.js)
+        Log.i(TAG, "Starting native go2rtc WebRTC signaling for $streamName via $signalingUrl")
+        signaling.connect(signalingUrl, streamName) {
+            createOffer()
+        }
 
-            scope.launch {
-                signaling.remoteAnswers.collect { answerSdp ->
-                    peerConnection?.setRemoteDescription(object : SdpObserver {
-                        override fun onSetSuccess() {
-                            Log.i(TAG, "Remote SDP answer applied")
-                        }
-                        override fun onSetFailure(error: String?) {
-                            Log.e(TAG, "Failed to apply remote SDP answer: $error")
-                        }
-                        override fun onCreateSuccess(desc: SessionDescription?) {}
-                        override fun onCreateFailure(error: String?) {}
-                    }, answerSdp)
-                }
+        scope.launch {
+            signaling.remoteAnswers.collect { answerSdp ->
+                peerConnection?.setRemoteDescription(object : SdpObserver {
+                    override fun onSetSuccess() {
+                        Log.i(TAG, "Remote SDP answer applied")
+                    }
+                    override fun onSetFailure(error: String?) {
+                        Log.e(TAG, "Failed to apply remote SDP answer: $error")
+                        // If WS answer failed, try WHEP fallback
+                        val httpUrl = signalingUrl.replace("^wss://".toRegex(), "https://").replace("^ws://".toRegex(), "http://")
+                        createWhepOffer(httpUrl, streamName)
+                    }
+                    override fun onCreateSuccess(desc: SessionDescription?) {}
+                    override fun onCreateFailure(error: String?) {}
+                }, answerSdp)
             }
+        }
 
-            scope.launch {
-                signaling.remoteCandidates.collect { candidate ->
-                    peerConnection?.addIceCandidate(candidate)
-                }
+        scope.launch {
+            signaling.remoteCandidates.collect { candidate ->
+                peerConnection?.addIceCandidate(candidate)
             }
         }
     }

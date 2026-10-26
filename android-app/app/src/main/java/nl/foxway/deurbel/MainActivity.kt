@@ -43,9 +43,12 @@ class MainActivity : ComponentActivity() {
         // Permissions handled
     }
 
+    private var initialTargetClipId by mutableStateOf<String?>(null)
+    private var initialTargetScreen by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
+        parseDeeplink(intent)
         requestRequiredPermissions()
 
         setContent {
@@ -71,12 +74,29 @@ class MainActivity : ComponentActivity() {
                     )
                 } else {
                     MainAppScaffold(
+                        initialTargetScreen = initialTargetScreen,
+                        initialTargetClipId = initialTargetClipId,
                         onUnpair = {
                             WebSocketForegroundService.stop(this@MainActivity)
                         }
                     )
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        parseDeeplink(intent)
+    }
+
+    private fun parseDeeplink(intent: android.content.Intent?) {
+        val screen = intent?.getStringExtra("screen")
+        val clipId = intent?.getStringExtra("clip_id")
+        if (screen == "clips" || !clipId.isNullOrBlank()) {
+            initialTargetScreen = "clips"
+            initialTargetClipId = clipId
         }
     }
 
@@ -98,11 +118,23 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun MainAppScaffold(
+    initialTargetScreen: String? = null,
+    initialTargetClipId: String? = null,
     onUnpair: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    var selectedTab by remember { mutableStateOf(MainTab.LIVE) }
+    var activeTargetClipId by remember { mutableStateOf(initialTargetClipId) }
+    var selectedTab by remember {
+        mutableStateOf(if (initialTargetScreen == "clips" || !initialTargetClipId.isNullOrBlank()) MainTab.CLIPS else MainTab.LIVE)
+    }
     var permState by remember { mutableStateOf(nl.foxway.deurbel.util.PermissionChecker.checkAll(context)) }
+
+    LaunchedEffect(initialTargetScreen, initialTargetClipId) {
+        if (initialTargetScreen == "clips" || !initialTargetClipId.isNullOrBlank()) {
+            selectedTab = MainTab.CLIPS
+            activeTargetClipId = initialTargetClipId
+        }
+    }
 
     // Check permissions on enter / resume
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
@@ -193,7 +225,10 @@ fun MainAppScaffold(
             Box(modifier = Modifier.fillMaxSize()) {
                 when (selectedTab) {
                     MainTab.LIVE -> LiveScreen()
-                    MainTab.CLIPS -> ClipsScreen()
+                    MainTab.CLIPS -> ClipsScreen(
+                        initialClipId = activeTargetClipId,
+                        onClipSelected = { activeTargetClipId = null }
+                    )
                     MainTab.SETTINGS -> SettingsScreen(onUnpair = onUnpair)
                 }
             }

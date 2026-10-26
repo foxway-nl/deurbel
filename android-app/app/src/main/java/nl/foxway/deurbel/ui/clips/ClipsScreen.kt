@@ -64,7 +64,10 @@ import java.util.*
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ClipsScreen() {
+fun ClipsScreen(
+    initialClipId: String? = null,
+    onClipSelected: () -> Unit = {}
+) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val prefs = remember { FoxwayApp.instance.preferencesManager }
@@ -74,6 +77,30 @@ fun ClipsScreen() {
     var isLoading by remember { mutableStateOf(true) }
     var selectedClip by remember { mutableStateOf<ClipItem?>(null) }
     var baseUrl by remember { mutableStateOf("") }
+
+    // Auto-select initialClipId if passed (Deeplinking from notification)
+    LaunchedEffect(initialClipId, clips) {
+        if (!initialClipId.isNullOrBlank()) {
+            val found = clips.firstOrNull { it.id == initialClipId }
+            if (found != null) {
+                selectedClip = found
+                onClipSelected()
+            } else if (!isLoading && baseUrl.isNotBlank() && selectedClip == null) {
+                // If not in the loaded list yet, construct placeholder and select immediately
+                selectedClip = ClipItem(
+                    id = initialClipId,
+                    timestamp = "",
+                    duration = 0.0,
+                    sizeBytes = 0L,
+                    snapshotUrl = "/api/v1/snapshots/$initialClipId.jpg",
+                    videoUrl = "/api/v1/clips/$initialClipId/stream",
+                    answeredBy = "Opname bekijken",
+                    starred = false
+                )
+                onClipSelected()
+            }
+        }
+    }
 
     // Filtering states
     var selectedCategory by remember { mutableStateOf("Alles") }
@@ -89,7 +116,7 @@ fun ClipsScreen() {
                 val resolved = resolver.resolve()
                 baseUrl = resolved.apiBaseUrl
                 val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
-                val resp = api.getClips()
+                val resp = api.getClips(limit = 50)
                 if (resp.isSuccessful) {
                     clips = (resp.body() ?: emptyList()).sortedByDescending { it.timestamp }
                 }

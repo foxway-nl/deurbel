@@ -1130,7 +1130,7 @@ fun SettingsScreen(
             val appVersionText = remember {
                 try {
                     val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-                    val vName = pInfo.versionName ?: "1.6.0"
+                    val vName = pInfo.versionName ?: "1.8.0"
                     val vCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
                         pInfo.longVersionCode
                     } else {

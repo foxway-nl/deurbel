@@ -55,7 +55,9 @@ class WebRtcSignaling {
      */
     fun connect(wsUrl: String, streamName: String, onConnected: () -> Unit = {}) {
         val cleanUrl = wsUrl.trimEnd('/')
-        val signalingUrl = "$cleanUrl/api/ws?src=$streamName"
+            .replace("^https://".toRegex(), "wss://")
+            .replace("^http://".toRegex(), "ws://")
+        val signalingUrl = if (cleanUrl.contains("/api/ws")) cleanUrl else "$cleanUrl/api/ws?src=$streamName"
         Log.i(TAG, "Connecting to go2rtc WS: $signalingUrl")
 
         val request = Request.Builder().url(signalingUrl).build()

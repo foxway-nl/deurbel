@@ -182,14 +182,14 @@ async def record_smart_clip(
     seen_mtimes: set[float] = set()
 
     try:
-        # 1. Capture Pre-Roll: 3 segments (6 seconds) before trigger T0
+        # 1. Capture Pre-Roll: 4 segments (8 seconds) before trigger T0 to guarantee >=6s
         # Give ring buffer 0.2s to stabilize
         await asyncio.sleep(0.2)
         available = ring_buffer.get_available_segments()
 
         # The very latest segment is actively being written by ffmpeg, so completed segments are available[:-1]
         completed = available[:-1] if len(available) > 1 else available
-        preroll_segs = completed[-3:] if len(completed) >= 3 else completed
+        preroll_segs = completed[-4:] if len(completed) >= 4 else completed
 
         seq = 0
         for mtime, seg_path in preroll_segs:
@@ -294,8 +294,28 @@ async def start_recording(call_id: str, clip_path: str) -> asyncio.Task:
 
 
 async def _record(call_id: str, clip_path: str) -> None:
-    """Run FFmpeg to record RTSP and transcode to 720p yuv420p faststart."""
-    raw_path = f"/dev/shm/{call_id}_raw.mp4" if os.path.exists("/dev/shm") else clip_path.replace(".mp4", "_raw.mp4")
+    """Run FFmpeg to record RTSP with >=6s pre-roll and transcode to 720p yuv420p faststart."""
+    call_work_dir = RING_BUFFER_DIR / f"work_call_{call_id}"
+    call_work_dir.mkdir(parents=True, exist_ok=True)
+    preroll_files: list[Path] = []
+
+    # 1. Grab 4 segments (8s) of pre-roll at trigger T0 to guarantee >=6s
+    try:
+        await asyncio.sleep(0.2)
+        available = ring_buffer.get_available_segments()
+        completed = available[:-1] if len(available) > 1 else available
+        preroll_segs = completed[-4:] if len(completed) >= 4 else completed
+        for idx, (_, seg_path) in enumerate(preroll_segs):
+            dest = call_work_dir / f"preroll_{idx:03d}.ts"
+            try:
+                shutil.copy2(seg_path, dest)
+                preroll_files.append(dest)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug("Failed capturing pre-roll for call %s: %s", call_id, e)
+
+    raw_ts = str(call_work_dir / "call_live.ts")
     rtsp_url = "rtsp://127.0.0.1:8554/deurbel"
     cmd = [
         "ffmpeg",
@@ -305,9 +325,10 @@ async def _record(call_id: str, clip_path: str) -> None:
         "-t", str(settings.RECORDING_DURATION_SECONDS),
         "-c:v", "copy",
         "-c:a", "aac",
-        raw_path,
+        "-f", "mpegts",
+        raw_ts,
     ]
-    logger.info("Recording started: %s → %s", call_id, raw_path)
+    logger.info("Call recording started: %s (pre-roll segments: %d)", call_id, len(preroll_files))
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -331,12 +352,23 @@ async def _record(call_id: str, clip_path: str) -> None:
     finally:
         _active_recorders.pop(call_id, None)
 
-    # Transcode raw_path to libx264 yuv420p +faststart
-    if os.path.exists(raw_path) and os.path.getsize(raw_path) > 1000:
+    # 2. Combine pre-roll + live recording into final transcode
+    all_segments = list(preroll_files)
+    if os.path.exists(raw_ts) and os.path.getsize(raw_ts) > 1000:
+        all_segments.append(Path(raw_ts))
+
+    if all_segments:
+        concat_list = call_work_dir / "concat_call.txt"
+        with open(concat_list, "w") as f:
+            for s in all_segments:
+                f.write(f"file '{s.resolve()}'\n")
+
         transcode_cmd = [
             "nice", "-n", "15",
             "ffmpeg", "-y",
-            "-i", raw_path,
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(concat_list),
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-crf", "26",
@@ -356,10 +388,9 @@ async def _record(call_id: str, clip_path: str) -> None:
             await t_proc.communicate()
         except Exception as e:
             logger.warning("Call record transcode failed: %s", e)
-        try:
-            os.remove(raw_path)
-        except Exception:
-            pass
+
+    # Cleanup temp directory
+    shutil.rmtree(call_work_dir, ignore_errors=True)
 
     # Probe duration and persist clip metadata
     duration = await _probe_duration(clip_path)

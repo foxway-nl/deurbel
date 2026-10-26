@@ -39,6 +39,7 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from jose import jwt
 from pydantic import BaseModel, Field
@@ -209,6 +210,10 @@ async def _on_ringing(call):
         clip_id=call.call_id,
         snapshot_url=snapshot_url,
     )
+    # Pre-warm Hikvision Port 8000 SDK session so user answering has instant (<200ms) two-way audio
+    from app.audio_bridge import async_prewarm_sdk_session
+    asyncio.create_task(async_prewarm_sdk_session())
+
     await push_event("CALL_RINGING", {
         "event_id": event_dict["id"],
         "call_id": call.call_id,
@@ -241,6 +246,9 @@ async def _on_ended(call):
         "call_id": call.call_id,
         "answered_by": call.claimed_by or "",
     })
+    # Reset active voice channel when call ends
+    from app.audio_bridge import force_close_active_voicecom
+    force_close_active_voicecom(logout_user=True)
 
 
 async def _on_fetch_snapshot(call_id: str) -> str:
@@ -351,6 +359,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 
 @app.middleware("http")
@@ -713,13 +722,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "1.6.0",
-        "version_code": 8,
-        "build_time": "2026-10-26T11:00:00Z",
+        "version": "1.8.0",
+        "version_code": 9,
+        "build_time": "2026-10-26T17:30:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v1.6.0: 100% dynamic network discovery, zero hardcoded IPs, RAM ring buffer, parked car filter, high-priority notifications",
+        "changelog": "v1.8.0: Native go2rtc live WebRTC, strict dual-tone chime, <200ms audio bridge, notification deeplinking, 6s pre-roll, 5G performance optimization",
     }
 
 
@@ -951,7 +960,7 @@ async def serve_snapshot(filename: str):
 
 @app.get("/api/v1/clips")
 @app.get("/api/clips")
-async def get_clips(limit: int = Query(200, ge=1, le=1000), offset: int = Query(0, ge=0)):
+async def get_clips(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)):
     """List all clips sorted newest first with duration and file size."""
     clips = await list_clips(limit=limit, offset=offset)
     result = []

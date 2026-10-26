@@ -151,7 +151,7 @@ fun CallScreen(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
         ) {
-            if (isActive && webRtcSession != null && hasWebRtcVideo) {
+            if (webRtcSession != null && hasWebRtcVideo) {
                 AndroidView(
                     factory = { ctx ->
                         SurfaceViewRenderer(ctx).apply {
@@ -185,14 +185,12 @@ fun CallScreen(
                         PlayerView(ctx).apply {
                             player = exoPlayer
                             useController = false
-                            resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
-                            else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                         }
                     },
                     update = { view ->
                         view.player = exoPlayer
-                        view.resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                        view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                     },
                     modifier = if (isFitMode) {
                         Modifier

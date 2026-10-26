@@ -25,14 +25,27 @@ from app.config import settings
 
 logger = logging.getLogger("foxway.ring_detector")
 
-BELL_FREQ_MIN = 710
-BELL_FREQ_MAX = 750
-NOISE_REF_MIN = 450
-NOISE_REF_MAX = 650
+# Tone 1 (Ding - start tone around 728 Hz)
+TONE1_FREQ_MIN = 710
+TONE1_FREQ_MAX = 750
 
-MIN_BELL_VOLUME = 600000
+# Tone 2 (Dong - following lower or complementary tone around 560-620 Hz or 800-880 Hz)
+TONE2_LOW_MIN = 560
+TONE2_LOW_MAX = 620
+TONE2_HIGH_MIN = 800
+TONE2_HIGH_MAX = 880
+
+# General noise reference band outside chime frequencies
+NOISE_REF_MIN = 350
+NOISE_REF_MAX = 500
+
+MIN_BELL_VOLUME = 500000
 MIN_SNR_RATIO = 2.5
 DEBOUNCE_SECONDS = 5.0
+
+# Tone sequence timing window (seconds between Ding and Dong)
+TONE_SEQ_MIN_DELAY = 0.20  # Minimum 200ms
+TONE_SEQ_MAX_DELAY = 0.90  # Maximum 900ms
 
 
 class DoorbellRingDetector:
@@ -43,6 +56,8 @@ class DoorbellRingDetector:
         self._task: Optional[asyncio.Task] = None
         self._last_ring_ts = 0.0
         self._cooldown = 0.0
+        self._tone1_detected_ts = 0.0
+        self._tone1_peak = 0.0
 
     async def start(self) -> None:
         """Start the background acoustic chime detector."""
@@ -50,7 +65,7 @@ class DoorbellRingDetector:
             return
         self._running = True
         self._task = asyncio.create_task(self._listen_loop())
-        logger.info("Software Doorbell Ring Detector (728 Hz FFT) started")
+        logger.info("Software Doorbell Ring Detector (Dual-Tone Sequential FFT) started")
 
     async def stop(self) -> None:
         """Stop detector."""
@@ -62,6 +77,77 @@ class DoorbellRingDetector:
             except asyncio.CancelledError:
                 pass
         logger.info("Software Doorbell Ring Detector stopped")
+
+    def process_samples(self, audio_data: np.ndarray, now: float) -> bool:
+        """
+        Analyze audio window with sequential dual-tone validation.
+        Returns True if a valid Ding-Dong sequence triggered a ring.
+        """
+        if len(audio_data) < 500:
+            return False
+
+        windowed_data = audio_data * np.hanning(len(audio_data))
+        fft_data = np.fft.rfft(windowed_data)
+        fft_freq = np.fft.rfftfreq(len(windowed_data), 1 / 16000)
+        fft_mag = np.abs(fft_data)
+
+        noise_mask = (fft_freq >= NOISE_REF_MIN) & (fft_freq <= NOISE_REF_MAX)
+        noise_avg = float(np.mean(fft_mag[noise_mask])) + 1.0 if np.any(noise_mask) else 1.0
+
+        t1_mask = (fft_freq >= TONE1_FREQ_MIN) & (fft_freq <= TONE1_FREQ_MAX)
+        t1_peak = float(np.max(fft_mag[t1_mask])) if np.any(t1_mask) else 0.0
+        t1_snr = t1_peak / noise_avg
+
+        t2_mask = (
+            ((fft_freq >= TONE2_LOW_MIN) & (fft_freq <= TONE2_LOW_MAX))
+            | ((fft_freq >= TONE2_HIGH_MIN) & (fft_freq <= TONE2_HIGH_MAX))
+        )
+        t2_peak = float(np.max(fft_mag[t2_mask])) if np.any(t2_mask) else 0.0
+        t2_snr = t2_peak / noise_avg
+
+        global_mean = float(np.mean(fft_mag)) + 1.0
+        t1_sharpness = t1_peak / global_mean
+        t2_sharpness = t2_peak / global_mean
+
+        # 1. Expire stale Tone 1 if older than TONE_SEQ_MAX_DELAY
+        if self._tone1_detected_ts > 0.0 and (now - self._tone1_detected_ts) > TONE_SEQ_MAX_DELAY:
+            logger.debug("Tone 1 expired without Tone 2 (delta=%.2fs)", now - self._tone1_detected_ts)
+            self._tone1_detected_ts = 0.0
+            self._tone1_peak = 0.0
+
+        # 2. Check for Tone 1 (Ding ~728 Hz)
+        # Must be loud, sharp peak (not broad noise/scream), and dominant over Tone 2
+        if t1_peak >= MIN_BELL_VOLUME and t1_sharpness >= 4.0 and (t1_peak / (t2_peak + 1.0)) >= 1.8:
+            if self._tone1_detected_ts == 0.0:
+                self._tone1_detected_ts = now
+                self._tone1_peak = t1_peak
+                logger.info(
+                    "🔔 Tone 1 (Ding ~728Hz) detected (Vol: %.0f | Sharpness: %.1fx). Awaiting Tone 2 within 0.2-0.9s...",
+                    t1_peak, t1_sharpness,
+                )
+            return False
+
+        # 3. Check for Tone 2 (Dong ~580 Hz) following Tone 1 within 0.2s - 0.9s
+        # Must be sharp peak and dominant over Tone 1 (Ding has faded)
+        if self._tone1_detected_ts > 0.0:
+            time_delta = now - self._tone1_detected_ts
+            if TONE_SEQ_MIN_DELAY <= time_delta <= TONE_SEQ_MAX_DELAY:
+                if t2_peak >= (MIN_BELL_VOLUME * 0.5) and t2_sharpness >= 3.5 and (t2_peak / (t1_peak + 1.0)) >= 1.3:
+                    if now > self._cooldown:
+                        self._cooldown = now + DEBOUNCE_SECONDS
+                        logger.info(
+                            "🚨 DUAL-TONE CHIME VERIFIED! Tone 1 (%.0f) → Tone 2 (%.0f) Δt=%.2fs → Ringing!",
+                            self._tone1_peak, t2_peak, time_delta,
+                        )
+                        self._tone1_detected_ts = 0.0
+                        self._tone1_peak = 0.0
+                        return True
+                    else:
+                        logger.debug("Ring ignored due to active debounce cooldown")
+                        self._tone1_detected_ts = 0.0
+                        self._tone1_peak = 0.0
+
+        return False
 
     async def _listen_loop(self) -> None:
         """Continuous listener loop with auto-reconnect."""
@@ -83,37 +169,17 @@ class DoorbellRingDetector:
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=4096)
 
                 while self._running:
-                    # Read 2000 samples (4000 bytes) in an executor to avoid blocking the event loop
                     raw_audio = await asyncio.to_thread(proc.stdout.read, chunk_size * 2)
                     if not raw_audio or len(raw_audio) < chunk_size * 2:
                         logger.warning("RTSP audio stream closed or ended, reconnecting in 3s...")
                         break
 
                     audio_data = np.frombuffer(raw_audio, dtype=np.int16)
-                    windowed_data = audio_data * np.hanning(len(audio_data))
-                    fft_data = np.fft.rfft(windowed_data)
-                    fft_freq = np.fft.rfftfreq(len(windowed_data), 1 / 16000)
-                    fft_mag = np.abs(fft_data)
-
-                    bell_mask = (fft_freq >= BELL_FREQ_MIN) & (fft_freq <= BELL_FREQ_MAX)
-                    bell_peak = float(np.max(fft_mag[bell_mask]))
-
-                    noise_mask = (fft_freq >= NOISE_REF_MIN) & (fft_freq <= NOISE_REF_MAX)
-                    noise_avg = float(np.mean(fft_mag[noise_mask])) + 1.0
-
-                    snr_ratio = bell_peak / noise_avg
-
-                    if bell_peak >= MIN_BELL_VOLUME and snr_ratio >= MIN_SNR_RATIO:
-                        now = time.time()
-                        if now > self._cooldown:
-                            self._cooldown = now + DEBOUNCE_SECONDS
-                            logger.info(
-                                "🚨 DING-DONG DETECTED! (Vol: %.0f | SNR: %.1fx) → Triggering Call State Machine",
-                                bell_peak, snr_ratio
-                            )
-                            # Directly trigger ring inside FastAPI
-                            from app.main import call_sm
-                            asyncio.create_task(call_sm.ring())
+                    now = time.time()
+                    triggered = self.process_samples(audio_data, now)
+                    if triggered:
+                        from app.main import call_sm
+                        asyncio.create_task(call_sm.ring())
 
             except asyncio.CancelledError:
                 break
@@ -129,3 +195,4 @@ class DoorbellRingDetector:
 
 
 ring_detector = DoorbellRingDetector()
+

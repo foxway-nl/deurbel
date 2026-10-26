@@ -104,8 +104,8 @@ def _get_sdk():
     return sdk
 
 
-def force_close_active_voicecom():
-    """Force close any lingering voice handle and user session, resetting hardware channel."""
+def force_close_active_voicecom(logout_user: bool = False):
+    """Force close any lingering voice handle and optionally user session, resetting hardware channel."""
     global _active_voice_handle, _active_user_id, _active_sdk
     with _voicecom_thread_lock:
         if _active_sdk is not None:
@@ -116,13 +116,60 @@ def force_close_active_voicecom():
                 except Exception as e:
                     logger.debug("Exception stopping lingering voice handle: %s", e)
                 _active_voice_handle = -1
-            if _active_user_id >= 0:
+                time.sleep(0.050)
+            if logout_user and _active_user_id >= 0:
                 try:
+                    logger.info("Logging out SDK user session %d", _active_user_id)
                     _active_sdk.NET_DVR_Logout(_active_user_id)
                 except Exception as e:
-                    logger.debug("Exception logging out lingering user session: %s", e)
+                    logger.debug("Exception logging out user session: %s", e)
                 _active_user_id = -1
-        time.sleep(0.150)  # Wait 150ms for doorbell firmware to reset its voice channel
+
+
+def prewarm_sdk_session() -> int:
+    """
+    Asynchronously pre-authenticate with the camera over Hikvision port 8000 SDK.
+    Caches the user_id session so when the user answers, StartVoiceCom connects
+    instantly in under 200ms without waiting for network login handshakes.
+    """
+    global _active_user_id, _active_sdk
+    with _voicecom_thread_lock:
+        try:
+            if _active_sdk is None:
+                _active_sdk = _get_sdk()
+
+            if _active_user_id >= 0:
+                return _active_user_id
+
+            class NET_DVR_DEVICEINFO_V30(ctypes.Structure):
+                _fields_ = [("sSerialNumber", ctypes.c_byte * 48)] + [("res", ctypes.c_byte * 96)]
+
+            dev_info = NET_DVR_DEVICEINFO_V30()
+            _active_sdk.NET_DVR_Login_V30.restype = ctypes.c_int32
+            _active_sdk.NET_DVR_Login_V30.argtypes = [
+                ctypes.c_char_p, ctypes.c_uint16, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p
+            ]
+
+            cam_ip, cam_port, cam_user, cam_pass = _get_credentials()
+            uid = _active_sdk.NET_DVR_Login_V30(
+                cam_ip.encode("utf-8"), cam_port, cam_user.encode("utf-8"), cam_pass.encode("utf-8"), ctypes.byref(dev_info)
+            )
+            if uid >= 0:
+                _active_user_id = uid
+                logger.info("⚡ Pre-warmed Hikvision SDK session ready (user_id=%d)", uid)
+                return uid
+            else:
+                err = _active_sdk.NET_DVR_GetLastError()
+                logger.warning("Pre-warm SDK login attempt returned %d", err)
+                return -1
+        except Exception as e:
+            logger.warning("Pre-warm SDK exception: %s", e)
+            return -1
+
+
+async def async_prewarm_sdk_session() -> None:
+    """Async background task for pre-warming camera SDK login on incoming call."""
+    await asyncio.to_thread(prewarm_sdk_session)
 
 
 def _parse_adts_frames(adts_data: bytes) -> List[bytes]:
@@ -164,41 +211,48 @@ class LiveVoiceComSession:
     def start(self) -> bool:
         global _active_voice_handle, _active_user_id, _active_sdk
         with _voicecom_thread_lock:
-            force_close_active_voicecom()
+            # Stop any lingering voice channel without logging out warm user session
+            force_close_active_voicecom(logout_user=False)
+
+            self.sdk = _get_sdk()
+            _active_sdk = self.sdk
+
+            class NET_DVR_DEVICEINFO_V30(ctypes.Structure):
+                _fields_ = [("sSerialNumber", ctypes.c_byte * 48)] + [("res", ctypes.c_byte * 96)]
+
+            self.sdk.NET_DVR_Login_V30.restype = ctypes.c_int32
+            self.sdk.NET_DVR_Login_V30.argtypes = [
+                ctypes.c_char_p, ctypes.c_uint16, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p
+            ]
+
+            VOICE_CB = ctypes.CFUNCTYPE(None, ctypes.c_int32, ctypes.c_char_p, ctypes.c_uint32, ctypes.c_byte, ctypes.c_void_p)
+            def _cb(h, b, s, f, u): pass
+            self._cb = VOICE_CB(_cb)
+
+            self.sdk.NET_DVR_StartVoiceCom_MR_V30.restype = ctypes.c_int32
+            self.sdk.NET_DVR_StartVoiceCom_MR_V30.argtypes = [ctypes.c_int32, ctypes.c_uint32, VOICE_CB, ctypes.c_void_p]
 
             for attempt in range(1, 4):
                 try:
-                    self.sdk = _get_sdk()
-                    _active_sdk = self.sdk
+                    # Fast-path: use pre-warmed user session if available
+                    if _active_user_id >= 0:
+                        self.uid = _active_user_id
+                    else:
+                        dev_info = NET_DVR_DEVICEINFO_V30()
+                        cam_ip, cam_port, cam_user, cam_pass = _get_credentials()
+                        self.uid = self.sdk.NET_DVR_Login_V30(
+                            cam_ip.encode("utf-8"), cam_port, cam_user.encode("utf-8"), cam_pass.encode("utf-8"), ctypes.byref(dev_info)
+                        )
+                        if self.uid < 0:
+                            err = self.sdk.NET_DVR_GetLastError()
+                            logger.warning("SDK login attempt %d failed: %d", attempt, err)
+                            if attempt < 3:
+                                time.sleep(0.150 * attempt)
+                                continue
+                            return False
+                        _active_user_id = self.uid
 
-                    class NET_DVR_DEVICEINFO_V30(ctypes.Structure):
-                        _fields_ = [("sSerialNumber", ctypes.c_byte * 48)] + [("res", ctypes.c_byte * 96)]
-
-                    dev_info = NET_DVR_DEVICEINFO_V30()
-                    self.sdk.NET_DVR_Login_V30.restype = ctypes.c_int32
-                    self.sdk.NET_DVR_Login_V30.argtypes = [
-                        ctypes.c_char_p, ctypes.c_uint16, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p
-                    ]
-
-                    cam_ip, cam_port, cam_user, cam_pass = _get_credentials()
-                    self.uid = self.sdk.NET_DVR_Login_V30(
-                        cam_ip.encode("utf-8"), cam_port, cam_user.encode("utf-8"), cam_pass.encode("utf-8"), ctypes.byref(dev_info)
-                    )
-                    if self.uid < 0:
-                        err = self.sdk.NET_DVR_GetLastError()
-                        logger.warning("SDK login attempt %d failed: %d", attempt, err)
-                        if attempt < 3:
-                            time.sleep(0.400 * attempt)
-                            continue
-                        return False
-
-                    VOICE_CB = ctypes.CFUNCTYPE(None, ctypes.c_int32, ctypes.c_char_p, ctypes.c_uint32, ctypes.c_byte, ctypes.c_void_p)
-                    def _cb(h, b, s, f, u): pass
-                    self._cb = VOICE_CB(_cb)
-
-                    self.sdk.NET_DVR_StartVoiceCom_MR_V30.restype = ctypes.c_int32
-                    self.sdk.NET_DVR_StartVoiceCom_MR_V30.argtypes = [ctypes.c_int32, ctypes.c_uint32, VOICE_CB, ctypes.c_void_p]
-
+                    # Start voice communication channel (<50ms)
                     self.v_handle = self.sdk.NET_DVR_StartVoiceCom_MR_V30(self.uid, 0, self._cb, None)
                     if self.v_handle < 0:
                         logger.debug("Voice channel 0 failed, trying channel 1...")
@@ -206,11 +260,15 @@ class LiveVoiceComSession:
 
                     if self.v_handle < 0:
                         err = self.sdk.NET_DVR_GetLastError()
-                        logger.warning("StartVoiceCom_MR_V30 attempt %d failed: %d", attempt, err)
-                        self.sdk.NET_DVR_Logout(self.uid)
+                        logger.warning("StartVoiceCom_MR_V30 attempt %d failed: %d (resetting session)", attempt, err)
+                        try:
+                            self.sdk.NET_DVR_Logout(self.uid)
+                        except Exception:
+                            pass
+                        _active_user_id = -1
                         self.uid = -1
                         if attempt < 3:
-                            time.sleep(0.400 * attempt)
+                            time.sleep(0.150 * attempt)
                             continue
                         return False
 
@@ -221,8 +279,9 @@ class LiveVoiceComSession:
 
                 except Exception as e:
                     logger.error("LiveVoiceComSession start error: %s", e)
+                    _active_user_id = -1
                     if attempt < 3:
-                        time.sleep(0.400 * attempt)
+                        time.sleep(0.150 * attempt)
                         continue
                     return False
 

@@ -221,6 +221,9 @@ class WebSocketForegroundService : Service() {
 
                 val intent = Intent(this@WebSocketForegroundService, MainActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    putExtra("screen", "clips")
+                    putExtra("clip_id", event.clipId ?: "")
+                    putExtra("event_id", event.id)
                 }
                 val pendingIntent = PendingIntent.getActivity(
                     this@WebSocketForegroundService,
@@ -261,9 +264,31 @@ class WebSocketForegroundService : Service() {
     }
 
     private fun handleMissed(event: DoorbellEvent) {
-        Log.i(TAG, "CALL_MISSED: ${event.callId}")
+        val callId = event.callId ?: ""
+        Log.i(TAG, "CALL_MISSED: $callId")
         nl.foxway.deurbel.data.AppLogger.getInstance(this).call("Gemiste oproep")
         CallEventBus.postEvent(event)
+
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("screen", "clips")
+            putExtra("clip_id", callId)
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            callId.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notif = NotificationCompat.Builder(this, FoxwayApp.CHANNEL_INFO)
+            .setSmallIcon(android.R.drawable.ic_menu_call)
+            .setContentTitle("Gemiste deurbel oproep")
+            .setContentText("Er is aangebeld bij de voordeur. Tik om de opname te bekijken.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+        getSystemService(NotificationManager::class.java)?.notify(callId.hashCode(), notif)
     }
 
     private fun handleEnded(event: DoorbellEvent) {

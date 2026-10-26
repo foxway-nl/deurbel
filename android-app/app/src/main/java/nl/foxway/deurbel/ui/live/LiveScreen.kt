@@ -168,22 +168,61 @@ fun LiveScreen() {
         }
     }
 
+    // Helper to start stream
+    val startStream = {
+        coroutineScope.launch {
+            try {
+                session?.setMicrophoneMuted(true)
+                session?.close()
+                session = null
+                exoPlayer.stop()
+                streamErrorMessage = null
+                isStreamBuffering = true
+                hasRenderedFirstFrame = false
+                isExoMode = false
+
+                val resolved = resolver.resolve()
+                val targetBaseUrl = resolved.apiBaseUrl
+                val streamName = if (isHd) "deurbel" else "deurbel_sub"
+
+                // Connect natively to go2rtc via WebRTC (exact match to browser)
+                val s = WebRtcSession(context.applicationContext)
+                session = s
+                s.setMicrophoneMuted(true)
+                s.setRemoteAudioMuted(isSpeakerMuted)
+                s.start(
+                    signalingUrl = targetBaseUrl,
+                    streamName = streamName,
+                    isPrewarm = false
+                )
+
+                // Watchdog: If WebRTC does not receive video within 5s, fall back to ExoPlayer
+                delay(5000L)
+                if (session == s && !s.hasVideoTrack.value) {
+                    android.util.Log.w("LiveScreen", "WebRTC watchdog timeout, falling back to ExoPlayer stream")
+                    isExoMode = true
+                    s.close()
+                    session = null
+                    val streamUrl = "$targetBaseUrl/api/v1/stream.mp4?src=$streamName"
+                    val mediaItem = MediaItem.fromUri(streamUrl)
+                    exoPlayer.setMediaItem(mediaItem)
+                    exoPlayer.prepare()
+                    exoPlayer.play()
+                } else if (session == s) {
+                    isStreamBuffering = false
+                    hasRenderedFirstFrame = true
+                }
+            } catch (e: Exception) {
+                streamErrorMessage = "Verbindingsfout: ${e.localizedMessage}"
+                isStreamBuffering = false
+            }
+        }
+    }
+
     // Direct auto-switch upon Wi-Fi <-> 5G network change (Task 1)
     LaunchedEffect(activeBaseUrl) {
         if (activeBaseUrl.isNotBlank()) {
-            val streamUrl = "$activeBaseUrl/api/v1/stream.mp4?src=deurbel_sd"
-            val mediaItem = MediaItem.Builder()
-                .setUri(streamUrl)
-                .setLiveConfiguration(
-                    MediaItem.LiveConfiguration.Builder()
-                        .setMaxPlaybackSpeed(1.02f)
-                        .build()
-                )
-                .build()
-            exoPlayer.setMediaItem(mediaItem)
-            exoPlayer.prepare()
-            exoPlayer.play()
-            isExoMode = true
+            startStream()
         }
     }
 
@@ -199,71 +238,6 @@ fun LiveScreen() {
             while (isRecording) {
                 delay(1000L)
                 recordSeconds++
-            }
-        }
-    }
-
-    // Helper to start stream
-    val startStream = {
-        coroutineScope.launch {
-            try {
-                session?.setMicrophoneMuted(true)
-                session?.close()
-                session = null
-                exoPlayer.stop()
-                streamErrorMessage = null
-                isStreamBuffering = true
-                hasRenderedFirstFrame = false
-
-                val resolved = resolver.resolve()
-                val targetBaseUrl = resolved.apiBaseUrl
-                val streamName = if (isHd) "deurbel" else "deurbel_sub"
-
-                // Check connection type: On WAN/5G, immediately use ExoPlayer over HTTPS port 443 with zero delay
-                if (!resolved.isLan) {
-                    isExoMode = true
-                    val streamUrl = "${resolved.apiBaseUrl}/api/v1/stream.mp4?src=$streamName"
-                    val mediaItem = MediaItem.Builder()
-                        .setUri(streamUrl)
-                        .setLiveConfiguration(
-                            MediaItem.LiveConfiguration.Builder()
-                                .setMaxPlaybackSpeed(1.02f)
-                                .build()
-                        )
-                        .build()
-                    exoPlayer.setMediaItem(mediaItem)
-                    exoPlayer.prepare()
-                } else {
-                    // LAN mode: try direct WebRTC with 2.5s fallback to ExoPlayer
-                    isExoMode = false
-                    val s = WebRtcSession(context.applicationContext)
-                    session = s
-                    s.setMicrophoneMuted(true)
-                    s.setRemoteAudioMuted(isSpeakerMuted)
-                    s.start(
-                        signalingUrl = resolved.apiBaseUrl,
-                        streamName = streamName,
-                        isPrewarm = false
-                    )
-
-                    // Watchdog: If WebRTC does not receive video within 2.5s, fall back to ExoPlayer
-                    delay(2500L)
-                    if (session == s && !s.hasVideoTrack.value) {
-                        isExoMode = true
-                        s.close()
-                        session = null
-                        val streamUrl = "${resolved.apiBaseUrl}/api/v1/stream.mp4?src=$streamName"
-                        val mediaItem = MediaItem.fromUri(streamUrl)
-                        exoPlayer.setMediaItem(mediaItem)
-                        exoPlayer.prepare()
-                    } else if (session == s) {
-                        isStreamBuffering = false
-                        hasRenderedFirstFrame = true
-                    }
-                }
-            } catch (e: Exception) {
-                streamErrorMessage = "Verbindingsfout: ${e.localizedMessage}"
-                isStreamBuffering = false
             }
         }
     }
