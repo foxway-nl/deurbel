@@ -173,7 +173,7 @@ fun CallScreen(
                     modifier = if (isFitMode) {
                         Modifier
                             .fillMaxWidth()
-                            .aspectRatio(16f / 9f)
+                            .aspectRatio(4f / 3f)
                     } else {
                         Modifier.fillMaxSize()
                     }
@@ -197,7 +197,7 @@ fun CallScreen(
                     modifier = if (isFitMode) {
                         Modifier
                             .fillMaxWidth()
-                            .aspectRatio(16f / 9f)
+                            .aspectRatio(4f / 3f)
                     } else {
                         Modifier.fillMaxSize()
                     }
@@ -208,7 +208,7 @@ fun CallScreen(
                         model = snapshotUrl,
                         contentDescription = "Snapshot preview",
                         contentScale = if (isFitMode) ContentScale.Fit else ContentScale.Crop,
-                        modifier = if (isFitMode) Modifier.fillMaxWidth().aspectRatio(16f / 9f) else Modifier.fillMaxSize()
+                        modifier = if (isFitMode) Modifier.fillMaxWidth().aspectRatio(4f / 3f) else Modifier.fillMaxSize()
                     )
                 }
 

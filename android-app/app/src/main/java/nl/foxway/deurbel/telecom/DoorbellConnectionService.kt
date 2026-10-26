@@ -16,6 +16,9 @@ import android.os.VibratorManager
 import android.telecom.*
 import android.util.Log
 import kotlinx.coroutines.*
+import android.app.NotificationManager
+import android.app.PendingIntent
+import androidx.core.app.NotificationCompat
 import nl.foxway.deurbel.FoxwayApp
 import nl.foxway.deurbel.R
 import nl.foxway.deurbel.data.models.ClaimRequest
@@ -71,8 +74,90 @@ class DoorbellConnectionService : ConnectionService() {
             }
         }
 
+        const val NOTIFICATION_ID_RING = 8008
+        const val ACTION_DECLINE_CALL = "nl.foxway.deurbel.ACTION_DECLINE_CALL"
+
+        fun showIncomingCallNotification(context: Context, callId: String, snapshotUrl: String) {
+            try {
+                val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+
+                val fullScreenIntent = Intent(context, CallActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    putExtra(CallActivity.EXTRA_CALL_ID, callId)
+                    putExtra(CallActivity.EXTRA_IS_ACTIVE, false)
+                    putExtra(CallActivity.EXTRA_SNAPSHOT_URL, snapshotUrl)
+                }
+                val fullScreenPendingIntent = PendingIntent.getActivity(
+                    context,
+                    callId.hashCode(),
+                    fullScreenIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+
+                val answerIntent = Intent(context, CallActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    putExtra(CallActivity.EXTRA_CALL_ID, callId)
+                    putExtra(CallActivity.EXTRA_IS_ACTIVE, true)
+                    putExtra(CallActivity.EXTRA_SNAPSHOT_URL, snapshotUrl)
+                }
+                val answerPendingIntent = PendingIntent.getActivity(
+                    context,
+                    callId.hashCode() + 1,
+                    answerIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+
+                val declineIntent = Intent(context, CallActionReceiver::class.java).apply {
+                    action = ACTION_DECLINE_CALL
+                    putExtra(EXTRA_CALL_ID, callId)
+                }
+                val declinePendingIntent = PendingIntent.getBroadcast(
+                    context,
+                    callId.hashCode() + 2,
+                    declineIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+
+                val notifBuilder = NotificationCompat.Builder(context, FoxwayApp.CHANNEL_RING)
+                    .setSmallIcon(R.drawable.ic_launcher)
+                    .setContentTitle("Inkomende deurbel oproep")
+                    .setContentText("Er staat iemand bij de voordeur")
+                    .setCategory(NotificationCompat.CATEGORY_CALL)
+                    .setPriority(NotificationCompat.PRIORITY_MAX)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .setOngoing(true)
+                    .setAutoCancel(true)
+                    .setContentIntent(fullScreenPendingIntent)
+                    .setFullScreenIntent(fullScreenPendingIntent, true)
+                    .addAction(R.drawable.ic_launcher, "Opnemen", answerPendingIntent)
+                    .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Weigeren", declinePendingIntent)
+
+                notificationManager.notify(NOTIFICATION_ID_RING, notifBuilder.build())
+                Log.i(TAG, "Posted incoming call notification with fullScreenIntent")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error posting fullScreenIntent notification", e)
+            }
+        }
+
+        fun cancelCallNotification(context: Context) {
+            try {
+                val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                notificationManager?.cancel(NOTIFICATION_ID_RING)
+            } catch (e: Exception) {
+                Log.w(TAG, "Error cancelling call notification: ${e.message}")
+            }
+        }
+
         fun startIncomingCall(context: Context, callId: String, snapshotUrl: String) {
             Log.i(TAG, "startIncomingCall triggered: callId=$callId")
+            // 1. Post high-priority full-screen intent notification immediately
+            // Bypasses Android 10-14 background activity launch restrictions and wakes screen
+            showIncomingCallNotification(context, callId, snapshotUrl)
+
             try {
                 registerPhoneAccount(context)
                 val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
@@ -118,6 +203,7 @@ class DoorbellConnectionService : ConnectionService() {
         }
 
         fun notifyAnswered() {
+            cancelCallNotification(FoxwayApp.instance)
             currentConnection?.let { conn ->
                 Log.i(TAG, "notifyAnswered called from UI")
                 conn.stopRingtone()
@@ -126,6 +212,7 @@ class DoorbellConnectionService : ConnectionService() {
         }
 
         fun notifyRejected() {
+            cancelCallNotification(FoxwayApp.instance)
             currentConnection?.let { conn ->
                 Log.i(TAG, "notifyRejected called from UI")
                 conn.stopRingtone()
@@ -136,6 +223,7 @@ class DoorbellConnectionService : ConnectionService() {
         }
 
         fun notifyDisconnected() {
+            cancelCallNotification(FoxwayApp.instance)
             currentConnection?.let { conn ->
                 Log.i(TAG, "notifyDisconnected called from UI")
                 conn.stopRingtone()
@@ -146,6 +234,7 @@ class DoorbellConnectionService : ConnectionService() {
         }
 
         fun silenceRingtone() {
+            cancelCallNotification(FoxwayApp.instance)
             currentConnection?.let { conn ->
                 Log.i(TAG, "silenceRingtone called from UI")
                 conn.stopRingtone()
@@ -153,6 +242,7 @@ class DoorbellConnectionService : ConnectionService() {
         }
 
         fun notifyDismissed() {
+            cancelCallNotification(FoxwayApp.instance)
             currentConnection?.let { conn ->
                 Log.i(TAG, "notifyDismissed called")
                 conn.stopRingtone()

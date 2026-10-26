@@ -30,9 +30,9 @@ BELL_FREQ_MAX = 750
 NOISE_REF_MIN = 450
 NOISE_REF_MAX = 650
 
-MIN_BELL_VOLUME = 1400000
-MIN_SNR_RATIO = 3.0
-DEBOUNCE_SECONDS = 15.0
+MIN_BELL_VOLUME = 600000
+MIN_SNR_RATIO = 2.5
+DEBOUNCE_SECONDS = 5.0
 
 
 class DoorbellRingDetector:
@@ -72,8 +72,11 @@ class DoorbellRingDetector:
             proc: Optional[subprocess.Popen] = None
             try:
                 cmd = [
-                    "ffmpeg", "-fflags", "nobuffer", "-flags", "low_delay",
+                    "nice", "-n", "15",
+                    "ffmpeg", "-y", "-nostdin",
+                    "-fflags", "nobuffer", "-flags", "low_delay",
                     "-rtsp_transport", "tcp", "-i", rtsp_url,
+                    "-vn",
                     "-f", "s16le", "-ac", "1", "-ar", "16000",
                     "-loglevel", "quiet", "-"
                 ]

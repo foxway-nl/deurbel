@@ -1,6 +1,6 @@
 # Video, Audio, and Binary Media
-clips/
-snapshots/
+/clips/
+/snapshots/
 *.mp4
 *.adts
 *.wav

@@ -134,33 +134,35 @@ class CallStateMachine:
             # Persist initial call log
             await save_call_log(call_id, CallState.RINGING.value)
 
-        # ── Outside lock: fetch snapshot & start recorder ──
-        if self.on_fetch_snapshot:
-            try:
-                snapshot_path = await self.on_fetch_snapshot(call_id)
-                call.snapshot_path = snapshot_path
-            except Exception:
-                logger.exception("Failed to fetch snapshot for %s", call_id)
-
         clip_path = str(settings.CLIPS_DIR / f"{call_id}.mp4")
         call.clip_path = clip_path
+        call.snapshot_path = str(settings.SNAPSHOTS_DIR / f"{call_id}.jpg")
 
-        if self.on_start_recording:
-            try:
-                call.recorder_task = await self.on_start_recording(call_id, clip_path)
-            except Exception:
-                logger.exception("Failed to start recorder for %s", call_id)
-
-        # Persist paths
-        await save_call_log(
-            call_id, CallState.RINGING.value,
-            snapshot_path=call.snapshot_path or "",
-            clip_path=clip_path,
-        )
-
-        # Fire RINGING callback (broadcast WS + FCM)
+        # 1. Fire RINGING callback IMMEDIATELY (broadcast WS + FCM with zero latency)
         if self.on_ringing:
-            await self.on_ringing(call)
+            asyncio.create_task(self.on_ringing(call))
+
+        # 2. Concurrently fetch snapshot and start recorder in background
+        async def _async_media_init():
+            if self.on_fetch_snapshot:
+                try:
+                    await self.on_fetch_snapshot(call_id)
+                except Exception:
+                    logger.exception("Failed to fetch snapshot for %s", call_id)
+
+            if self.on_start_recording:
+                try:
+                    call.recorder_task = await self.on_start_recording(call_id, clip_path)
+                except Exception:
+                    logger.exception("Failed to start recorder for %s", call_id)
+
+            await save_call_log(
+                call_id, CallState.RINGING.value,
+                snapshot_path=call.snapshot_path or "",
+                clip_path=clip_path,
+            )
+
+        asyncio.create_task(_async_media_init())
 
         # Start 35-second timeout
         call.timeout_task = asyncio.create_task(self._ring_timeout(call))

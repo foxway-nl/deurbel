@@ -53,6 +53,8 @@ class CallActivity : ComponentActivity() {
         val initialActive = intent.getBooleanExtra(EXTRA_IS_ACTIVE, false)
         if (initialActive) {
             isClaimedByMe = true
+            DoorbellConnectionService.cancelCallNotification(this)
+            handleAnswer()
         }
 
         setupLockscreenFlags()
@@ -205,6 +207,7 @@ class CallActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        DoorbellConnectionService.cancelCallNotification(this)
         if (isClaimedByMe && callId.isNotEmpty()) {
             val cid = callId
             FoxwayApp.instance.applicationScope.launch {

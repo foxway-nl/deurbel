@@ -151,6 +151,16 @@
             </intent-filter>
         </receiver>
 
+        <!-- Receiver for notification actions (Answer / Decline) -->
+        <receiver
+            android:name=".telecom.CallActionReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="nl.foxway.deurbel.ACTION_DECLINE_CALL" />
+            </intent-filter>
+        </receiver>
+
         <!-- FCM default notification channel -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"

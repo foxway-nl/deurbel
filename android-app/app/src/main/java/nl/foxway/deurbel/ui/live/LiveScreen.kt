@@ -386,7 +386,7 @@ fun LiveScreen() {
                             modifier = if (isFitMode) {
                                 Modifier
                                     .fillMaxWidth()
-                                    .aspectRatio(16f / 9f)
+                                    .aspectRatio(4f / 3f)
                             } else {
                                 Modifier.fillMaxSize()
                             }
@@ -421,7 +421,7 @@ fun LiveScreen() {
                                 modifier = if (isFitMode) {
                                     Modifier
                                         .fillMaxWidth()
-                                        .aspectRatio(16f / 9f)
+                                        .aspectRatio(4f / 3f)
                                 } else {
                                     Modifier.fillMaxSize()
                                 }

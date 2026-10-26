@@ -1144,7 +1144,7 @@ async def stream_mp4_proxy(src: str = Query("deurbel"), mode: str = Query("auto"
     Supports HD ('deurbel') and SD ('deurbel_sub' / alias 'deurbel_sd').
     """
     if src in ("deurbel_sd", "sd", "sub"):
-        src = "deurbel_sub"
+        src = "deurbel_sd"
     headers = {
         "Content-Type": "video/mp4",
         "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
@@ -1159,11 +1159,13 @@ async def stream_mp4_proxy(src: str = Query("deurbel"), mode: str = Query("auto"
         # Direct zero-latency FFmpeg transcoding mode
         rtsp_target = f"rtsp://127.0.0.1:8554/{src}"
         cmd = [
+            "nice", "-n", "15",
             "ffmpeg", "-y", "-nostdin",
             "-fflags", "nobuffer", "-flags", "low_delay",
             "-probesize", "32768", "-analyzeduration", "200000",
             "-rtsp_transport", "tcp",
             "-i", rtsp_target,
+            "-vf", "scale=640:480,setsar=1:1", "-aspect", "4:3",
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "15",
             "-c:a", "aac", "-b:a", "64k",
             "-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof",

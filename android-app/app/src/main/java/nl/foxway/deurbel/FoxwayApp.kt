@@ -4,6 +4,8 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import nl.foxway.deurbel.data.PreferencesManager
 
 /**
@@ -26,6 +28,15 @@ class FoxwayApp : Application() {
         preferencesManager = PreferencesManager(this)
         createNotificationChannels()
         nl.foxway.deurbel.telecom.DoorbellConnectionService.registerPhoneAccount(this)
+        applicationScope.launch {
+            try {
+                if (preferencesManager.isPaired.first()) {
+                    nl.foxway.deurbel.network.WebSocketForegroundService.start(this@FoxwayApp)
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("FoxwayApp", "Could not auto-start background service: ${e.message}")
+            }
+        }
     }
 
     /**
