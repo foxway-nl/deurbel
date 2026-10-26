@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     # ── Networking (Resolved dynamically at runtime) ──────────────────
     LAN_SUBNET: str = ""
     LAN_URL: str = ""
-    WAN_URL: str = ""
+    WAN_URL: str = "https://deurbel.foxway.nl"
     GO2RTC_LAN_WS: str = ""
     GO2RTC_WAN_WS: str = ""
     HOST_PORT: int = 8090

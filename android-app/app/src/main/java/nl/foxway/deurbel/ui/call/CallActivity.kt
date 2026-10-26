@@ -15,7 +15,6 @@ import kotlinx.coroutines.launch
 import nl.foxway.deurbel.FoxwayApp
 import nl.foxway.deurbel.data.models.ClaimRequest
 import nl.foxway.deurbel.data.models.DoorbellEvent
-import nl.foxway.deurbel.data.models.QuickReplyRequest
 import nl.foxway.deurbel.network.ApiClientFactory
 import nl.foxway.deurbel.network.CallEventBus
 import nl.foxway.deurbel.network.EndpointResolver
@@ -99,21 +98,24 @@ class CallActivity : ComponentActivity() {
                     }
                 }
 
+                var isSilenced by remember { mutableStateOf(false) }
+
                 CallScreen(
                     callId = callId,
                     snapshotUrl = snapshotUrl,
                     isActive = isActive,
+                    isSilenced = isSilenced,
                     answeredByElsewhere = answeredByElsewhere,
                     webRtcSession = session,
                     isMicMuted = isMicMuted,
                     isSpeakerOn = isSpeakerOn,
-                    videoStreamUrl = streamUrl,
                     onAnswer = {
                         isActive = true
                         handleAnswer()
                     },
-                    onDecline = {
-                        handleDecline()
+                    onSilence = {
+                        isSilenced = true
+                        handleSilence()
                     },
                     onHangup = {
                         handleHangup()
@@ -131,9 +133,6 @@ class CallActivity : ComponentActivity() {
                             it.setSpeakerphone(newSpeaker)
                             isSpeakerOn = newSpeaker
                         }
-                    },
-                    onQuickReply = { replyId ->
-                        handleQuickReply(replyId)
                     }
                 )
             }
@@ -163,24 +162,8 @@ class CallActivity : ComponentActivity() {
         }
     }
 
-    private fun handleDecline() {
-        val wasClaimed = isClaimedByMe
-        isClaimedByMe = false
-        DoorbellConnectionService.notifyRejected()
-        lifecycleScope.launch {
-            try {
-                val prefs = FoxwayApp.instance.preferencesManager
-                val resolver = EndpointResolver(prefs)
-                val resolved = resolver.resolve()
-                val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
-                api.hangup(callId)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in handleDecline", e)
-            } finally {
-                PrewarmEngine.stopPrewarm()
-                finishAndRemoveTask()
-            }
-        }
+    private fun handleSilence() {
+        DoorbellConnectionService.silenceRingtone()
     }
 
     private fun handleHangup() {
@@ -196,27 +179,6 @@ class CallActivity : ComponentActivity() {
                 api.hangup(callId)
             } catch (e: Exception) {
                 Log.e(TAG, "Error in handleHangup", e)
-            } finally {
-                PrewarmEngine.stopPrewarm()
-                finishAndRemoveTask()
-            }
-        }
-    }
-
-    private fun handleQuickReply(replyId: String) {
-        isClaimedByMe = false
-        DoorbellConnectionService.notifyDisconnected()
-        lifecycleScope.launch {
-            try {
-                val prefs = FoxwayApp.instance.preferencesManager
-                val resolver = EndpointResolver(prefs)
-                val resolved = resolver.resolve()
-                val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
-                val userName = prefs.getUserName()
-
-                api.quickReply(callId, QuickReplyRequest(replyId = replyId, userName = userName))
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in handleQuickReply", e)
             } finally {
                 PrewarmEngine.stopPrewarm()
                 finishAndRemoveTask()

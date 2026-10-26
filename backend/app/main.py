@@ -446,10 +446,21 @@ async def verify_auth_or_local(
 
 @app.get("/api/v1/status")
 @app.get("/api/status")
+@app.head("/api/v1/status")
+@app.head("/api/status")
 async def get_status():
     """Current call state + connected clients summary."""
     state = await call_sm.status()
     state["connected_ws_users"] = ws_manager.connected_user_ids
+    from app.models import get_dynamic_wan_url
+    server_wan_url = await get_dynamic_wan_url()
+    state["server_wan_url"] = server_wan_url
+    state["wan_url"] = server_wan_url
+    from app.camera_discovery import get_local_ip
+    local_ip = get_local_ip()
+    server_lan_url = f"http://{local_ip}:{settings.HOST_PORT}"
+    state["server_lan_url"] = server_lan_url
+    state["lan_url"] = server_lan_url
     return state
 
 
@@ -1125,12 +1136,15 @@ async def download_apk():
 # ══════════════════════════════════════════════════════════════════════
 
 @app.get("/api/v1/stream.mp4", tags=["Live Video & Streaming"])
+@app.head("/api/v1/stream.mp4", tags=["Live Video & Streaming"])
 async def stream_mp4_proxy(src: str = Query("deurbel"), mode: str = Query("auto")):
     """
     Proxies continuous fragmented MP4 live stream (H.264 + AAC) with zero latency.
     Forces real-time chunking with anti-buffering headers for Cloudflare / 5G proxies.
-    Supports HD ('deurbel') and SD ('deurbel_sub').
+    Supports HD ('deurbel') and SD ('deurbel_sub' / alias 'deurbel_sd').
     """
+    if src in ("deurbel_sd", "sd", "sub"):
+        src = "deurbel_sub"
     headers = {
         "Content-Type": "video/mp4",
         "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",

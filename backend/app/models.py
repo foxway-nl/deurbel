@@ -213,6 +213,14 @@ async def init_db() -> None:
         except Exception:
             pass
 
+        # Ensure server_wan_url default exists in app_settings
+        try:
+            await db.execute(
+                "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('server_wan_url', 'https://deurbel.foxway.nl')"
+            )
+        except Exception:
+            pass
+
         await db.commit()
 
 
@@ -578,7 +586,10 @@ async def get_events_since(since_id: int = 0, limit: int = 50) -> list[dict]:
 async def get_dynamic_wan_url() -> str:
     """Return the currently detected or configured dynamic WAN URL."""
     from app.config import settings
-    return await get_setting("server_wan_url", settings.WAN_URL)
+    val = await get_setting("server_wan_url", settings.WAN_URL or "https://deurbel.foxway.nl")
+    if val and val.startswith("http"):
+        return val.rstrip("/")
+    return (settings.WAN_URL or "https://deurbel.foxway.nl").rstrip("/")
 
 
 async def set_dynamic_wan_url(url: str) -> None:

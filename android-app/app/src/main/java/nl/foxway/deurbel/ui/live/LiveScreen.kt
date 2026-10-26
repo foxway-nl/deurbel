@@ -46,6 +46,7 @@ import nl.foxway.deurbel.FoxwayApp
 import nl.foxway.deurbel.audio.DoorbellAudioStreamer
 import nl.foxway.deurbel.data.models.ManualRecordStart
 import nl.foxway.deurbel.network.ApiClientFactory
+import nl.foxway.deurbel.network.ConnectionManager
 import nl.foxway.deurbel.network.EndpointResolver
 import nl.foxway.deurbel.network.EndpointResolver.ConnectionType
 import nl.foxway.deurbel.ui.theme.*
@@ -72,10 +73,12 @@ fun LiveScreen() {
     val prefs = remember { FoxwayApp.instance.preferencesManager }
     val resolver = remember { EndpointResolver(prefs) }
 
+    val connectionManager = remember { ConnectionManager.getInstance(context) }
+    val activeBaseUrl by connectionManager.activeBaseUrl.collectAsState()
+    val isWanMode by connectionManager.isWanMode.collectAsState()
     val connectionType by resolver.connectionType.collectAsState()
     var session by remember { mutableStateOf<WebRtcSession?>(null) }
     val audioStreamer = remember { DoorbellAudioStreamer() }
-    var activeBaseUrl by remember { mutableStateOf("") }
 
     var isPttActive by remember { mutableStateOf(false) }
     var isFitMode by remember { mutableStateOf(true) }
@@ -108,10 +111,10 @@ fun LiveScreen() {
     val exoPlayer = remember {
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                500,  // minBufferMs
-                1500, // maxBufferMs
-                250,  // bufferForPlaybackMs
-                500   // bufferForPlaybackAfterRebufferMs
+                400,  // minBufferMs
+                1200, // maxBufferMs
+                200,  // bufferForPlaybackMs
+                400   // bufferForPlaybackAfterRebufferMs
             )
             .build()
         ExoPlayer.Builder(context)
@@ -136,7 +139,25 @@ fun LiveScreen() {
             }
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 isStreamBuffering = false
-                streamErrorMessage = "5G live stream onderbroken (${error.localizedMessage ?: "Verbindingsfout"})"
+                streamErrorMessage = "Stream herstellen..."
+                // Direct automatic reconnect + refreshRoute after 500ms per Task 1
+                coroutineScope.launch {
+                    delay(500L)
+                    connectionManager.refreshRoute()
+                    val targetBase = connectionManager.activeBaseUrl.value.ifBlank { "https://deurbel.foxway.nl" }
+                    val streamUrl = "$targetBase/api/v1/stream.mp4?src=deurbel_sd"
+                    val mediaItem = MediaItem.Builder()
+                        .setUri(streamUrl)
+                        .setLiveConfiguration(
+                            MediaItem.LiveConfiguration.Builder()
+                                .setMaxPlaybackSpeed(1.02f)
+                                .build()
+                        )
+                        .build()
+                    exoPlayer.setMediaItem(mediaItem)
+                    exoPlayer.prepare()
+                    exoPlayer.play()
+                }
             }
         }
         exoPlayer.addListener(listener)
@@ -144,6 +165,25 @@ fun LiveScreen() {
             exoPlayer.removeListener(listener)
             exoPlayer.stop()
             exoPlayer.release()
+        }
+    }
+
+    // Direct auto-switch upon Wi-Fi <-> 5G network change (Task 1)
+    LaunchedEffect(activeBaseUrl) {
+        if (activeBaseUrl.isNotBlank()) {
+            val streamUrl = "$activeBaseUrl/api/v1/stream.mp4?src=deurbel_sd"
+            val mediaItem = MediaItem.Builder()
+                .setUri(streamUrl)
+                .setLiveConfiguration(
+                    MediaItem.LiveConfiguration.Builder()
+                        .setMaxPlaybackSpeed(1.02f)
+                        .build()
+                )
+                .build()
+            exoPlayer.setMediaItem(mediaItem)
+            exoPlayer.prepare()
+            exoPlayer.play()
+            isExoMode = true
         }
     }
 
@@ -176,7 +216,7 @@ fun LiveScreen() {
                 hasRenderedFirstFrame = false
 
                 val resolved = resolver.resolve()
-                activeBaseUrl = resolved.apiBaseUrl
+                val targetBaseUrl = resolved.apiBaseUrl
                 val streamName = if (isHd) "deurbel" else "deurbel_sub"
 
                 // Check connection type: On WAN/5G, immediately use ExoPlayer over HTTPS port 443 with zero delay

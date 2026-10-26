@@ -145,6 +145,13 @@ class DoorbellConnectionService : ConnectionService() {
             }
         }
 
+        fun silenceRingtone() {
+            currentConnection?.let { conn ->
+                Log.i(TAG, "silenceRingtone called from UI")
+                conn.stopRingtone()
+            }
+        }
+
         fun notifyDismissed() {
             currentConnection?.let { conn ->
                 Log.i(TAG, "notifyDismissed called")

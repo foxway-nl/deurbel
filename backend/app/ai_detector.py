@@ -1,19 +1,19 @@
 """
-Foxway Smart Doorbell — Low-CPU 2-Stage AI Detection & Activity Zone Engine.
+Foxway Smart Doorbell — Ultralytics YOLOv8 + ByteTrack & MOG2 AI Detection Engine.
 
-Designed specifically for HP EliteDesk 405 (AMD Ryzen 5 2400GE):
-  • Stage 1: Ultra-low CPU (<1%) frame-differencing on 768x432 substream at 1.5 fps.
-  • Activity Zone / Privacy Mask: Configurable mask (e.g. ignores top X% of frame / street).
-  • Stage 2: ONNXRuntime CPU inference (~35-40ms) using YOLOv8n only when motion is triggered.
-  • Categorizes: "person", "vehicle", "animal", "motion".
-  • Quiet Hours / Nachtmodus: Suppresses alert notifications while still recording.
-  • Cooldown & Pre-roll segment support.
+Engine Architecture:
+  • Official Ultralytics YOLOv8n model with ByteTrack multi-object tracking.
+  • OpenCV MOG2 Background Subtractor with morphological opening for noise & rain removal.
+  • Spatial Parked-Vehicle Baseline: 100% elimination of stationary parked cars (IoU >= 0.45).
+  • Strict Priority Evaluation: Persoon (0) > Dier (14, 15, 16) > Rijdend Voertuig (1, 2, 3, 5, 7).
+  • Non-blocking async clip dispatch with 6s pre-roll and 6s post-roll.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from datetime import datetime, timezone
@@ -22,7 +22,6 @@ from typing import Optional
 
 import cv2
 import numpy as np
-import onnxruntime as ort
 
 from app.config import settings
 from app.models import get_setting, set_setting, save_clip
@@ -33,14 +32,54 @@ logger = logging.getLogger("foxway.ai_detector")
 # COCO Class ID mappings for YOLOv8
 PERSON_CLASSES = {0}
 VEHICLE_CLASSES = {1, 2, 3, 5, 7}  # bicycle, car, motorcycle, bus, truck
-ANIMAL_CLASSES = {14, 15, 16, 17, 18, 19}  # bird, cat, dog, horse, sheep, cow
+ANIMAL_CLASSES = {14, 15, 16}      # bird, cat, dog
 
 COCO_NAMES = {
-    0: "Persoon", 1: "Fiets", 2: "Auto", 3: "Motor", 5: "Bus", 7: "Vrachtwagen",
-    14: "Vogel", 15: "Kat", 16: "Hond", 17: "Paard", 18: "Schaap", 19: "Koe"
+    0: "Persoon",
+    1: "Fiets", 2: "Auto", 3: "Motor", 5: "Bus", 7: "Vrachtwagen",
+    14: "Vogel", 15: "Kat", 16: "Hond",
 }
 
-_MODEL_PATH = "/mnt/opslag/deurbel/backend/yolov8n.onnx"
+_MODEL_PATH = (
+    "/mnt/opslag/deurbel/backend/yolov8n.pt"
+    if os.path.exists("/mnt/opslag/deurbel/backend/yolov8n.pt")
+    else "/app/yolov8n.pt"
+)
+
+
+def compute_iou(
+    boxA: tuple[float, float, float, float],
+    boxB: tuple[float, float, float, float],
+) -> float:
+    """Compute Intersection over Union (IoU) of two bounding boxes (x1, y1, x2, y2)."""
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+
+    inter_w = max(0.0, xB - xA)
+    inter_h = max(0.0, yB - yA)
+    inter_area = inter_w * inter_h
+
+    areaA = max(0.0, (boxA[2] - boxA[0]) * (boxA[3] - boxA[1]))
+    areaB = max(0.0, (boxB[2] - boxB[0]) * (boxB[3] - boxB[1]))
+    union_area = areaA + areaB - inter_area
+
+    if union_area <= 0.0:
+        return 0.0
+    return inter_area / union_area
+
+
+def is_parked_vehicle(
+    box: tuple[float, float, float, float],
+    parked_boxes: list[tuple[float, float, float, float]],
+    threshold: float = 0.45,
+) -> bool:
+    """Return True if box matches any parked reference box with IoU >= threshold."""
+    for p_box in parked_boxes:
+        if compute_iou(box, p_box) >= threshold:
+            return True
+    return False
 
 
 async def get_substream_rtsp() -> str:
@@ -68,7 +107,6 @@ class DetectionSettings:
             "quiet_hours_enabled": await get_setting("quiet_hours_enabled", "false") == "true",
             "quiet_hours_start": await get_setting("quiet_hours_start", "23:00"),
             "quiet_hours_end": await get_setting("quiet_hours_end", "07:00"),
-            "activity_zone_top_ignore_percent": 0,  # Activity zone removed per specification
             "motion_sensitivity": float(await get_setting("motion_sensitivity", "1.5")),
         }
 
@@ -79,35 +117,51 @@ class DetectionSettings:
 
 
 class SmartDetector:
-    """Manages the 2-stage motion & AI detection pipeline."""
+    """
+    Manages the Ultralytics YOLOv8 + ByteTrack + MOG2 detection pipeline.
+    Eliminates parked cars via spatial baseline IoU >= 0.45 and enforces strict class priority.
+    """
 
     def __init__(self):
-        self._session: Optional[ort.InferenceSession] = None
-        self._running = False
+        self.model = None
+        self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
+            history=400,
+            varThreshold=30,
+            detectShadows=False,
+        )
+        self.kernel_5x5 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+
+        # Spatial parked vehicle reference boxes: list of (x1, y1, x2, y2)
+        self.parked_vehicle_boxes: list[tuple[float, float, float, float]] = []
+        self.last_baseline_update: float = 0.0
+
+        # Multi-frame tracking history: track_id -> list of (cx, cy)
+        self.track_history: dict[int, list[tuple[float, float]]] = {}
+
+        self._running: bool = False
         self._task: Optional[asyncio.Task] = None
-        self._last_trigger_time = 0.0
-        self._cooldown_seconds = 25.0
-        self._last_motion_seen = 0.0
+        self._last_trigger_time: float = 0.0
+        self._cooldown_seconds: float = 25.0
+        self._last_motion_seen: float = 0.0
 
     def is_motion_active(self) -> bool:
-        """Check if active motion was detected in the camera frame within the last 1.5 seconds."""
-        return (time.time() - self._last_motion_seen) < 1.5
+        """Check if active motion was detected in the camera frame within the last 2.0 seconds."""
+        return (time.time() - self._last_motion_seen) < 2.0
 
     def init_model(self) -> bool:
-        """Initialize ONNXRuntime session for YOLOv8n."""
-        if not os.path.exists(_MODEL_PATH):
-            logger.warning("YOLOv8n ONNX model not found at %s", _MODEL_PATH)
-            return False
+        """Initialize official Ultralytics YOLOv8n model."""
+        if self.model is not None:
+            return True
         try:
-            opts = ort.SessionOptions()
-            opts.intra_op_num_threads = 2
-            opts.inter_op_num_threads = 1
-            opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            self._session = ort.InferenceSession(_MODEL_PATH, sess_options=opts, providers=["CPUExecutionProvider"])
-            logger.info("YOLOv8n ONNX model loaded successfully into CPU session")
+            from ultralytics import YOLO
+            if not os.path.exists(_MODEL_PATH):
+                logger.warning("YOLOv8n model file not found at %s", _MODEL_PATH)
+                return False
+            self.model = YOLO(_MODEL_PATH)
+            logger.info("Ultralytics YOLOv8n model loaded successfully from %s", _MODEL_PATH)
             return True
         except Exception as e:
-            logger.error("Failed loading YOLOv8n model: %s", e)
+            logger.error("Failed loading Ultralytics YOLO model: %s", e)
             return False
 
     def is_in_quiet_hours(self, start_str: str, end_str: str) -> bool:
@@ -126,121 +180,206 @@ class SmartDetector:
         except Exception:
             return False
 
-    def detect_objects_yolo(self, frame: np.ndarray) -> list[dict]:
+    def update_parked_baseline(self, frame: np.ndarray) -> list[tuple[float, float, float, float]]:
         """
-        Run YOLOv8n inference on a single frame and return all detected objects.
-        Returns list of dicts: {'cid', 'conf', 'category', 'label', 'bbox': (x1, y1, x2, y2), 'center': (cx, cy)}
+        Record stationary vehicle baseline (classes 2=car, 5=bus, 7=truck).
+        Called on startup and every 60 seconds during quiet periods.
         """
-        if self._session is None:
-            return []
+        if self.model is None and not self.init_model():
+            return self.parked_vehicle_boxes
 
         try:
-            h, w = frame.shape[:2]
-            scale = min(640 / h, 640 / w)
-            nh, nw = int(h * scale), int(w * scale)
-            resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
-            canvas = np.zeros((640, 640, 3), dtype=np.uint8)
-            pad_top = (640 - nh) // 2
-            pad_left = (640 - nw) // 2
-            canvas[pad_top : pad_top + nh, pad_left : pad_left + nw] = resized
+            res = self.model(
+                frame,
+                classes=[2, 5, 7],
+                conf=0.35,
+                verbose=False,
+            )
+            new_boxes: list[tuple[float, float, float, float]] = []
+            if res and len(res) > 0 and res[0].boxes is not None:
+                for b in res[0].boxes.xyxy.cpu().tolist():
+                    new_boxes.append((float(b[0]), float(b[1]), float(b[2]), float(b[3])))
 
-            blob = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            blob = np.transpose(blob, (2, 0, 1))[np.newaxis, ...]
-
-            input_name = self._session.get_inputs()[0].name
-            outputs = self._session.run(None, {input_name: blob})
-            predictions = outputs[0][0]  # Shape (84, 8400)
-
-            classes_scores = predictions[4:, :]  # Shape (80, 8400)
-            max_scores = np.max(classes_scores, axis=0)
-            class_ids = np.argmax(classes_scores, axis=0)
-
-            threshold = 0.45
-            valid_indices = np.where(max_scores >= threshold)[0]
-            detections = []
-
-            for idx in valid_indices:
-                cid = int(class_ids[idx])
-                conf = float(max_scores[idx])
-
-                cx, cy, bw, bh = predictions[0:4, idx]
-                bx = int((cx - pad_left) / scale - (bw / scale) / 2)
-                by = int((cy - pad_top) / scale - (bh / scale) / 2)
-                bw_orig = int(bw / scale)
-                bh_orig = int(bh / scale)
-
-                x1 = max(0, min(w - 1, bx))
-                y1 = max(0, min(h - 1, by))
-                x2 = max(0, min(w, bx + bw_orig))
-                y2 = max(0, min(h, by + bh_orig))
-                center_x = (x1 + x2) / 2.0
-                center_y = (y1 + y2) / 2.0
-
-                category = "motion"
-                label = "Beweging"
-                if cid in PERSON_CLASSES:
-                    category = "person"
-                    label = COCO_NAMES.get(cid, "Persoon")
-                elif cid in VEHICLE_CLASSES:
-                    category = "vehicle"
-                    label = COCO_NAMES.get(cid, "Voertuig")
-                elif cid in ANIMAL_CLASSES:
-                    category = "animal"
-                    label = COCO_NAMES.get(cid, "Dier")
-
-                detections.append({
-                    "cid": cid,
-                    "conf": conf,
-                    "category": category,
-                    "label": label,
-                    "bbox": (x1, y1, x2, y2),
-                    "center": (center_x, center_y),
-                })
-
-            return detections
+            self.parked_vehicle_boxes = new_boxes
+            self.last_baseline_update = time.time()
+            logger.info(
+                "Updated parked vehicle baseline: %d parked vehicles registered (%s)",
+                len(self.parked_vehicle_boxes),
+                self.parked_vehicle_boxes,
+            )
+            return self.parked_vehicle_boxes
         except Exception as e:
-            logger.warning("YOLO detection error: %s", e)
-            return []
+            logger.warning("Error updating parked baseline: %s", e)
+            return self.parked_vehicle_boxes
 
-    def run_yolo_inference(
+    def evaluate_detections(
         self,
         frame: np.ndarray,
-        motion_mask: Optional[np.ndarray] = None,
-    ) -> tuple[str, str, float]:
+        clean_mask: np.ndarray,
+    ) -> tuple[Optional[str], Optional[str], float]:
         """
-        Stage 2 inference helper with motion mask verification.
-        Filters out stationary objects where motion_ratio < 0.03.
-        Returns: (category, label, confidence)
+        Runs Ultralytics ByteTrack on frame and evaluates detections in strict priority:
+          1. Person (class 0, conf >= 0.38): MOG2 motion in box (fg_pixels_ratio >= 0.04) or displacement over 2 frames.
+          2. Animal (classes 14, 15, 16, conf >= 0.35): MOG2 motion in box (fg_pixels_ratio >= 0.04).
+          3. Moving Vehicle (classes 1, 2, 3, 5, 7, conf >= 0.45):
+             - IoU < 0.45 with all parked_vehicle_boxes (NOT parked).
+             - Tracked in >= 3 frames with displacement >= 12% of screen width.
+
+        Returns: (category, label, confidence) or (None, None, 0.0)
         """
-        detections = self.detect_objects_yolo(frame)
-        if not detections:
-            return "motion", "Beweging", 0.5
+        if self.model is None and not self.init_model():
+            return None, None, 0.0
 
-        best_category = "motion"
-        best_label = "Beweging"
-        best_conf = 0.0
+        h, w = frame.shape[:2]
 
-        for d in detections:
-            cat = d["category"]
-            lbl = d["label"]
-            conf = d["conf"]
-            x1, y1, x2, y2 = d["bbox"]
+        try:
+            results = self.model.track(
+                frame,
+                persist=True,
+                tracker="bytetrack.yaml",
+                classes=[0, 1, 2, 3, 5, 7, 14, 15, 16],
+                conf=0.35,
+                verbose=False,
+            )
+        except Exception as e:
+            logger.warning("Tracking inference failed: %s", e)
+            return None, None, 0.0
 
-            if motion_mask is not None and (x2 > x1) and (y2 > y1):
-                box_area = max(1, (x2 - x1) * (y2 - y1))
-                motion_pixels = cv2.countNonZero(motion_mask[y1:y2, x1:x2])
-                motion_ratio = motion_pixels / float(box_area)
-                if motion_ratio < 0.03:
-                    continue
+        if not results or len(results) == 0 or results[0].boxes is None:
+            return None, None, 0.0
 
-            if cat == "person" and conf > best_conf:
-                best_category, best_label, best_conf = cat, lbl, conf
-            elif cat == "vehicle" and conf > best_conf and best_category != "person":
-                best_category, best_label, best_conf = cat, lbl, conf
-            elif cat == "animal" and conf > best_conf and best_category not in ("person", "vehicle"):
-                best_category, best_label, best_conf = cat, lbl, conf
+        boxes_obj = results[0].boxes
+        if len(boxes_obj) == 0:
+            return None, None, 0.0
 
-        return best_category, best_label, best_conf
+        cls_list = boxes_obj.cls.int().cpu().tolist()
+        conf_list = boxes_obj.conf.cpu().tolist()
+        xyxy_list = boxes_obj.xyxy.cpu().tolist()
+        id_list = (
+            boxes_obj.id.int().cpu().tolist()
+            if boxes_obj.id is not None
+            else [-1] * len(cls_list)
+        )
+
+        detections = []
+        for i in range(len(cls_list)):
+            cid = cls_list[i]
+            conf = float(conf_list[i])
+            box = tuple(float(x) for x in xyxy_list[i])
+            tid = int(id_list[i])
+            cx = (box[0] + box[2]) / 2.0
+            cy = (box[1] + box[3]) / 2.0
+
+            if tid > 0:
+                if tid not in self.track_history:
+                    self.track_history[tid] = []
+                self.track_history[tid].append((cx, cy))
+                if len(self.track_history[tid]) > 25:
+                    self.track_history[tid].pop(0)
+
+            # Compute MOG2 motion in bounding box
+            x1, y1 = max(0, int(box[0])), max(0, int(box[1]))
+            x2, y2 = min(w, int(box[2])), min(h, int(box[3]))
+            box_area = max(1, (x2 - x1) * (y2 - y1))
+            fg_in_box = cv2.countNonZero(clean_mask[y1:y2, x1:x2])
+            fg_ratio = fg_in_box / float(box_area)
+
+            detections.append({
+                "cid": cid,
+                "conf": conf,
+                "box": box,
+                "tid": tid,
+                "cx": cx,
+                "cy": cy,
+                "fg_ratio": fg_ratio,
+            })
+
+        # ── PRIORITY 1: Persoon (class 0, conf >= 0.38) ───────────────────
+        person_candidates = [
+            d for d in detections
+            if d["cid"] == 0 and d["conf"] >= 0.38
+        ]
+        best_person = None
+        for p in person_candidates:
+            tid = p["tid"]
+            history = self.track_history.get(tid, [])
+            moved_over_2_frames = False
+            if len(history) >= 2:
+                # Displacement between last 2 frames >= 1% of width
+                dx = history[-1][0] - history[-2][0]
+                dy = history[-1][1] - history[-2][1]
+                if math.hypot(dx, dy) / float(w) >= 0.01:
+                    moved_over_2_frames = True
+
+            if p["fg_ratio"] >= 0.04 or moved_over_2_frames:
+                if best_person is None or p["conf"] > best_person["conf"]:
+                    best_person = p
+
+        if best_person is not None:
+            logger.info(
+                "Persoon detected: conf=%.2f, fg_ratio=%.3f, track_id=%d",
+                best_person["conf"], best_person["fg_ratio"], best_person["tid"],
+            )
+            return "person", "Persoon", best_person["conf"]
+
+        # ── PRIORITY 2: Dier (classes 14, 15, 16, conf >= 0.35) ───────────
+        animal_candidates = [
+            d for d in detections
+            if d["cid"] in ANIMAL_CLASSES and d["conf"] >= 0.35 and d["fg_ratio"] >= 0.04
+        ]
+        if animal_candidates:
+            best_animal = max(animal_candidates, key=lambda a: a["conf"])
+            lbl = COCO_NAMES.get(best_animal["cid"], "Dier")
+            logger.info(
+                "Dier detected (%s): conf=%.2f, fg_ratio=%.3f",
+                lbl, best_animal["conf"], best_animal["fg_ratio"],
+            )
+            return "animal", lbl, best_animal["conf"]
+
+        # ── PRIORITY 3: Rijdend Voertuig (classes 1, 2, 3, 5, 7, conf >= 0.45)
+        vehicle_candidates = [
+            d for d in detections
+            if d["cid"] in VEHICLE_CLASSES and d["conf"] >= 0.45
+        ]
+        best_vehicle = None
+        for v in vehicle_candidates:
+            box = v["box"]
+            tid = v["tid"]
+
+            # Hard Rule: Check IoU with parked baseline
+            if is_parked_vehicle(box, self.parked_vehicle_boxes, threshold=0.45):
+                logger.debug("Vehicle with IoU >= 0.45 is parked car on driveway -> 100%% ignored")
+                continue
+
+            # Moving vehicle requirement: tracked in >= 3 frames with displacement >= 12% width
+            history = self.track_history.get(tid, [])
+            if len(history) < 3:
+                logger.debug("Vehicle track_id=%d tracked in only %d frames (< 3)", tid, len(history))
+                continue
+
+            dx = history[-1][0] - history[0][0]
+            dy = history[-1][1] - history[0][1]
+            total_displacement = math.hypot(dx, dy)
+            disp_ratio = total_displacement / float(w)
+
+            if disp_ratio >= 0.12:
+                if best_vehicle is None or v["conf"] > best_vehicle["conf"]:
+                    best_vehicle = v
+            else:
+                logger.debug(
+                    "Vehicle track_id=%d displacement %.3f < 0.12 threshold",
+                    tid, disp_ratio,
+                )
+
+        if best_vehicle is not None:
+            lbl = COCO_NAMES.get(best_vehicle["cid"], "Voertuig")
+            logger.info(
+                "Moving vehicle confirmed: conf=%.2f, track_id=%d, label=%s",
+                best_vehicle["conf"], best_vehicle["tid"], lbl,
+            )
+            return "vehicle", lbl, best_vehicle["conf"]
+
+        return None, None, 0.0
 
     async def start(self) -> None:
         """Start the background motion detection loop."""
@@ -249,7 +388,7 @@ class SmartDetector:
         self.init_model()
         self._running = True
         self._task = asyncio.create_task(self._detection_loop())
-        logger.info("AI Smart Detection background worker started")
+        logger.info("AI Smart Detection background worker started with Ultralytics + ByteTrack")
 
     async def stop(self) -> None:
         """Stop background worker."""
@@ -262,9 +401,9 @@ class SmartDetector:
                 pass
 
     async def _detection_loop(self) -> None:
-        """Main non-blocking detection loop (runs every 0.5s)."""
+        """Main non-blocking detection loop (runs at ~2 fps / 0.5s)."""
         await asyncio.sleep(5)  # Wait for system startup
-        prev_gray: Optional[np.ndarray] = None
+        frame_interval = 0.50
 
         while self._running:
             cfg = await DetectionSettings.load()
@@ -283,8 +422,7 @@ class SmartDetector:
                     await asyncio.sleep(10)
                     continue
 
-                frame_interval = 0.50  # 0.5s check rate per specification
-
+                warmup_frames = 0
                 while self._running:
                     t_start = time.time()
                     ret, frame = cap.read()
@@ -293,107 +431,47 @@ class SmartDetector:
                         break
 
                     h, w = frame.shape[:2]
-                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    blurred = cv2.GaussianBlur(gray, (21, 21), 0)
 
-                    if prev_gray is not None:
-                        frame_diff = cv2.absdiff(prev_gray, blurred)
-                        _, thresh = cv2.threshold(frame_diff, 25, 255, cv2.THRESH_BINARY)
-                        active_pixels = cv2.countNonZero(thresh)
-                        total_eval_pixels = h * w
-                        motion_ratio = (active_pixels / max(1, total_eval_pixels)) * 100.0
+                    # 1. MOG2 Motion Extraction + Morphological Opening (kernel 5x5)
+                    fg_mask = self.bg_subtractor.apply(frame)
+                    clean_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, self.kernel_5x5)
 
-                        sensitivity = cfg["motion_sensitivity"]
-                        if motion_ratio >= sensitivity:
-                            self._last_motion_seen = time.time()
-                            now_t = time.time()
+                    motion_pixels = cv2.countNonZero(clean_mask)
+                    total_pixels = h * w
+                    motion_ratio = (motion_pixels / max(1, total_pixels)) * 100.0
 
-                            if (now_t - self._last_trigger_time) > self._cooldown_seconds:
-                                # Stage 2: YOLO detection on frame 1
-                                detections_t1 = self.detect_objects_yolo(frame)
+                    # 2. Warm up MOG2 and initialize parked vehicle baseline
+                    warmup_frames += 1
+                    if warmup_frames == 8 or (not self.parked_vehicle_boxes and warmup_frames >= 4):
+                        self.update_parked_baseline(frame)
 
-                                confirmed_cat = None
-                                confirmed_lbl = None
-                                confirmed_conf = 0.0
+                    # 3. Update baseline every 60s during quiet periods (motion_ratio < 0.5%)
+                    now_t = time.time()
+                    if motion_ratio < 0.5 and (now_t - self.last_baseline_update) >= 60.0:
+                        self.update_parked_baseline(frame)
 
-                                # 1. Check for Person detections
-                                persons = [d for d in detections_t1 if d["category"] == "person"]
-                                for p in persons:
-                                    x1, y1, x2, y2 = p["bbox"]
-                                    box_area = max(1, (x2 - x1) * (y2 - y1))
-                                    motion_in_box = cv2.countNonZero(thresh[y1:y2, x1:x2])
-                                    p_motion_ratio = motion_in_box / float(box_area)
-                                    # Require moving pixel ratio >= 0.03
-                                    if p_motion_ratio >= 0.03 and p["conf"] > confirmed_conf:
-                                        confirmed_cat = "person"
-                                        confirmed_lbl = p["label"]
-                                        confirmed_conf = p["conf"]
+                    if motion_ratio >= cfg["motion_sensitivity"]:
+                        self._last_motion_seen = now_t
 
-                                # 2. Check for Animal detections if no person
-                                if not confirmed_cat:
-                                    animals = [d for d in detections_t1 if d["category"] == "animal"]
-                                    for a in animals:
-                                        x1, y1, x2, y2 = a["bbox"]
-                                        box_area = max(1, (x2 - x1) * (y2 - y1))
-                                        motion_in_box = cv2.countNonZero(thresh[y1:y2, x1:x2])
-                                        a_motion_ratio = motion_in_box / float(box_area)
-                                        # Require moving pixel ratio >= 0.03
-                                        if a_motion_ratio >= 0.03 and a["conf"] > confirmed_conf:
-                                            confirmed_cat = "animal"
-                                            confirmed_lbl = a["label"]
-                                            confirmed_conf = a["conf"]
+                        if (now_t - self._last_trigger_time) > self._cooldown_seconds:
+                            # Evaluate detections with ByteTrack & strict priorities
+                            cat, lbl, conf = self.evaluate_detections(frame, clean_mask)
 
-                                # 3. Check for Vehicle detections with Mandatory Displacement Check (delta_d >= 0.08)
-                                if not confirmed_cat:
-                                    vehicles_t1 = [d for d in detections_t1 if d["category"] == "vehicle"]
-                                    if vehicles_t1:
-                                        # NEVER save vehicle clip based on 1 frame!
-                                        best_v1 = max(vehicles_t1, key=lambda v: v["conf"])
-                                        cx1, cy1 = best_v1["center"]
+                            if cat is None and cfg["record_motion"] and motion_ratio >= (cfg["motion_sensitivity"] * 2.5):
+                                cat = "motion"
+                                lbl = "Beweging"
+                                conf = 0.5
 
-                                        # Sample frame 2 at 0.8s later
-                                        await asyncio.sleep(0.8)
-                                        ret2, frame2 = cap.read()
-                                        if ret2 and frame2 is not None:
-                                            detections_t2 = self.detect_objects_yolo(frame2)
-                                            vehicles_t2 = [d for d in detections_t2 if d["category"] == "vehicle"]
-                                            if vehicles_t2:
-                                                best_v2 = min(
-                                                    vehicles_t2,
-                                                    key=lambda v: (v["center"][0] - cx1)**2 + (v["center"][1] - cy1)**2
-                                                )
-                                                cx2, cy2 = best_v2["center"]
-                                                import math
-                                                displacement_px = math.sqrt((cx2 - cx1)**2 + (cy2 - cy1)**2)
-                                                delta_d = displacement_px / float(w)
+                            if cat is not None:
+                                self._last_trigger_time = now_t
+                                logger.info(
+                                    "Confirmed AI detection: %s (%s, conf=%.2f) — dispatching clip task",
+                                    cat, lbl, conf,
+                                )
+                                asyncio.create_task(
+                                    self._handle_detection(cat, lbl, conf, cfg, frame)
+                                )
 
-                                                if delta_d >= 0.08:
-                                                    confirmed_cat = "vehicle"
-                                                    confirmed_lbl = best_v1["label"]
-                                                    confirmed_conf = best_v1["conf"]
-                                                    logger.info("Moving vehicle confirmed: delta_d=%.3f >= 0.08", delta_d)
-                                                else:
-                                                    logger.info("Parked vehicle ignored: delta_d=%.3f < 0.08 threshold", delta_d)
-                                            else:
-                                                logger.info("Vehicle candidate disappeared on frame 2, ignoring")
-
-                                if confirmed_cat is None and cfg["record_motion"] and motion_ratio >= sensitivity * 2:
-                                    confirmed_cat = "motion"
-                                    confirmed_lbl = "Beweging"
-                                    confirmed_conf = 0.5
-
-                                if confirmed_cat:
-                                    self._last_trigger_time = now_t
-                                    logger.info(
-                                        "Confirmed detection: %s (%s, conf=%.2f) — dispatching async clip task",
-                                        confirmed_cat, confirmed_lbl, confirmed_conf
-                                    )
-                                    # Asynchronous non-blocking clip processing task
-                                    asyncio.create_task(
-                                        self._handle_detection(confirmed_cat, confirmed_lbl, confirmed_conf, cfg, frame)
-                                    )
-
-                    prev_gray = blurred
                     elapsed = time.time() - t_start
                     sleep_dur = max(0.02, frame_interval - elapsed)
                     await asyncio.sleep(sleep_dur)
@@ -464,7 +542,7 @@ class SmartDetector:
 
         title = f"{category_dutch}: {label}"
 
-        # Record in Event Queue (Task 6)
+        # Record in Event Queue for reliable push / 5G fallback
         from app.models import save_event
         event_dict = await save_event(
             event_type="motion",
@@ -475,22 +553,25 @@ class SmartDetector:
         )
 
         # Broadcast WebSocket event to all connected Android apps
-        from app.main import ws_manager
-        await ws_manager.broadcast(
-            "AI_DETECTION",
-            {
-                "event_id": event_dict["id"],
-                "clip_id": clip_id,
-                "category": category,
-                "label": label,
-                "title": title,
-                "confidence": round(confidence, 2),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "snapshot_url": snapshot_url,
-                "in_quiet_hours": in_quiet_hours,
-                "should_notify": should_notify,
-            }
-        )
+        try:
+            from app.main import ws_manager
+            await ws_manager.broadcast(
+                "AI_DETECTION",
+                {
+                    "event_id": event_dict["id"],
+                    "clip_id": clip_id,
+                    "category": category,
+                    "label": label,
+                    "title": title,
+                    "confidence": round(confidence, 2),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "snapshot_url": snapshot_url,
+                    "in_quiet_hours": in_quiet_hours,
+                    "should_notify": should_notify,
+                },
+            )
+        except Exception as e:
+            logger.warning("Error broadcasting AI detection event: %s", e)
 
         # Dynamic clip assembly (6s pre-roll + motion + 6s post-roll)
         try:

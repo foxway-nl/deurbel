@@ -6,6 +6,7 @@ snapshots/
 *.wav
 *.apk
 *.onnx
+*.pt
 *.db
 *.db-journal
 foxway.db
