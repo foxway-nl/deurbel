@@ -149,19 +149,21 @@ def _check_tcp_port(ip: str, port: int, timeout: float = 1.5) -> bool:
 
 
 async def _doorbell_health_monitor() -> None:
-    """Monitor doorbell reachability every 30s. Broadcast alert if unreachable > 120s."""
+    """Monitor doorbell reachability every 30s. Auto-heals IP if changed, broadcasts alert if unreachable > 120s."""
     global _doorbell_online, _doorbell_last_seen
     while True:
         try:
             loop = asyncio.get_running_loop()
             online = False
             creds = await get_camera_credentials()
-            cam_ip = creds["ip"]
-            cam_port = creds["port"]
-            for port in (cam_port, 554):
-                if await loop.run_in_executor(None, _check_tcp_port, cam_ip, port, 2.0):
-                    online = True
-                    break
+            cam_ip = creds.get("ip", "")
+            cam_port = creds.get("port", 8000)
+
+            if cam_ip:
+                for port in (cam_port, 554):
+                    if await loop.run_in_executor(None, _check_tcp_port, cam_ip, port, 2.0):
+                        online = True
+                        break
 
             now = time.time()
             if online:
@@ -171,14 +173,24 @@ async def _doorbell_health_monitor() -> None:
                     logger.info("Doorbell %s is back ONLINE", cam_ip)
                     await ws_manager.broadcast("DOORBELL_STATUS", {"online": True, "ip": cam_ip})
             else:
-                downtime = now - _doorbell_last_seen
-                if downtime > 120 and _doorbell_online:
-                    _doorbell_online = False
-                    logger.warning("Doorbell %s OFFLINE for >2 minutes (%.0fs)", cam_ip, downtime)
-                    await ws_manager.broadcast(
-                        "DOORBELL_STATUS",
-                        {"online": False, "ip": cam_ip, "downtime_seconds": int(downtime)},
-                    )
+                # Trigger auto-heal subnet scan
+                logger.info("Doorbell %s unreachable. Triggering auto-heal subnet scan...", cam_ip)
+                from app.camera_discovery import auto_heal_doorbell_ip
+                new_ip = await auto_heal_doorbell_ip()
+                if new_ip and new_ip != cam_ip:
+                    logger.info("Doorbell auto-healed to new IP %s", new_ip)
+                    _doorbell_online = True
+                    _doorbell_last_seen = now
+                    await ws_manager.broadcast("DOORBELL_STATUS", {"online": True, "ip": new_ip})
+                else:
+                    downtime = now - _doorbell_last_seen
+                    if downtime > 120 and _doorbell_online:
+                        _doorbell_online = False
+                        logger.warning("Doorbell %s OFFLINE for >2 minutes (%.0fs)", cam_ip, downtime)
+                        await ws_manager.broadcast(
+                            "DOORBELL_STATUS",
+                            {"online": False, "ip": cam_ip, "downtime_seconds": int(downtime)},
+                        )
         except Exception as e:
             logger.warning("Health monitor loop error: %s", e)
         await asyncio.sleep(30)
@@ -187,9 +199,18 @@ async def _doorbell_health_monitor() -> None:
 # ── State Machine Callbacks ──────────────────────────────────────────
 
 async def _on_ringing(call):
-    """Broadcast CALL_RINGING via WS + FCM."""
+    """Broadcast CALL_RINGING via WS + FCM and record in event queue."""
+    from app.models import save_event
     snapshot_url = f"/api/v1/snapshots/{call.call_id}.jpg" if call.snapshot_path else ""
+    event_dict = await save_event(
+        event_type="ring",
+        category="ring",
+        title="Aanbel oproep",
+        clip_id=call.call_id,
+        snapshot_url=snapshot_url,
+    )
     await push_event("CALL_RINGING", {
+        "event_id": event_dict["id"],
         "call_id": call.call_id,
         "snapshot_url": snapshot_url,
         "timestamp": call.started_at,
@@ -332,12 +353,32 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def capture_wan_url_middleware(request: Request, call_next):
+    """Dynamically detect public WAN URL from reverse proxy headers and persist in SQLite."""
+    proto = request.headers.get("x-forwarded-proto")
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+    if proto and host:
+        hostname = host.split(":")[0]
+        try:
+            ip = ipaddress.ip_address(hostname)
+            is_private = ip.is_loopback or ip.is_private
+        except ValueError:
+            is_private = False
+        if not is_private:
+            detected_url = f"{proto}://{host}".rstrip("/")
+            from app.models import set_dynamic_wan_url
+            asyncio.create_task(set_dynamic_wan_url(detected_url))
+
+    return await call_next(request)
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  HELPER: Subnet & Security Checks
 # ══════════════════════════════════════════════════════════════════════
 
 def _is_local_request(request: Request) -> bool:
-    """Check if the request originates from the configured LAN subnet, private subnets, docker networks, or localhost."""
+    """Check if the request originates from the local LAN subnet, private subnets, docker networks, or localhost."""
     client_ips = []
     if request.client and request.client.host:
         client_ips.append(request.client.host)
@@ -348,13 +389,18 @@ def _is_local_request(request: Request) -> bool:
     if x_real:
         client_ips.append(x_real.strip())
 
+    from app.camera_discovery import get_local_subnet
+    try:
+        local_net = get_local_subnet()
+    except Exception:
+        local_net = ipaddress.ip_network("127.0.0.0/8")
+
     for cip in client_ips:
         try:
             ip = ipaddress.ip_address(cip)
             if ip.is_loopback or ip.is_private:
                 return True
-            network = ipaddress.ip_network(settings.LAN_SUBNET, strict=False)
-            if ip in network:
+            if ip in local_net:
                 return True
         except ValueError:
             continue
@@ -501,30 +547,56 @@ async def pair_device(body: PairRequest, request: Request):
         exclude_user=user_id,
     )
 
+    from app.camera_discovery import get_local_ip
+    from app.models import get_dynamic_wan_url
+    local_ip = get_local_ip()
+    active_lan_url = f"http://{local_ip}:{settings.HOST_PORT}"
+    active_wan_url = await get_dynamic_wan_url()
+
     return PairResponse(
         user_id=user_id,
         user_name=user_name,
         device_name=body.device_name,
         jwt_token=jwt_token,
-        lan_url=settings.LAN_URL,
-        wan_url=settings.WAN_URL,
-        go2rtc_lan_ws=settings.GO2RTC_LAN_WS,
-        go2rtc_wan_ws=f"{settings.WAN_URL.replace('https://', 'wss://').replace('http://', 'ws://')}/api/ws",
+        lan_url=active_lan_url,
+        wan_url=active_wan_url,
+        go2rtc_lan_ws=f"ws://{local_ip}:1984",
+        go2rtc_wan_ws=f"{active_wan_url.replace('https://', 'wss://').replace('http://', 'ws://')}/api/ws",
     )
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  ROUTE: Onboarding Bootstrap & QR-Code Generation (Task 1)
+#  ROUTE: Onboarding Bootstrap (Task 1)
 # ══════════════════════════════════════════════════════════════════════
 
 @app.get("/api/v1/onboarding/bootstrap")
 async def onboarding_bootstrap():
     """
     Smart auto-fill discovery endpoint for the Android app Onboarding.
-    Pre-fills LAN URL, WAN URL, discovered camera IP, and checks if camera is configured.
+    Dynamically returns server_lan_url, server_wan_url, camera_discovered, camera_ip, camera_configured.
     """
+    from app.camera_discovery import get_local_ip, is_doorbell_alive, auto_heal_doorbell_ip
+    from app.models import get_dynamic_wan_url
+
     creds = await get_camera_credentials()
-    doorbell_online = await asyncio.to_thread(_check_tcp_port, creds["ip"], creds["port"], 1.5)
+    cam_ip = creds.get("ip", "")
+    cam_port = creds.get("port", 8000)
+
+    # Check if doorbell responds
+    is_alive = False
+    if cam_ip:
+        is_alive = await is_doorbell_alive(cam_ip, cam_port)
+
+    # Auto-heal / scan if not alive
+    if not is_alive and not creds.get("is_configured"):
+        healed_ip = await auto_heal_doorbell_ip()
+        if healed_ip:
+            cam_ip = healed_ip
+            is_alive = True
+
+    local_ip = get_local_ip()
+    server_lan_url = f"http://{local_ip}:{settings.HOST_PORT}"
+    server_wan_url = await get_dynamic_wan_url()
 
     bootstrap_token = jwt.encode(
         {"purpose": "bootstrap", "iat": datetime.now(timezone.utc).isoformat()},
@@ -532,17 +604,28 @@ async def onboarding_bootstrap():
         algorithm=settings.JWT_ALGORITHM
     )
 
+    is_configured = creds.get("is_configured", False)
+    status_msg = (
+        f"✅ Server & Deurbel automatisch gevonden op netwerk ({cam_ip})"
+        if (is_alive or cam_ip)
+        else "⚠️ Geen deurbel gevonden op dit netwerk"
+    )
+
     return {
         "status": "ok",
         "server_name": "Foxway Deurbel Server",
-        "lan_url": settings.LAN_URL,
-        "wan_url": settings.WAN_URL,
-        "camera_ip": creds["ip"],
-        "camera_port": creds["port"],
-        "camera_user": creds["user"],
-        "camera_credentials_configured": creds["is_configured"],
-        "doorbell_online": doorbell_online,
-        "doorbell_status_message": "✅ Deurbel al gekoppeld op server" if creds["is_configured"] else "⚠️ Geen inloggegevens ingesteld",
+        "server_lan_url": server_lan_url,
+        "server_wan_url": server_wan_url,
+        "lan_url": server_lan_url,
+        "wan_url": server_wan_url,
+        "camera_discovered": is_alive or bool(cam_ip),
+        "camera_ip": cam_ip,
+        "camera_port": cam_port,
+        "camera_user": creds.get("user", "admin"),
+        "camera_configured": is_configured,
+        "camera_credentials_configured": is_configured,
+        "doorbell_online": is_alive,
+        "doorbell_status_message": status_msg,
         "bootstrap_token": bootstrap_token,
         "token": bootstrap_token,
     }
@@ -590,7 +673,7 @@ async def onboarding_qr():
 
 
 class CameraSettingsUpdate(BaseModel):
-    ip: str = Field(..., examples=["192.168.2.31"])
+    ip: str = Field(...)
     port: int = Field(8000)
     user: str = Field("admin")
     password: str = Field("")
@@ -619,13 +702,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "1.5.1",
-        "version_code": 7,
-        "build_time": "2026-10-25T15:50:00Z",
+        "version": "1.6.0",
+        "version_code": 8,
+        "build_time": "2026-10-26T11:00:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "Fix 409 pairing conflict, support tokenized bootstrap/QR registration & re-pairing",
+        "changelog": "v1.6.0: 100% dynamic network discovery, zero hardcoded IPs, RAM ring buffer, parked car filter, high-priority notifications",
     }
 
 
@@ -662,13 +745,29 @@ async def shelly_ring_webhook(request: Request):
 
 @app.get("/api/v1/webhook/shelly-ring/status")
 async def shelly_ring_status():
+    from app.camera_discovery import get_local_ip
+    from app.models import get_dynamic_wan_url
+    local_ip = get_local_ip()
+    wan_url = await get_dynamic_wan_url()
     return {
         "status": "active",
         "detector": "Aanbel-script actief (Luistert naar 728 Hz chime signature)",
-        "webhook_url_lan": "http://192.168.2.1:8090/api/v1/webhook/shelly-ring",
-        "webhook_url_wan": "https://deurbel.foxway.nl/api/v1/webhook/shelly-ring",
+        "webhook_url_lan": f"http://{local_ip}:{settings.HOST_PORT}/api/v1/webhook/shelly-ring",
+        "webhook_url_wan": f"{wan_url}/api/v1/webhook/shelly-ring",
         "instruction": "Configureer in Shelly Plus Uni Web UI -> Input 0 -> Actions -> Button Pressed URL",
     }
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ROUTE: Event Queue for Push Fallback (Task 6)
+# ══════════════════════════════════════════════════════════════════════
+
+@app.get("/api/v1/events")
+async def get_events_endpoint(since_id: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200)):
+    """Retrieve event queue items since since_id for reliable push fallback."""
+    from app.models import get_events_since
+    events = await get_events_since(since_id=since_id, limit=limit)
+    return {"status": "ok", "events": events, "count": len(events)}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -875,8 +974,10 @@ async def get_clips(limit: int = Query(200, ge=1, le=1000), offset: int = Query(
 
 @app.get("/api/v1/clips/{clip_id}")
 @app.get("/api/v1/clips/{clip_id}/stream")
+@app.get("/api/v1/clips/{clip_id}/file")
 @app.get("/api/clips/{clip_id}")
 @app.get("/api/clips/{clip_id}/stream")
+@app.get("/api/clips/{clip_id}/file")
 async def stream_clip_endpoint(clip_id: str, request: Request):
     """Stream a clip with HTTP Range support (206 Partial Content) via FileResponse."""
     clean_id = clip_id.replace(".mp4", "")

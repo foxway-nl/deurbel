@@ -67,112 +67,93 @@ async def fetch_snapshot(call_id: str) -> str:
 #  RAM-based Circular Ring Buffer (Pre-Roll & Post-Roll)
 # ──────────────────────────────────────────────────────────────────────
 
+# ──────────────────────────────────────────────────────────────────────
+#  Continuous 2-Second RAM Ring Buffer (/dev/shm/deurbel_ring)
+# ──────────────────────────────────────────────────────────────────────
+
+RING_BUFFER_DIR = Path("/dev/shm/deurbel_ring")
+
+
 class RamRingBuffer:
     """
-    RAM-based circular buffer continuously retaining the last ~7-8 seconds of fMP4 video.
-    Provides instant pre-roll extraction (5s before trigger) and real-time fragment piping.
+    Continuous 2-second RAM ring-buffer in /dev/shm/deurbel_ring.
+    Runs 24/7 FFmpeg process recording RTSP without CPU re-encoding into
+    15 x 2-second TS segments (30s capacity).
     """
-    def __init__(self, buffer_seconds: float = 7.0):
-        self.buffer_seconds = buffer_seconds
-        self.init_segment = bytearray()
-        self.fragments: collections.deque[tuple[float, bytes]] = collections.deque()
+
+    def __init__(self):
+        self.ring_dir = RING_BUFFER_DIR
         self._running = False
+        self._proc: Optional[asyncio.subprocess.Process] = None
         self._task: Optional[asyncio.Task] = None
-        self._lock = asyncio.Lock()
-        self._subscribers: list[asyncio.Queue] = []
 
     async def start(self) -> None:
         if self._running:
             return
         self._running = True
-        self._task = asyncio.create_task(self._ingest_loop())
-        logger.info("RAM Ring Buffer started (capacity: %.1fs)", self.buffer_seconds)
+        self.ring_dir.mkdir(parents=True, exist_ok=True)
+        self._task = asyncio.create_task(self._supervise_loop())
+        logger.info("RAM Ring Buffer supervisor started (%s)", self.ring_dir)
 
     async def stop(self) -> None:
         self._running = False
+        if self._proc:
+            try:
+                self._proc.terminate()
+                await asyncio.wait_for(self._proc.wait(), timeout=2.0)
+            except Exception:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
         if self._task and not self._task.done():
             self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
         logger.info("RAM Ring Buffer stopped")
 
-    async def get_preroll_bytes(self, duration: float = 5.0) -> bytes:
-        """Extract init segment + last `duration` seconds of video fragments from RAM."""
-        async with self._lock:
-            if not self.init_segment:
-                return b""
-            cutoff = time.time() - duration
-            selected = [frag for ts, frag in self.fragments if ts >= cutoff]
-            return bytes(self.init_segment) + b"".join(selected)
-
-    def subscribe(self) -> asyncio.Queue:
-        q = asyncio.Queue()
-        self._subscribers.append(q)
-        return q
-
-    def unsubscribe(self, q: asyncio.Queue) -> None:
-        if q in self._subscribers:
-            self._subscribers.remove(q)
-
-    async def _ingest_loop(self) -> None:
-        url = f"{settings.GO2RTC_API_URL}/api/stream.mp4?src={settings.GO2RTC_STREAM_NAME}"
-        while self._running:
+    def get_available_segments(self) -> list[tuple[float, Path]]:
+        """Return list of existing completed .ts segments sorted chronologically by mtime."""
+        if not self.ring_dir.exists():
+            return []
+        segs = []
+        for p in self.ring_dir.glob("seg_*.ts"):
             try:
-                async with httpx.AsyncClient(timeout=None) as client:
-                    async with client.stream("GET", url) as resp:
-                        if resp.status_code != 200:
-                            await asyncio.sleep(2)
-                            continue
+                st = p.stat()
+                if st.st_size > 1000:
+                    segs.append((st.st_mtime, p))
+            except Exception:
+                pass
+        segs.sort(key=lambda x: x[0])
+        return segs
 
-                        buf = bytearray()
-
-                        async def read_exact(n: int) -> bytes:
-                            while len(buf) < n:
-                                chunk = await resp.aread(min(4096, n - len(buf)))
-                                if not chunk:
-                                    raise EOFError("Stream closed")
-                                buf.extend(chunk)
-                            res = bytes(buf[:n])
-                            del buf[:n]
-                            return res
-
-                        # Read init segment: ftyp + moov
-                        init_bytes = bytearray()
-                        for _ in range(2):
-                            hdr = await read_exact(8)
-                            sz, _ = struct.unpack(">I4s", hdr)
-                            body = await read_exact(sz - 8)
-                            init_bytes.extend(hdr)
-                            init_bytes.extend(body)
-
-                        async with self._lock:
-                            self.init_segment = init_bytes
-
-                        # Continuously read moof + mdat
-                        while self._running:
-                            hdr = await read_exact(8)
-                            sz, _ = struct.unpack(">I4s", hdr)
-                            body = await read_exact(sz - 8)
-                            frag = hdr + body
-
-                            now = time.time()
-                            async with self._lock:
-                                self.fragments.append((now, frag))
-                                cutoff = now - (self.buffer_seconds + 1.0)
-                                while self.fragments and self.fragments[0][0] < cutoff:
-                                    self.fragments.popleft()
-
-                            for sub in list(self._subscribers):
-                                try:
-                                    sub.put_nowait((now, frag))
-                                except Exception:
-                                    pass
+    async def _supervise_loop(self) -> None:
+        rtsp_url = "rtsp://127.0.0.1:8554/deurbel"
+        while self._running:
+            cmd = [
+                "ffmpeg", "-y",
+                "-rtsp_transport", "tcp",
+                "-i", rtsp_url,
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-f", "segment",
+                "-segment_time", "2",
+                "-segment_wrap", "15",
+                "-reset_timestamps", "1",
+                str(self.ring_dir / "seg_%03d.ts"),
+            ]
+            try:
+                logger.info("Starting RAM ring buffer FFmpeg ingest: %s", " ".join(cmd))
+                self._proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await self._proc.wait()
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.debug("RAM Ring Buffer reconnecting in 2s: %s", e)
+                logger.warning("RAM ring buffer ingest error: %s", e)
+
+            if self._running:
                 await asyncio.sleep(2)
 
 
@@ -182,49 +163,105 @@ ring_buffer = RamRingBuffer()
 async def record_smart_clip(
     clip_id: str,
     clip_path: str,
-    preroll_seconds: float = 5.0,
-    postroll_seconds: float = 5.0,
+    preroll_seconds: float = 6.0,
+    postroll_seconds: float = 6.0,
     motion_active_func: Optional[Callable[[], bool]] = None,
     max_duration: float = 45.0,
 ) -> float:
     """
-    Stitches RAM pre-roll buffer (5s before trigger) + active motion duration + post-roll (5s after motion stops).
-    Compresses via FFmpeg into the final MP4 file.
-    Returns the final duration in seconds.
+    Dynamic Clip-Opbouw:
+      1. Grabs 3 segments prior to T0 (6s Pre-Roll, capturing the lead-up + snapshot).
+      2. Appends incoming 2s segments as long as motion continues.
+      3. Appends 3 segments (6s Post-Roll) after motion stops.
+      4. Stitches & transcodes with nice -n 15 libx264 yuv420p +faststart.
     """
-    raw_path = f"/dev/shm/{clip_id}_raw.mp4" if os.path.exists("/dev/shm") else f"/tmp/{clip_id}_raw.mp4"
-    preroll = await ring_buffer.get_preroll_bytes(preroll_seconds)
-    if not preroll:
-        await _record(clip_id, clip_path)
-        return 15.0
+    work_dir = RING_BUFFER_DIR / f"work_{clip_id}"
+    work_dir.mkdir(parents=True, exist_ok=True)
 
-    q = ring_buffer.subscribe()
-    start_time = time.time()
-    last_motion_time = time.time()
+    copied_files: list[Path] = []
+    seen_mtimes: set[float] = set()
 
     try:
-        with open(raw_path, "wb") as f:
-            f.write(preroll)
+        # 1. Capture Pre-Roll: 3 segments (6 seconds) before trigger T0
+        # Give ring buffer 0.2s to stabilize
+        await asyncio.sleep(0.2)
+        available = ring_buffer.get_available_segments()
 
-            while (time.time() - start_time) < max_duration:
-                try:
-                    ts, frag = await asyncio.wait_for(q.get(), timeout=1.0)
-                    f.write(frag)
-                except asyncio.TimeoutError:
-                    pass
+        # The very latest segment is actively being written by ffmpeg, so completed segments are available[:-1]
+        completed = available[:-1] if len(available) > 1 else available
+        preroll_segs = completed[-3:] if len(completed) >= 3 else completed
 
-                if motion_active_func and motion_active_func():
-                    last_motion_time = time.time()
-                elif (time.time() - last_motion_time) >= postroll_seconds:
+        seq = 0
+        for mtime, seg_path in preroll_segs:
+            dest = work_dir / f"clip_{seq:04d}.ts"
+            try:
+                shutil.copy2(seg_path, dest)
+                copied_files.append(dest)
+                seen_mtimes.add(mtime)
+                seq += 1
+            except Exception:
+                pass
+
+        # 2. Active motion & 3-segment (6s) post-roll collection
+        start_time = time.time()
+        last_motion_time = time.time()
+        postroll_segs_collected = 0
+
+        while (time.time() - start_time) < max_duration:
+            await asyncio.sleep(1.8)
+
+            current_segs = ring_buffer.get_available_segments()
+            completed_now = current_segs[:-1] if len(current_segs) > 1 else current_segs
+
+            for mtime, seg_path in completed_now:
+                if mtime not in seen_mtimes:
+                    seen_mtimes.add(mtime)
+                    dest = work_dir / f"clip_{seq:04d}.ts"
+                    try:
+                        shutil.copy2(seg_path, dest)
+                        copied_files.append(dest)
+                        seq += 1
+                    except Exception:
+                        pass
+
+            is_motion = motion_active_func() if motion_active_func else False
+            if is_motion:
+                last_motion_time = time.time()
+                postroll_segs_collected = 0
+            else:
+                postroll_segs_collected += 1
+                if postroll_segs_collected >= 3:  # 3 segments = 6s post-roll
                     break
 
+        if not copied_files:
+            logger.warning("No segments collected for smart clip %s, falling back to direct record", clip_id)
+            await _record(clip_id, clip_path)
+            dur = await _probe_duration(clip_path)
+            return dur if dur > 0 else 15.0
+
+        # 3. Concatenate and transcode to standard H.264 yuv420p + faststart
+        concat_list = work_dir / "concat_list.txt"
+        with open(concat_list, "w") as f:
+            for seg in copied_files:
+                f.write(f"file '{seg.resolve()}'\n")
+
         cmd = [
+            "nice", "-n", "15",
             "ffmpeg", "-y",
-            "-i", raw_path,
-            "-c", "copy",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(concat_list),
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "26",
+            "-vf", "scale=-2:720",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "64k",
             "-movflags", "+faststart",
             clip_path,
         ]
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
@@ -233,18 +270,14 @@ async def record_smart_clip(
         await proc.communicate()
 
         dur = await _probe_duration(clip_path)
-        return dur if dur > 0 else (time.time() - start_time + preroll_seconds)
+        return dur if dur > 0 else (len(copied_files) * 2.0)
+
     finally:
-        ring_buffer.unsubscribe(q)
-        if os.path.exists(raw_path):
-            try:
-                os.remove(raw_path)
-            except Exception:
-                pass
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  FFmpeg RTSP clip recorder
+#  FFmpeg RTSP clip recorder (60s call recording)
 # ──────────────────────────────────────────────────────────────────────
 
 _active_recorders: dict[str, asyncio.subprocess.Process] = {}
@@ -261,19 +294,20 @@ async def start_recording(call_id: str, clip_path: str) -> asyncio.Task:
 
 
 async def _record(call_id: str, clip_path: str) -> None:
-    """Run FFmpeg as a subprocess, capped at RECORDING_DURATION_SECONDS."""
+    """Run FFmpeg to record RTSP and transcode to 720p yuv420p faststart."""
+    raw_path = f"/dev/shm/{call_id}_raw.mp4" if os.path.exists("/dev/shm") else clip_path.replace(".mp4", "_raw.mp4")
+    rtsp_url = "rtsp://127.0.0.1:8554/deurbel"
     cmd = [
         "ffmpeg",
         "-y",
         "-rtsp_transport", "tcp",
-        "-i", settings.GO2RTC_RTSP_URL,
+        "-i", rtsp_url,
         "-t", str(settings.RECORDING_DURATION_SECONDS),
         "-c:v", "copy",
         "-c:a", "aac",
-        "-movflags", "+faststart",
-        clip_path,
+        raw_path,
     ]
-    logger.info("Recording started: %s → %s", call_id, clip_path)
+    logger.info("Recording started: %s → %s", call_id, raw_path)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -284,20 +318,48 @@ async def _record(call_id: str, clip_path: str) -> None:
         _active_recorders[call_id] = proc
         _, stderr = await proc.communicate()
         if proc.returncode not in (0, 255):
-            logger.warning("FFmpeg exited %d for %s: %s", proc.returncode, call_id, stderr.decode()[-500:])
-        else:
-            logger.info("Recording finished: %s", clip_path)
+            logger.warning("FFmpeg raw record exited %d for %s: %s", proc.returncode, call_id, stderr.decode()[-500:])
     except asyncio.CancelledError:
         logger.info("Recording cancelled for %s, terminating FFmpeg", call_id)
         proc = _active_recorders.get(call_id)
         if proc:
             proc.terminate()
             try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
+                await asyncio.wait_for(proc.wait(), timeout=3)
             except asyncio.TimeoutError:
                 proc.kill()
     finally:
         _active_recorders.pop(call_id, None)
+
+    # Transcode raw_path to libx264 yuv420p +faststart
+    if os.path.exists(raw_path) and os.path.getsize(raw_path) > 1000:
+        transcode_cmd = [
+            "nice", "-n", "15",
+            "ffmpeg", "-y",
+            "-i", raw_path,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "26",
+            "-vf", "scale=-2:720",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "64k",
+            "-movflags", "+faststart",
+            clip_path,
+        ]
+        try:
+            t_proc = await asyncio.create_subprocess_exec(
+                *transcode_cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await t_proc.communicate()
+        except Exception as e:
+            logger.warning("Call record transcode failed: %s", e)
+        try:
+            os.remove(raw_path)
+        except Exception:
+            pass
 
     # Probe duration and persist clip metadata
     duration = await _probe_duration(clip_path)
@@ -309,8 +371,6 @@ async def _record(call_id: str, clip_path: str) -> None:
         snapshot_path=snapshot_path,
         duration=duration,
     )
-    # Background low-priority compression
-    asyncio.create_task(compress_clip_background(clip_path))
 
 
 async def ensure_thumbnail(clip_id: str, video_path: Optional[str] = None) -> str:
@@ -633,6 +693,8 @@ async def compress_clip_background(clip_path: str) -> bool:
         "-vcodec", "libx264",
         "-crf", "28",
         "-preset", "veryfast",
+        "-vf", "scale=-2:720",
+        "-pix_fmt", "yuv420p",
         "-acodec", "aac",
         "-b:a", "48k",
         "-movflags", "+faststart",
@@ -695,7 +757,7 @@ async def start_manual_recording(user_name: str = "Gezinslid", stream_name: str 
     clip_filename = f"{clip_id}.mp4"
     clip_path = str(settings.CLIPS_DIR / clip_filename)
 
-    rtsp_url = settings.GO2RTC_RTSP_URL if stream_name == "deurbel" else f"rtsp://192.168.2.1:8554/{stream_name}"
+    rtsp_url = f"rtsp://127.0.0.1:8554/{stream_name}"
     cmd = [
         "ffmpeg", "-y",
         "-rtsp_transport", "tcp",

@@ -50,7 +50,7 @@ class WebRtcSignaling {
     /**
      * Connect to go2rtc WebSocket signaling.
      *
-     * @param wsUrl e.g. "ws://192.168.2.1:1984" or "wss://webrtc.foxway.nl"
+     * @param wsUrl e.g. "ws://<host>:1984" or "wss://<domain>"
      * @param streamName e.g. "deurbel"
      */
     fun connect(wsUrl: String, streamName: String, onConnected: () -> Unit = {}) {

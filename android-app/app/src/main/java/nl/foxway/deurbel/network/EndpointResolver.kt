@@ -13,12 +13,8 @@ import okhttp3.Request
 import java.util.concurrent.TimeUnit
 
 /**
- * Smart Endpoint Resolver — automatic sub-150ms LAN detection with
- * seamless WAN fallback.
- *
- * Per SPEC §4.4:
- *   - When `192.168.2.1:8090` responds within 150ms → use direct LAN URLs
- *   - Otherwise → use WAN URLs (`https://deurbel.foxway.nl`)
+ * Smart Endpoint Resolver — automatic LAN detection with
+ * dynamic auto-healing and seamless WAN fallback.
  *
  * Provides observable state so the UI can show LAN 🟢 / 5G 🌐.
  */
@@ -28,7 +24,7 @@ class EndpointResolver(
 
     companion object {
         private const val TAG = "EndpointResolver"
-        private const val LAN_PROBE_TIMEOUT_MS = 600L
+        private const val LAN_PROBE_TIMEOUT_MS = 450L
         private const val LAN_HEALTH_PATH = "/api/v1/status"
     }
 
@@ -47,33 +43,47 @@ class EndpointResolver(
     private val probeClient = OkHttpClient.Builder()
         .connectTimeout(LAN_PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         .readTimeout(LAN_PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        .callTimeout(LAN_PROBE_TIMEOUT_MS + 500L, TimeUnit.MILLISECONDS)
+        .callTimeout(LAN_PROBE_TIMEOUT_MS + 400L, TimeUnit.MILLISECONDS)
         .retryOnConnectionFailure(false)
         .build()
 
     /**
      * Probe the LAN endpoint and resolve the best API + WebRTC URLs.
-     *
-     * Should be called:
-     *   1. On app foreground / resume
-     *   2. On network connectivity change
-     *   3. Before each WebSocket reconnection
-     *   4. When an incoming ring is received
+     * If LAN fails on Wi-Fi, triggers auto-healing subnet discovery.
      */
     suspend fun resolve(): ResolvedEndpoints = withContext(Dispatchers.IO) {
-        val config = preferencesManager.getEndpointConfig()
+        var config = preferencesManager.getEndpointConfig()
 
-        val isLan = try {
-            val request = Request.Builder()
-                .url("${config.lanApiUrl}$LAN_HEALTH_PATH")
-                .build()
-            val response = probeClient.newCall(request).execute()
-            val success = response.isSuccessful
-            response.close()
-            success
-        } catch (e: Exception) {
-            Log.d(TAG, "LAN probe failed (${e.message}), using WAN")
-            false
+        var isLan = false
+        if (config.lanApiUrl.isNotBlank()) {
+            isLan = try {
+                val request = Request.Builder()
+                    .url("${config.lanApiUrl.trimEnd('/')}$LAN_HEALTH_PATH")
+                    .build()
+                val response = probeClient.newCall(request).execute()
+                val success = response.isSuccessful
+                response.close()
+                success
+            } catch (e: Exception) {
+                Log.d(TAG, "Cached LAN probe failed (${e.message})")
+                false
+            }
+        }
+
+        // Auto-heal: If LAN failed, run dynamic subnet discovery to find changed server IP
+        if (!isLan) {
+            try {
+                val appCtx = nl.foxway.deurbel.FoxwayApp.instance
+                val discovery = NetworkDiscovery(appCtx)
+                val discovered = discovery.discoverServer(timeoutMs = 700)
+                if (discovered != null && discovered.serverLanUrl.isNotBlank()) {
+                    Log.i(TAG, "Auto-healed LAN server IP to: ${discovered.serverLanUrl}")
+                    config = preferencesManager.getEndpointConfig()
+                    isLan = true
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Subnet auto-heal skipped: ${e.message}")
+            }
         }
 
         val result = if (isLan) {

@@ -165,6 +165,16 @@ CREATE TABLE IF NOT EXISTS app_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    type          TEXT NOT NULL,
+    category      TEXT NOT NULL,
+    title         TEXT NOT NULL,
+    clip_id       TEXT DEFAULT '',
+    snapshot_url  TEXT DEFAULT '',
+    created_at    TEXT NOT NULL
+);
 """
 
 
@@ -521,4 +531,59 @@ async def set_setting(key: str, value: str) -> None:
             (key, value),
         )
         await db.commit()
+
+
+async def save_event(
+    event_type: str,
+    category: str,
+    title: str,
+    clip_id: str = "",
+    snapshot_url: str = "",
+) -> dict:
+    """Record an event (ring or confirmed motion) in the events table."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO events (type, category, title, clip_id, snapshot_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (event_type, category, title, clip_id, snapshot_url, now_iso),
+        )
+        await db.commit()
+        event_id = cursor.lastrowid
+        return {
+            "id": event_id,
+            "type": event_type,
+            "category": category,
+            "title": title,
+            "clip_id": clip_id,
+            "snapshot_url": snapshot_url,
+            "created_at": now_iso,
+        }
+
+
+async def get_events_since(since_id: int = 0, limit: int = 50) -> list[dict]:
+    """Retrieve new events since since_id."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?",
+            (since_id, max(1, min(limit, 200))),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def get_dynamic_wan_url() -> str:
+    """Return the currently detected or configured dynamic WAN URL."""
+    from app.config import settings
+    return await get_setting("server_wan_url", settings.WAN_URL)
+
+
+async def set_dynamic_wan_url(url: str) -> None:
+    """Persist dynamic WAN URL to app_settings."""
+    if url and url.startswith(("http://", "https://")):
+        await set_setting("server_wan_url", url.rstrip("/"))
+
 

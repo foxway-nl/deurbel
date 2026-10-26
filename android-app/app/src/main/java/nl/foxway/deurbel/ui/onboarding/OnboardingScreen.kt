@@ -1,72 +1,53 @@
 package nl.foxway.deurbel.ui.onboarding
 
-import android.Manifest
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.*
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import androidx.core.content.ContextCompat
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.google.zxing.*
-import com.google.zxing.common.HybridBinarizer
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import nl.foxway.deurbel.FoxwayApp
-import nl.foxway.deurbel.data.models.DiscoveredDoorbell
+import nl.foxway.deurbel.data.AppLogger
+import nl.foxway.deurbel.data.models.CameraSettingsUpdate
 import nl.foxway.deurbel.data.models.PairRequest
 import nl.foxway.deurbel.network.ApiClientFactory
-import nl.foxway.deurbel.network.MdnsDiscovery
+import nl.foxway.deurbel.network.NetworkDiscovery
 import nl.foxway.deurbel.ui.theme.*
 import org.json.JSONObject
-import java.util.concurrent.Executors
 
 /**
- * Production-Grade Doorbell Onboarding Screen:
- *  - Mandatory username (empty by default, requires >= 2 characters)
- *  - 3-Way EZVIZ / Ring style onboarding:
- *    1. 📷 Live CameraX Barcode Scanner
- *    2. 🖼️ Gallery Photo Picker Bitmap Decoder
- *    3. ⌨️ Manual Code / Verification Entry
- *  - LAN & WAN auto-failover pairing
- *  - Realtime One UI permission checklist
+ * 100% Dynamic Onboarding & Pairing Screen for Foxway Doorbell.
+ *
+ * Implements Task 1:
+ * - Dynamic Wi-Fi subnet scanning & mDNS discovery with 0 hardcoded IPs
+ * - Live Status Card (Auto-discovered camera & server vs fallback retry)
+ * - Veld 1: Jouw naam (verplicht, standaard "")
+ * - Veld 2: Deurbel Gebruikersnaam (standaard "admin")
+ * - Veld 3: Deurbel Wachtwoord / Verificatiecode met wachtwoord-oogje en [i] info icoon
+ * - Eén enkele "Koppelen" knop
+ * - Full-screen Samsung One UI permission setup
  */
 @Composable
 fun OnboardingScreen(
@@ -75,75 +56,54 @@ fun OnboardingScreen(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val prefs = remember { FoxwayApp.instance.preferencesManager }
-    val mdnsDiscovery = remember { MdnsDiscovery(context) }
+    val networkDiscovery = remember { NetworkDiscovery(context) }
 
-    var discoveredDoorbell by remember { mutableStateOf<DiscoveredDoorbell?>(null) }
     var isScanning by remember { mutableStateOf(true) }
+    var discoveryResult by remember { mutableStateOf<NetworkDiscovery.DiscoveryResult?>(null) }
+    var scanFailed by remember { mutableStateOf(false) }
+
+    // Form fields
     var userName by remember { mutableStateOf("") }
-    var deviceName by remember {
-        mutableStateOf("${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}")
+    var doorbellUser by remember { mutableStateOf("admin") }
+    var doorbellPassword by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
+    var showPasswordInfoDialog by remember { mutableStateOf(false) }
+    var showManualCredentials by remember { mutableStateOf(false) }
+
+    // Manual network fallback expander
+    var showManualServerConfig by remember { mutableStateOf(false) }
+    var manualLanUrl by remember { mutableStateOf("") }
+    var manualWanUrl by remember { mutableStateOf("") }
+
+    val deviceName = remember {
+        "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
     }
+
     var isPairing by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-    var cameraConfiguredMessage by remember { mutableStateOf<String?>(null) }
-    var showQrScanDialog by remember { mutableStateOf(false) }
-    var bootstrapToken by remember { mutableStateOf<String?>(null) }
 
     val isNameValid = userName.trim().length >= 2
 
-    // Start discovery & auto-fill bootstrap
+    // Perform dynamic subnet discovery
     val performDiscovery: () -> Unit = {
         coroutineScope.launch {
             isScanning = true
+            scanFailed = false
             errorMessage = null
-            try {
-                // 1. Try bootstrap on LAN or WAN first to auto-fill camera status
-                val lanApi = ApiClientFactory.createApi("http://192.168.2.1:8090")
-                val bootResp = try {
-                    lanApi.getOnboardingBootstrap()
-                } catch (_: Exception) {
-                    val wanApi = ApiClientFactory.createApi("https://deurbel.foxway.nl")
-                    wanApi.getOnboardingBootstrap()
-                }
-                if (bootResp.isSuccessful && bootResp.body() != null) {
-                    val boot = bootResp.body()!!
-                    bootstrapToken = boot.token.ifBlank { boot.bootstrapToken }
-                    discoveredDoorbell = DiscoveredDoorbell(
-                        hostAddress = boot.cameraIp.ifBlank { "192.168.2.1" },
-                        port = 8090,
-                        lanUrl = boot.lanUrl.ifBlank { "http://192.168.2.1:8090" },
-                        wanUrl = boot.wanUrl.ifBlank { "https://deurbel.foxway.nl" },
-                        go2rtcLan = "ws://192.168.2.1:1984",
-                        go2rtcWan = "wss://deurbel.foxway.nl/api/ws"
-                    )
-                    if (boot.cameraCredentialsConfigured) {
-                        cameraConfiguredMessage = "✅ Deurbel al gekoppeld op server (${boot.cameraIp})"
-                    }
-                    isScanning = false
-                    return@launch
-                }
-            } catch (_: Exception) {}
-
-            // 2. Fallback to mDNS
-            try {
-                val found = mdnsDiscovery.discoverFirst()
-                if (found != null) {
-                    discoveredDoorbell = found
-                    isScanning = false
-                    return@launch
-                }
-            } catch (_: Exception) {}
-
-            // 3. Fallback default for lab
-            discoveredDoorbell = DiscoveredDoorbell(
-                hostAddress = "192.168.2.1",
-                port = 8090,
-                lanUrl = "http://192.168.2.1:8090",
-                wanUrl = "https://deurbel.foxway.nl",
-                go2rtcLan = "ws://192.168.2.1:1984",
-                go2rtcWan = "wss://deurbel.foxway.nl/api/ws"
-            )
+            val result = networkDiscovery.discoverServer()
             isScanning = false
+            if (result != null) {
+                discoveryResult = result
+                scanFailed = false
+                if (result.serverLanUrl.isNotBlank() && manualLanUrl.isBlank()) {
+                    manualLanUrl = result.serverLanUrl
+                }
+                if (result.serverWanUrl.isNotBlank() && manualWanUrl.isBlank()) {
+                    manualWanUrl = result.serverWanUrl
+                }
+            } else {
+                scanFailed = true
+            }
         }
     }
 
@@ -187,26 +147,26 @@ fun OnboardingScreen(
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(20.dp)
+            verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             // Logo & Title
             Box(
                 contentAlignment = Alignment.Center,
-                modifier = Modifier.size(100.dp)
+                modifier = Modifier.size(90.dp)
             ) {
                 if (isScanning) {
                     Box(
                         modifier = Modifier
-                            .size(90.dp)
+                            .size(80.dp)
                             .scale(pulseScale)
                             .background(EmeraldPrimary.copy(alpha = pulseAlpha), CircleShape)
                     )
                 }
                 Box(
                     modifier = Modifier
-                        .size(70.dp)
+                        .size(64.dp)
                         .background(SurfaceVariantDark, CircleShape)
                         .border(2.dp, EmeraldPrimary, CircleShape),
                     contentAlignment = Alignment.Center
@@ -215,7 +175,7 @@ fun OnboardingScreen(
                         imageVector = Icons.Default.Doorbell,
                         contentDescription = "Doorbell",
                         tint = EmeraldPrimary,
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(34.dp)
                     )
                 }
             }
@@ -227,69 +187,172 @@ fun OnboardingScreen(
                     color = TextPrimary
                 )
                 Text(
-                    text = if (isScanning) "Zoeken naar deurbel op je wifi-netwerk…" else "Klaar voor koppelen",
+                    text = if (isScanning) "Zoeken naar deurbel op je lokale netwerk…" else "Klaar voor koppelen",
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextSecondary,
                     textAlign = TextAlign.Center
                 )
             }
 
-            // Discovery Result Card
+            // ══════════════════════════════════════════════════════════════
+            // Bovenste Statuskaart (Live Netwerkscan)
+            // ══════════════════════════════════════════════════════════════
             Card(
                 colors = CardDefaults.cardColors(containerColor = SurfaceGlass),
                 shape = RoundedCornerShape(16.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(1.dp, DividerDark, RoundedCornerShape(16.dp))
+                    .border(
+                        1.dp,
+                        if (discoveryResult != null) LanGreen.copy(alpha = 0.5f) else DividerDark,
+                        RoundedCornerShape(16.dp)
+                    )
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .background(if (discoveredDoorbell != null) LanGreen else AmberWarning, CircleShape)
-                        )
-                        Text(
-                            text = if (discoveredDoorbell != null)
-                                "Gevonden op ${discoveredDoorbell?.hostAddress}"
-                            else
-                                "Bezig met zoeken via mDNS…",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = TextPrimary
-                        )
-                    }
-
-                    discoveredDoorbell?.let { db ->
-                        Text(
-                            text = "LAN: ${db.lanUrl} • WAN: ${db.wanUrl}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary
-                        )
-                    }
-
-                    cameraConfiguredMessage?.let { msg ->
-                        Surface(
-                            color = EmeraldPrimary.copy(alpha = 0.15f),
-                            shape = RoundedCornerShape(10.dp),
-                            border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.4f)),
-                            modifier = Modifier.fillMaxWidth()
+                    if (isScanning) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Row(
-                                modifier = Modifier.padding(10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            CircularProgressIndicator(
+                                color = EmeraldPrimary,
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Text(
+                                text = "Zoeken naar server & deurbel op lokaal subnet…",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = TextPrimary
+                            )
+                        }
+                    } else if (discoveryResult != null) {
+                        val res = discoveryResult!!
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(10.dp)
+                                    .background(LanGreen, CircleShape)
+                            )
+                            Text(
+                                text = if (res.cameraIp.isNotBlank())
+                                    "✅ Server & Deurbel automatisch gevonden op netwerk (${res.cameraIp})"
+                                else
+                                    "✅ Server automatisch gevonden op netwerk (${res.serverLanUrl})",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                color = LanGreen
+                            )
+                        }
+
+                        if (res.cameraConfigured) {
+                            Surface(
+                                color = EmeraldPrimary.copy(alpha = 0.12f),
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.3f)),
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = EmeraldPrimary, modifier = Modifier.size(18.dp))
+                                Row(
+                                    modifier = Modifier.padding(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = null,
+                                        tint = EmeraldPrimary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = "Deurbel is reeds geconfigureerd. Je hoeft alleen je naam in te vullen!",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = EmeraldLight
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        // Scan failed
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(
+                                text = "⚠️ Geen deurbel of server gevonden op dit netwerk",
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                                color = AmberWarning
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(
+                                onClick = { performDiscovery() },
+                                colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariantDark),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = EmeraldPrimary
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("🔄 Opnieuw zoeken", color = TextPrimary, fontSize = 13.sp)
+                            }
+
+                            TextButton(
+                                onClick = { showManualServerConfig = !showManualServerConfig },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
                                 Text(
-                                    text = msg,
-                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
-                                    color = EmeraldLight
+                                    text = if (showManualServerConfig) "Verberg handmatig" else "Handmatig opgeven",
+                                    color = CyanAccent,
+                                    fontSize = 13.sp
+                                )
+                            }
+                        }
+
+                        if (showManualServerConfig) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = manualLanUrl,
+                                    onValueChange = { manualLanUrl = it },
+                                    label = { Text("Server LAN URL (bv. http://192.168.1.50:8090)") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = EmeraldPrimary,
+                                        unfocusedBorderColor = DividerDark,
+                                        focusedTextColor = TextPrimary,
+                                        unfocusedTextColor = TextPrimary
+                                    )
+                                )
+                                OutlinedTextField(
+                                    value = manualWanUrl,
+                                    onValueChange = { manualWanUrl = it },
+                                    label = { Text("Server WAN / Domein (optioneel)") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = EmeraldPrimary,
+                                        unfocusedBorderColor = DividerDark,
+                                        focusedTextColor = TextPrimary,
+                                        unfocusedTextColor = TextPrimary
+                                    )
                                 )
                             }
                         }
@@ -297,10 +360,12 @@ fun OnboardingScreen(
                 }
             }
 
-            // Verplicht Naam Invoerveld
+            // ══════════════════════════════════════════════════════════════
+            // Veld 1 — Jouw naam (verplicht)
+            // ══════════════════════════════════════════════════════════════
             Column(
                 modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 OutlinedTextField(
                     value = userName,
@@ -322,9 +387,9 @@ fun OnboardingScreen(
                     )
                 )
 
-                if (!isNameValid) {
+                if (userName.isNotBlank() && !isNameValid) {
                     Text(
-                        text = "⚠️ Vul eerst je naam in om dit toestel te koppelen (min. 2 tekens)",
+                        text = "Vul minimaal 2 tekens in",
                         color = AmberWarning,
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(start = 4.dp)
@@ -332,76 +397,129 @@ fun OnboardingScreen(
                 }
             }
 
-            // Geavanceerde netwerkinstellingen (Collapsible)
-            var showAdvancedSettings by remember { mutableStateOf(false) }
-            var customLanUrl by remember { mutableStateOf("http://192.168.2.1:8090") }
-            var customWanUrl by remember { mutableStateOf("https://deurbel.foxway.nl") }
+            // ══════════════════════════════════════════════════════════════
+            // Veld 2 & 3 — Deurbel Inloggegevens
+            // ══════════════════════════════════════════════════════════════
+            val isCameraAlreadyConfigured = discoveryResult?.cameraConfigured == true
 
-            Column(modifier = Modifier.fillMaxWidth()) {
-                TextButton(
-                    onClick = { showAdvancedSettings = !showAdvancedSettings },
-                    modifier = Modifier.align(Alignment.Start)
+            if (isCameraAlreadyConfigured) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = if (showAdvancedSettings) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        contentDescription = null,
-                        tint = CyanAccent,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "Geavanceerde netwerkinstellingen",
+                        text = "Camera-inloggegevens reeds opgeslagen",
                         style = MaterialTheme.typography.bodySmall,
-                        color = CyanAccent
+                        color = TextSecondary
                     )
-                }
-
-                if (showAdvancedSettings) {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = SurfaceVariantDark.copy(alpha = 0.5f)),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 6.dp)
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            OutlinedTextField(
-                                value = customLanUrl,
-                                onValueChange = { customLanUrl = it },
-                                label = { Text("LAN URL") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = EmeraldPrimary,
-                                    unfocusedBorderColor = DividerDark
-                                )
-                            )
-                            OutlinedTextField(
-                                value = customWanUrl,
-                                onValueChange = { customWanUrl = it },
-                                label = { Text("WAN URL (Foxway Cloud)") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = EmeraldPrimary,
-                                    unfocusedBorderColor = DividerDark
-                                )
-                            )
-                        }
+                    TextButton(onClick = { showManualCredentials = !showManualCredentials }) {
+                        Text(
+                            text = if (showManualCredentials) "Sluiten" else "Aanpassen",
+                            color = CyanAccent,
+                            fontSize = 12.sp
+                        )
                     }
                 }
             }
 
-            // Connect Button (1-Klik Koppelen)
+            if (!isCameraAlreadyConfigured || showManualCredentials) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // Veld 2: Deurbel Gebruikersnaam
+                    OutlinedTextField(
+                        value = doorbellUser,
+                        onValueChange = { doorbellUser = it },
+                        label = { Text("Deurbel Gebruikersnaam") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = EmeraldPrimary,
+                            unfocusedBorderColor = DividerDark,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            focusedLabelColor = EmeraldPrimary,
+                            unfocusedLabelColor = TextSecondary,
+                            cursorColor = EmeraldPrimary
+                        )
+                    )
+
+                    // Veld 3: Deurbel Wachtwoord / Verificatiecode + Info Icoon
+                    OutlinedTextField(
+                        value = doorbellPassword,
+                        onValueChange = { doorbellPassword = it },
+                        label = { Text("Deurbel Wachtwoord / Verificatiecode") },
+                        placeholder = { Text("Verificatiecode op sticker of camera-wachtwoord") },
+                        singleLine = true,
+                        visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        trailingIcon = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                                    Icon(
+                                        imageVector = if (passwordVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                        contentDescription = if (passwordVisible) "Verberg wachtwoord" else "Toon wachtwoord",
+                                        tint = TextSecondary
+                                    )
+                                }
+                                IconButton(onClick = { showPasswordInfoDialog = true }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Info,
+                                        contentDescription = "Informatie over wachtwoord",
+                                        tint = CyanAccent
+                                    )
+                                }
+                            }
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = EmeraldPrimary,
+                            unfocusedBorderColor = DividerDark,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            focusedLabelColor = EmeraldPrimary,
+                            unfocusedLabelColor = TextSecondary,
+                            cursorColor = EmeraldPrimary
+                        )
+                    )
+                }
+            }
+
+            // Foutmelding
+            errorMessage?.let {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = CoralDecline.copy(alpha = 0.15f)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = it,
+                        color = CoralDecline,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+
+            // ══════════════════════════════════════════════════════════════
+            // Eén Knop — "Koppelen"
+            // ══════════════════════════════════════════════════════════════
             Button(
                 onClick = {
                     if (!isNameValid) return@Button
-                    val db = discoveredDoorbell
-                    val targetLan = if (showAdvancedSettings && customLanUrl.isNotBlank()) customLanUrl else (db?.lanUrl ?: "http://192.168.2.1:8090")
-                    val targetWan = if (showAdvancedSettings && customWanUrl.isNotBlank()) customWanUrl else (db?.wanUrl ?: "https://deurbel.foxway.nl")
+
+                    val targetLan = discoveryResult?.serverLanUrl?.ifBlank { null }
+                        ?: manualLanUrl.trim().ifBlank { null }
+                    val targetWan = discoveryResult?.serverWanUrl?.ifBlank { null }
+                        ?: manualWanUrl.trim().ifBlank { null }
+
+                    if (targetLan == null && targetWan == null) {
+                        errorMessage = "Geen server-URL beschikbaar. Voer handmatig een serveradres in of voer een netwerkscan uit."
+                        return@Button
+                    }
 
                     coroutineScope.launch {
                         isPairing = true
@@ -412,29 +530,52 @@ fun OnboardingScreen(
                                 context.contentResolver,
                                 Settings.Secure.ANDROID_ID
                             ) ?: ""
-                            val request = PairRequest(
+
+                            val bootstrapToken = discoveryResult?.bootstrapToken
+
+                            // Optionally update camera credentials on the backend if the user entered any
+                            if (doorbellPassword.isNotBlank()) {
+                                val camIp = discoveryResult?.cameraIp ?: ""
+                                val credsPayload = CameraSettingsUpdate(
+                                    ip = camIp,
+                                    port = 8000,
+                                    user = doorbellUser.trim().ifBlank { "admin" },
+                                    password = doorbellPassword
+                                )
+                                try {
+                                    if (targetLan != null) {
+                                        ApiClientFactory.createApi(targetLan).updateCameraSettings(credsPayload)
+                                    } else if (targetWan != null) {
+                                        ApiClientFactory.createApi(targetWan).updateCameraSettings(credsPayload)
+                                    }
+                                } catch (_: Exception) {}
+                            }
+
+                            val pairRequest = PairRequest(
                                 userName = userName.trim(),
                                 deviceName = deviceName.trim(),
                                 fcmToken = fcmToken,
                                 deviceId = androidId,
                                 androidVersion = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
-                                connectionType = "LAN/WAN",
+                                connectionType = "AUTO_DISCOVERY",
                                 token = bootstrapToken
                             )
 
                             // 1. Probeer eerst LAN
-                            var resp = try {
-                                val lanApi = ApiClientFactory.createApi(targetLan)
-                                lanApi.pair(request)
-                            } catch (_: Exception) {
-                                null
-                            }
+                            var resp = if (targetLan != null) {
+                                try {
+                                    val lanApi = ApiClientFactory.createApi(targetLan)
+                                    lanApi.pair(pairRequest)
+                                } catch (_: Exception) {
+                                    null
+                                }
+                            } else null
 
-                            // 2. Als LAN niet bereikbaar is, val automatisch terug op WAN
-                            if (resp == null || !resp.isSuccessful) {
+                            // 2. Als LAN niet reageert of faalt, probeer WAN
+                            if ((resp == null || !resp.isSuccessful) && targetWan != null) {
                                 try {
                                     val wanApi = ApiClientFactory.createApi(targetWan)
-                                    resp = wanApi.pair(request)
+                                    resp = wanApi.pair(pairRequest)
                                 } catch (_: Exception) {
                                     // WAN also failed
                                 }
@@ -452,19 +593,18 @@ fun OnboardingScreen(
                                     go2rtcLanWs = body.go2rtcLanWs,
                                     go2rtcWanWs = body.go2rtcWanWs
                                 )
-                                nl.foxway.deurbel.data.AppLogger.getInstance(context)
-                                    .info("Apparaat succesvol gekoppeld als ${body.userName}")
+                                AppLogger.getInstance(context).info("Toestel gekoppeld als ${body.userName}")
                                 onPairingSuccess()
                             } else {
                                 val errorDetail = try {
                                     resp?.errorBody()?.string()?.let { errStr ->
-                                        org.json.JSONObject(errStr).optString("detail", errStr)
+                                        JSONObject(errStr).optString("detail", errStr)
                                     }
                                 } catch (_: Exception) { null }
-                                errorMessage = errorDetail ?: "Koppelen mislukt (${resp?.code() ?: "Geen verbinding met LAN of WAN"})"
+                                errorMessage = errorDetail ?: "Koppelen mislukt (${resp?.code() ?: "Geen verbinding met server"})"
                             }
                         } catch (e: Exception) {
-                            errorMessage = "Fout bij verbinden: ${e.localizedMessage}"
+                            errorMessage = "Fout bij koppelen: ${e.localizedMessage}"
                         } finally {
                             isPairing = false
                         }
@@ -484,7 +624,7 @@ fun OnboardingScreen(
                     CircularProgressIndicator(color = BackgroundDark, modifier = Modifier.size(24.dp))
                 } else {
                     Text(
-                        text = if (!isNameValid) "Vul naam in om te koppelen" else "1-Klik Koppelen als $userName",
+                        text = if (!isNameValid) "Vul naam in om te koppelen" else "Koppelen",
                         color = if (isNameValid) BackgroundDark else TextSecondary,
                         fontWeight = FontWeight.Bold,
                         fontSize = 16.sp
@@ -492,33 +632,9 @@ fun OnboardingScreen(
                 }
             }
 
-            // QR & Barcode Onboarding Button
-            OutlinedButton(
-                onClick = {
-                    if (isNameValid) {
-                        showQrScanDialog = true
-                    }
-                },
-                enabled = !isPairing && isNameValid,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = if (isNameValid) CyanAccent else TextSecondary
-                ),
-                border = BorderStroke(1.dp, if (isNameValid) CyanAccent.copy(alpha = 0.5f) else DividerDark)
-            ) {
-                Icon(imageVector = Icons.Default.QrCodeScanner, contentDescription = null, tint = if (isNameValid) CyanAccent else TextSecondary)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("📷 Koppel via QR-code, Foto of Code", fontWeight = FontWeight.SemiBold)
-            }
-
-            errorMessage?.let {
-                Text(text = it, color = CoralDecline, style = MaterialTheme.typography.bodyMedium)
-            }
-
-            // Samsung One UI Permission Checklist (SPEC §4.1)
+            // ══════════════════════════════════════════════════════════════
+            // Samsung One UI Permission Checklist
+            // ══════════════════════════════════════════════════════════════
             Text(
                 text = "Belangrijke Toestemmingen (Samsung One UI)",
                 style = MaterialTheme.typography.titleMedium,
@@ -584,12 +700,34 @@ fun OnboardingScreen(
         }
     }
 
-    if (showQrScanDialog) {
-        QrScanDialog(
-            userName = userName.trim(),
-            deviceName = deviceName.trim(),
-            onDismiss = { showQrScanDialog = false },
-            onPairSuccess = onPairingSuccess
+    // Info Alert Dialog voor wachtwoord / verificatiecode
+    if (showPasswordInfoDialog) {
+        AlertDialog(
+            onDismissRequest = { showPasswordInfoDialog = false },
+            title = {
+                Text(
+                    text = "Deurbel Inloggegevens",
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+            },
+            text = {
+                Text(
+                    text = "De standaard gebruikersnaam is 'admin'. Het wachtwoord is de verificatiecode (6-12 tekens op de sticker achterop de deurbel of in het boekje) of het zelf ingestelde camera-wachtwoord.",
+                    color = TextSecondary,
+                    lineHeight = 20.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { showPasswordInfoDialog = false },
+                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                ) {
+                    Text("Begrepen", color = BackgroundDark, fontWeight = FontWeight.Bold)
+                }
+            },
+            containerColor = SurfaceGlass,
+            shape = RoundedCornerShape(16.dp)
         )
     }
 }
@@ -613,491 +751,24 @@ private fun PermissionItem(
         ) {
             Icon(imageVector = icon, contentDescription = null, tint = CyanAccent)
             Column {
-                Text(text = title, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold), color = TextPrimary)
-                Text(text = subtitle, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = TextPrimary
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
             }
         }
         IconButton(onClick = onClick) {
-            Icon(imageVector = Icons.Default.ChevronRight, contentDescription = "Instellen", tint = TextSecondary)
-        }
-    }
-}
-
-/**
- * 3-Way EZVIZ / Ring style onboarding dialog:
- *  Tab 0: 📷 Live CameraX Scanner (ZXing decoding)
- *  Tab 1: 🖼️ Gallery Photo Picker (ZXing Bitmap decoding)
- *  Tab 2: ⌨️ Manual Code / Verification Entry
- */
-@Composable
-private fun QrScanDialog(
-    userName: String,
-    deviceName: String,
-    onDismiss: () -> Unit,
-    onPairSuccess: () -> Unit
-) {
-    val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
-    val prefs = remember { FoxwayApp.instance.preferencesManager }
-
-    var selectedTab by remember { mutableIntStateOf(0) }
-    var isProcessing by remember { mutableStateOf(false) }
-    var statusMessage by remember { mutableStateOf<String?>(null) }
-    var isError by remember { mutableStateOf(false) }
-    var manualText by remember { mutableStateOf("") }
-
-    // Camera permission state
-    var hasCameraPermission by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-        )
-    }
-    val cameraPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        hasCameraPermission = granted
-        if (!granted) {
-            statusMessage = "Cameratoestemming is vereist om de QR-code te scannen."
-            isError = true
-        }
-    }
-
-    // Common pairing executor
-    val executePairing: (String) -> Unit = { rawCode ->
-        coroutineScope.launch {
-            isProcessing = true
-            isError = false
-            statusMessage = "Bezig met verifiëren van koppelcode…"
-            try {
-                val trimmed = rawCode.trim()
-                var targetLan = "http://192.168.2.1:8090"
-                var targetWan = "https://deurbel.foxway.nl"
-                var qrToken: String? = null
-
-                if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-                    try {
-                        val obj = JSONObject(trimmed)
-                        if (obj.has("lan_url")) targetLan = obj.getString("lan_url")
-                        if (obj.has("wan_url")) targetWan = obj.getString("wan_url")
-                        if (obj.has("token")) qrToken = obj.getString("token")
-                    } catch (_: Exception) {}
-                }
-
-                val fcmToken = prefs.getFcmToken()
-                val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: ""
-                val request = PairRequest(
-                    userName = userName,
-                    deviceName = deviceName,
-                    fcmToken = fcmToken,
-                    deviceId = androidId,
-                    androidVersion = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
-                    connectionType = "QR",
-                    token = qrToken
-                )
-
-                // 1. Probeer eerst LAN
-                var resp = try {
-                    val lanApi = ApiClientFactory.createApi(targetLan)
-                    lanApi.pair(request)
-                } catch (_: Exception) { null }
-
-                // 2. Fallback naar WAN
-                if (resp == null || !resp.isSuccessful) {
-                    val wanApi = ApiClientFactory.createApi(targetWan)
-                    resp = wanApi.pair(request)
-                }
-
-                if (resp != null && resp.isSuccessful && resp.body() != null) {
-                    val body = resp.body()!!
-                    prefs.savePairingData(
-                        userId = body.userId,
-                        userName = body.userName,
-                        deviceName = body.deviceName,
-                        jwtToken = body.jwtToken,
-                        lanUrl = body.lanUrl,
-                        wanUrl = body.wanUrl,
-                        go2rtcLanWs = body.go2rtcLanWs,
-                        go2rtcWanWs = body.go2rtcWanWs
-                    )
-                    statusMessage = "✅ Succesvol gekoppeld!"
-                    delay(300)
-                    onDismiss()
-                    onPairSuccess()
-                } else {
-                    isError = true
-                    val errorDetail = try {
-                        resp?.errorBody()?.string()?.let { errStr ->
-                            JSONObject(errStr).optString("detail", errStr)
-                        }
-                    } catch (_: Exception) { null }
-                    statusMessage = "❌ " + (errorDetail ?: "Koppelen mislukt (${resp?.code() ?: "Geen verbinding met server"})")
-                }
-            } catch (e: Exception) {
-                isError = true
-                statusMessage = "❌ Fout: ${e.localizedMessage}"
-            } finally {
-                isProcessing = false
-            }
-        }
-    }
-
-    // Photo picker launcher for Tab 1
-    val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri: Uri? ->
-        if (uri != null) {
-            coroutineScope.launch(Dispatchers.IO) {
-                isProcessing = true
-                isError = false
-                withContext(Dispatchers.Main) {
-                    statusMessage = "Foto analyseren op QR-code…"
-                }
-                try {
-                    val inputStream = context.contentResolver.openInputStream(uri)
-                    val bitmap = BitmapFactory.decodeStream(inputStream)
-                    inputStream?.close()
-
-                    if (bitmap != null) {
-                        val decoded = decodeQrFromBitmap(bitmap)
-                        if (decoded != null && decoded.isNotBlank()) {
-                            withContext(Dispatchers.Main) {
-                                executePairing(decoded)
-                            }
-                        } else {
-                            withContext(Dispatchers.Main) {
-                                isError = true
-                                statusMessage = "Geen QR-code gevonden in de geselecteerde foto. Kies een duidelijkere foto of screenshot."
-                                isProcessing = false
-                            }
-                        }
-                    } else {
-                        withContext(Dispatchers.Main) {
-                            isError = true
-                            statusMessage = "Kon de foto niet openen."
-                            isProcessing = false
-                        }
-                    }
-                } catch (e: Exception) {
-                    withContext(Dispatchers.Main) {
-                        isError = true
-                        statusMessage = "Fout bij laden van foto: ${e.localizedMessage}"
-                        isProcessing = false
-                    }
-                }
-            }
-        }
-    }
-
-    Dialog(
-        onDismissRequest = { if (!isProcessing) onDismiss() },
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth(0.94f)
-                .wrapContentHeight(),
-            shape = RoundedCornerShape(20.dp),
-            color = SurfaceDark,
-            border = BorderStroke(1.dp, DividerDark)
-        ) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Deurbel Koppelen",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = TextPrimary
-                    )
-                    IconButton(onClick = onDismiss, enabled = !isProcessing) {
-                        Icon(imageVector = Icons.Default.Close, contentDescription = "Sluiten", tint = TextSecondary)
-                    }
-                }
-
-                // 3 Tabs: Camera, Foto, Handmatig
-                TabRow(
-                    selectedTabIndex = selectedTab,
-                    containerColor = SurfaceVariantDark,
-                    contentColor = EmeraldPrimary,
-                    modifier = Modifier.clip(RoundedCornerShape(10.dp))
-                ) {
-                    Tab(
-                        selected = selectedTab == 0,
-                        onClick = { selectedTab = 0 },
-                        text = { Text("📷 Camera", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
-                    )
-                    Tab(
-                        selected = selectedTab == 1,
-                        onClick = { selectedTab = 1 },
-                        text = { Text("🖼️ Foto", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
-                    )
-                    Tab(
-                        selected = selectedTab == 2,
-                        onClick = { selectedTab = 2 },
-                        text = { Text("⌨️ Handmatig", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
-                    )
-                }
-
-                // Tab Content
-                when (selectedTab) {
-                    0 -> { // CameraX Live Scanner
-                        if (!hasCameraPermission) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 24.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                Icon(Icons.Default.CameraAlt, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(48.dp))
-                                Text(
-                                    text = "Cameratoegang is nodig om de QR-code direct te scannen.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = TextSecondary,
-                                    textAlign = TextAlign.Center
-                                )
-                                Button(
-                                    onClick = { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) },
-                                    colors = ButtonDefaults.buttonColors(containerColor = CyanAccent)
-                                ) {
-                                    Text("Camera Toestemming Geven", color = BackgroundDark, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                        } else {
-                            CameraScannerView(
-                                isProcessing = isProcessing,
-                                onQrScanned = { code ->
-                                    if (!isProcessing) {
-                                        executePairing(code)
-                                    }
-                                }
-                            )
-                        }
-                    }
-
-                    1 -> { // Gallery Photo Picker
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 16.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(14.dp)
-                        ) {
-                            Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = EmeraldPrimary, modifier = Modifier.size(48.dp))
-                            Text(
-                                text = "Kies een screenshot of gemaakte foto van de QR-code uit je galerij om direct te koppelen.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary,
-                                textAlign = TextAlign.Center
-                            )
-                            Button(
-                                onClick = {
-                                    photoPickerLauncher.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                    )
-                                },
-                                enabled = !isProcessing,
-                                colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
-                            ) {
-                                Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Kies Foto uit Galerij", color = BackgroundDark, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-
-                    2 -> { // Manual Entry
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Text(
-                                text = "Vul hier de deurbelcode, verificatiecode of JSON-payload handmatig in:",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary
-                            )
-                            OutlinedTextField(
-                                value = manualText,
-                                onValueChange = { manualText = it },
-                                placeholder = { Text("Koppelcode of JSON hier invoeren...") },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(110.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = EmeraldPrimary,
-                                    unfocusedBorderColor = DividerDark,
-                                    focusedTextColor = TextPrimary,
-                                    unfocusedTextColor = TextPrimary
-                                )
-                            )
-                            Button(
-                                onClick = { executePairing(manualText) },
-                                enabled = !isProcessing && manualText.isNotBlank(),
-                                colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier.fillMaxWidth().height(48.dp)
-                            ) {
-                                Text("Koppelen met Ingevulde Code", color = BackgroundDark, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-                }
-
-                // Status / Error Banner
-                statusMessage?.let { msg ->
-                    Surface(
-                        color = if (isError) CoralDecline.copy(alpha = 0.2f) else EmeraldPrimary.copy(alpha = 0.2f),
-                        shape = RoundedCornerShape(10.dp),
-                        border = BorderStroke(1.dp, if (isError) CoralDecline else EmeraldPrimary),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            if (isProcessing) {
-                                CircularProgressIndicator(color = if (isError) CoralDecline else EmeraldPrimary, modifier = Modifier.size(16.dp))
-                            }
-                            Text(
-                                text = msg,
-                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
-                                color = if (isError) CoralDecline else EmeraldLight
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/**
- * CameraX live preview with real ZXing frame analyzer.
- */
-@Composable
-private fun CameraScannerView(
-    isProcessing: Boolean,
-    onQrScanned: (String) -> Unit
-) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    var hasDetected by remember { mutableStateOf(false) }
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(240.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(Color.Black),
-        contentAlignment = Alignment.Center
-    ) {
-        AndroidView(
-            factory = { ctx ->
-                val previewView = PreviewView(ctx).apply {
-                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                    scaleType = PreviewView.ScaleType.FILL_CENTER
-                }
-                val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                cameraProviderFuture.addListener({
-                    try {
-                        val cameraProvider = cameraProviderFuture.get()
-                        val preview = Preview.Builder().build().also {
-                            it.setSurfaceProvider(previewView.surfaceProvider)
-                        }
-                        val imageAnalysis = ImageAnalysis.Builder()
-                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                            .build()
-
-                        val reader = MultiFormatReader().apply {
-                            setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)))
-                        }
-
-                        imageAnalysis.setAnalyzer(Executors.newSingleThreadExecutor()) { imageProxy ->
-                            if (hasDetected || isProcessing) {
-                                imageProxy.close()
-                                return@setAnalyzer
-                            }
-                            try {
-                                val buffer = imageProxy.planes[0].buffer
-                                val bytes = ByteArray(buffer.remaining())
-                                buffer.get(bytes)
-                                val width = imageProxy.width
-                                val height = imageProxy.height
-
-                                val source = PlanarYUVLuminanceSource(
-                                    bytes, width, height, 0, 0, width, height, false
-                                )
-                                val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
-                                val result = reader.decodeWithState(binaryBitmap)
-                                if (result != null && result.text.isNotBlank()) {
-                                    hasDetected = true
-                                    ContextCompat.getMainExecutor(ctx).execute {
-                                        onQrScanned(result.text)
-                                    }
-                                }
-                            } catch (_: Exception) {
-                            } finally {
-                                imageProxy.close()
-                            }
-                        }
-
-                        val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-                        cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageAnalysis)
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-                }, ContextCompat.getMainExecutor(ctx))
-                previewView
-            },
-            modifier = Modifier.fillMaxSize()
-        )
-
-        // Scanner Reticle Overlay
-        Box(
-            modifier = Modifier
-                .size(160.dp)
-                .border(2.dp, CyanAccent, RoundedCornerShape(12.dp))
-        )
-        Text(
-            text = "Richt op de QR-code van de deurbel",
-            color = Color.White,
-            style = MaterialTheme.typography.labelSmall,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 10.dp)
-                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(6.dp))
-                .padding(horizontal = 8.dp, vertical = 4.dp)
-        )
-    }
-}
-
-/**
- * Decodes a QR code string from an Android Bitmap via ZXing.
- */
-private fun decodeQrFromBitmap(bitmap: Bitmap): String? {
-    val width = bitmap.width
-    val height = bitmap.height
-    val pixels = IntArray(width * height)
-    bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-    val source = RGBLuminanceSource(width, height, pixels)
-    val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
-    val reader = MultiFormatReader().apply {
-        setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)))
-    }
-    return try {
-        reader.decodeWithState(binaryBitmap).text
-    } catch (_: Exception) {
-        // Fallback: try inverted
-        try {
-            val invertedSource = source.invert()
-            val invertedBitmap = BinaryBitmap(HybridBinarizer(invertedSource))
-            reader.decodeWithState(invertedBitmap).text
-        } catch (_: Exception) {
-            null
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = "Instellen",
+                tint = TextSecondary
+            )
         }
     }
 }

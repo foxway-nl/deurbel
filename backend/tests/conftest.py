@@ -36,6 +36,22 @@ async def setup_db():
     app_config.settings.DB_PATH = _test_db_path
     app_models._DB_PATH = _test_db_path
     await init_db()
+
+    # Seed camera credentials into test DB if available
+    try:
+        import sqlite3
+        prod_path = Path("/mnt/opslag/deurbel/foxway.db")
+        if prod_path.exists():
+            prod_con = sqlite3.connect(prod_path)
+            creds = prod_con.execute("SELECT key, value FROM app_settings WHERE key LIKE 'camera_%'").fetchall()
+            prod_con.close()
+            test_con = sqlite3.connect(_test_db_path)
+            for k, v in creds:
+                test_con.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)", (k, v))
+            test_con.commit()
+            test_con.close()
+    except Exception:
+        pass
     yield
 
 

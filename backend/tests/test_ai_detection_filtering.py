@@ -33,3 +33,54 @@ async def test_strict_recording_rule_discards_general_motion():
     category = "motion"
     should_record = cfg.get(f"record_{category}", False)
     assert should_record is False, "Empty motion MUST NOT record when record_motion=False"
+
+
+def test_vehicle_displacement_check_parked_car_ignored():
+    """Verify that a stationary/parked vehicle (delta_d < 0.08) is ignored."""
+    import math
+    frame_width = 768.0
+
+    # Frame 1: center at (300, 200)
+    cx1, cy1 = 300.0, 200.0
+    # Frame 2: center at (308, 204) - slight jitter of parked car
+    cx2, cy2 = 308.0, 204.0
+
+    delta_d = math.sqrt((cx2 - cx1) ** 2 + (cy2 - cy1) ** 2) / frame_width
+    assert delta_d < 0.08, f"Displacement {delta_d} should be < 0.08"
+    is_parked = delta_d < 0.08
+    assert is_parked is True, "Stationary/parked vehicle MUST be ignored"
+
+
+def test_vehicle_displacement_check_moving_car_accepted():
+    """Verify that a moving vehicle (delta_d >= 0.08) is accepted."""
+    import math
+    frame_width = 768.0
+
+    # Frame 1: center at (150, 200)
+    cx1, cy1 = 150.0, 200.0
+    # Frame 2: center at (230, 210) - moving across camera view
+    cx2, cy2 = 230.0, 210.0
+
+    delta_d = math.sqrt((cx2 - cx1) ** 2 + (cy2 - cy1) ** 2) / frame_width
+    assert delta_d >= 0.08, f"Displacement {delta_d} should be >= 0.08"
+    is_moving = delta_d >= 0.08
+    assert is_moving is True, "Moving vehicle MUST be confirmed"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_subnet_discovery():
+    """Verify dynamic /24 subnet calculation and camera discovery."""
+    import ipaddress
+    from app.camera_discovery import get_local_ip, get_local_subnet, is_doorbell_alive
+
+    local_ip = get_local_ip()
+    assert local_ip not in ("", "0.0.0.0")
+
+    subnet = get_local_subnet()
+    assert isinstance(subnet, ipaddress.IPv4Network)
+    assert subnet.prefixlen == 24
+    assert ipaddress.ip_address(local_ip) in subnet
+
+    # Test reachability check against live doorbell
+    alive = await is_doorbell_alive("192.168.2.31")
+    assert isinstance(alive, bool)

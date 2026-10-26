@@ -66,7 +66,10 @@ class CallActivity : ComponentActivity() {
                 var isMicMuted by remember { mutableStateOf(true) }
                 var isSpeakerOn by remember { mutableStateOf(true) }
                 val resolver = remember { EndpointResolver(FoxwayApp.instance.preferencesManager) }
-                var streamUrl by remember { mutableStateOf("https://deurbel.foxway.nl/api/v1/stream.mp4?src=deurbel") }
+                var streamUrl by remember {
+                    val activeBase = resolver.activeApiUrl.value
+                    mutableStateOf(if (activeBase.isNotBlank()) "$activeBase/api/v1/stream.mp4?src=deurbel" else "")
+                }
 
                 LaunchedEffect(Unit) {
                     try {

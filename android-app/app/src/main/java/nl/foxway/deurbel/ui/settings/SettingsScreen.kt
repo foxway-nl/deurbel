@@ -98,7 +98,7 @@ fun SettingsScreen(
     // Smart AI Detection & Storage settings state
     var detectionSettings by remember { mutableStateOf(DetectionSettingsDto()) }
     var storageStats by remember { mutableStateOf(StorageStatsDto()) }
-    var currentApiBaseUrl by remember { mutableStateOf("http://192.168.2.1:8090") }
+    var currentApiBaseUrl by remember { mutableStateOf(resolver.activeApiUrl.value) }
     var isCleaningJunk by remember { mutableStateOf(false) }
 
     // Dialogs
@@ -562,81 +562,6 @@ fun SettingsScreen(
                             colors = modernSwitchColors
                         )
                     }
-
-                    // Activiteitszone Slider & Live Voorbeeld
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Icon(imageVector = Icons.Default.Crop, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(18.dp))
-                                Text("Activiteitszone (Bovenkant negeren)", fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                            }
-                            Text(
-                                text = "${detectionSettings.activityZoneTopIgnorePercent}%",
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                color = CyanAccent
-                            )
-                        }
-                        Text(
-                            text = "Negeert beweging op straat of overhangende bomen in de bovenste zone van het camerabeeld (0% - 70%).",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary
-                        )
-
-                        Slider(
-                            value = detectionSettings.activityZoneTopIgnorePercent.toFloat(),
-                            onValueChange = { newPct ->
-                                detectionSettings = detectionSettings.copy(activityZoneTopIgnorePercent = newPct.toInt())
-                            },
-                            onValueChangeFinished = {
-                                saveDetection(detectionSettings)
-                            },
-                            valueRange = 0f..70f,
-                            steps = 13,
-                            colors = SliderDefaults.colors(
-                                thumbColor = CyanAccent,
-                                activeTrackColor = CyanAccent,
-                                inactiveTrackColor = SurfaceVariantDark
-                            )
-                        )
-
-                        // Live Snapshot Preview with Red Line Overlay
-                        var previewTimestamp by remember { mutableLongStateOf(System.currentTimeMillis()) }
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = BackgroundDark,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(180.dp)
-                                .border(1.dp, DividerDark, RoundedCornerShape(12.dp))
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                val previewUrl = "$currentApiBaseUrl/api/v1/activity-zone/preview?top_pct=${detectionSettings.activityZoneTopIgnorePercent}&t=$previewTimestamp"
-                                AsyncImage(
-                                    model = previewUrl,
-                                    contentDescription = "Activiteitszone Voorbeeld",
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentScale = androidx.compose.ui.layout.ContentScale.Fit
-                                )
-                                IconButton(
-                                    onClick = { previewTimestamp = System.currentTimeMillis() },
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(6.dp)
-                                        .size(32.dp)
-                                        .background(BackgroundDark.copy(alpha = 0.6f), CircleShape)
-                                ) {
-                                    Icon(Icons.Default.Refresh, contentDescription = "Vernieuw snapshot", tint = TextPrimary, modifier = Modifier.size(18.dp))
-                                }
-                            }
-                        }
-                    }
                 }
             }
 
@@ -1074,6 +999,7 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.labelMedium,
                         color = CyanAccent
                     )
+                    val lanWebhookUrl = "$currentApiBaseUrl/api/v1/webhook/shelly-ring"
                     Surface(
                         color = SurfaceVariantDark,
                         shape = RoundedCornerShape(8.dp),
@@ -1085,7 +1011,7 @@ fun SettingsScreen(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = "http://192.168.2.1:8090/api/v1/webhook/shelly-ring",
+                                text = lanWebhookUrl,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = TextPrimary,
                                 modifier = Modifier.weight(1f)
@@ -1093,7 +1019,7 @@ fun SettingsScreen(
                             IconButton(
                                 onClick = {
                                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                    clipboard.setPrimaryClip(ClipData.newPlainText("Shelly Webhook LAN", "http://192.168.2.1:8090/api/v1/webhook/shelly-ring"))
+                                    clipboard.setPrimaryClip(ClipData.newPlainText("Shelly Webhook LAN", lanWebhookUrl))
                                     Toast.makeText(context, "LAN Webhook URL gekopieerd!", Toast.LENGTH_SHORT).show()
                                 },
                                 modifier = Modifier.size(28.dp)
@@ -1103,6 +1029,7 @@ fun SettingsScreen(
                         }
                     }
 
+                    val wanWebhookUrl = "${resolver.activeApiUrl.value.ifBlank { currentApiBaseUrl }}/api/v1/webhook/shelly-ring"
                     Text(
                         text = "Shelly Plus Uni Webhook URL (WAN / Foxway Cloud):",
                         style = MaterialTheme.typography.labelMedium,
@@ -1119,7 +1046,7 @@ fun SettingsScreen(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = "https://deurbel.foxway.nl/api/v1/webhook/shelly-ring",
+                                text = wanWebhookUrl,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = TextPrimary,
                                 modifier = Modifier.weight(1f)
@@ -1127,7 +1054,7 @@ fun SettingsScreen(
                             IconButton(
                                 onClick = {
                                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                    clipboard.setPrimaryClip(ClipData.newPlainText("Shelly Webhook WAN", "https://deurbel.foxway.nl/api/v1/webhook/shelly-ring"))
+                                    clipboard.setPrimaryClip(ClipData.newPlainText("Shelly Webhook WAN", wanWebhookUrl))
                                     Toast.makeText(context, "WAN Webhook URL gekopieerd!", Toast.LENGTH_SHORT).show()
                                 },
                                 modifier = Modifier.size(28.dp)
@@ -1200,6 +1127,22 @@ fun SettingsScreen(
             }
 
             // App Versie & Updates Footer
+            val appVersionText = remember {
+                try {
+                    val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+                    val vName = pInfo.versionName ?: "1.6.0"
+                    val vCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                        pInfo.longVersionCode
+                    } else {
+                        @Suppress("DEPRECATION")
+                        pInfo.versionCode.toLong()
+                    }
+                    "Foxway Deurbel v$vName (Build $vCode)"
+                } catch (_: Exception) {
+                    "Foxway Deurbel v1.6.0 (Build 8)"
+                }
+            }
+
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1208,12 +1151,12 @@ fun SettingsScreen(
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Text(
-                    text = "Foxway Deurbel v1.3.0 (Build 4)",
+                    text = appVersionText,
                     style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
                     color = TextPrimary
                 )
                 Text(
-                    text = "Proxy: https://deurbel.foxway.nl (Poort 443 HTTPS/WSS)",
+                    text = "Verbonden met: $currentApiBaseUrl",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )
@@ -1401,7 +1344,7 @@ private fun HardwareTestDialog(
                 }
 
                 Text(
-                    text = "Voert een volledige akoestische loopback test uit: de backend zendt een 1000 Hz pieptoon naar de deurbel-luidspreker (192.168.2.31:8000), luistert gelijktijdig via de microfoon (RTSP) en berekent de frequentiepiek via FFT en de signaal-ruisverhouding (SNR).",
+                    text = "Voert een volledige akoestische loopback test uit: de backend zendt een 1000 Hz pieptoon naar de deurbel-luidspreker (poort 8000), luistert gelijktijdig via de microfoon (RTSP) en berekent de frequentiepiek via FFT en de signaal-ruisverhouding (SNR).",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )
@@ -1471,7 +1414,7 @@ private fun HardwareTestDialog(
                                 isTestingAudio = true
                                 testPassed = null
                                 audioTestResult = "Bezig met akoestische loopback test…"
-                                audioTestDetail = "Toon wordt verzonden naar 192.168.2.31:8000 en microfoon-audio wordt geanalyseerd..."
+                                audioTestDetail = "Toon wordt verzonden naar de deurbel-luidspreker en microfoon-audio wordt geanalyseerd..."
                                 val resolved = resolver.resolve()
                                 val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
                                 val resp = api.testAudioLoopback()

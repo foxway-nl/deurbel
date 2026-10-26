@@ -117,9 +117,9 @@ class MdnsDiscovery(private val context: Context) {
                     hostAddress = host,
                     port = port,
                     lanUrl = txtAttr("lan_url", "http://$host:$port"),
-                    wanUrl = txtAttr("wan_url", "https://deurbel.foxway.nl"),
+                    wanUrl = txtAttr("wan_url", ""),
                     go2rtcLan = txtAttr("go2rtc_lan", "ws://$host:1984"),
-                    go2rtcWan = txtAttr("go2rtc_wan", "wss://webrtc.foxway.nl"),
+                    go2rtcWan = txtAttr("go2rtc_wan", ""),
                     version = txtAttr("version")
                 )
                 Log.i(TAG, "Resolved: $host:$port (LAN=${doorbell.lanUrl})")
@@ -132,7 +132,7 @@ class MdnsDiscovery(private val context: Context) {
      * One-shot discovery: find the first doorbell on the network.
      * Suspends until a doorbell is found or throws on failure.
      */
-    suspend fun discoverFirst(): DiscoveredDoorbell = suspendCancellableCoroutine { cont ->
+    suspend fun discoverFirst(): DiscoveredDoorbell? = suspendCancellableCoroutine<DiscoveredDoorbell?> { cont ->
         val discoveryListener = object : NsdManager.DiscoveryListener {
             private var resolved = false
 
@@ -159,14 +159,11 @@ class MdnsDiscovery(private val context: Context) {
             override fun onDiscoveryStopped(serviceType: String) {}
 
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
-                cont.resume(DiscoveredDoorbell(
-                    hostAddress = "192.168.2.1",
-                    port = 8090,
-                    lanUrl = "http://192.168.2.1:8090",
-                    wanUrl = "https://deurbel.foxway.nl",
-                    go2rtcLan = "ws://192.168.2.1:1984",
-                    go2rtcWan = "wss://webrtc.foxway.nl"
-                ))
+                Log.w(TAG, "mDNS discovery failed to start: $errorCode")
+                if (!resolved) {
+                    resolved = true
+                    cont.resume(null)
+                }
             }
 
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}

@@ -168,5 +168,18 @@ interface FoxwayApi {
     suspend fun cleanupUnclassifiedClips(
         @Query("include_unstarred_vehicles") includeVehicles: Boolean = true
     ): Response<Map<String, Any>>
+
+    // ── Event Queue Fallback (Task 6) ─────────────────────────────────
+
+    @GET("/api/v1/events")
+    suspend fun getEvents(
+        @Query("since_id") sinceId: Long = 0,
+        @Query("limit") limit: Int = 50
+    ): Response<EventsResponse>
+
+    // ── Camera Credentials ───────────────────────────────────────────
+
+    @PUT("/api/v1/settings/camera")
+    suspend fun updateCameraSettings(@Body body: CameraSettingsUpdate): Response<Map<String, Any>>
 }
 

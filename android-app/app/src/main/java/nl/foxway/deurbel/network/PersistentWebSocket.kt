@@ -102,8 +102,9 @@ class PersistentWebSocket(
                         Log.i(TAG, "WebSocket connected to $wsUrl")
                         backoffMs = INITIAL_BACKOFF_MS
                         startHeartbeat(ws)
+                        val isLan = resolved.isLan
                         nl.foxway.deurbel.data.AppLogger.getInstance(nl.foxway.deurbel.FoxwayApp.instance)
-                            .network("WebSocket verbonden met ${if (wsUrl.contains("192.168")) "LAN" else "WAN"}")
+                            .network("WebSocket verbonden met ${if (isLan) "LAN" else "WAN"}")
                     }
 
                     override fun onMessage(ws: WebSocket, text: String) {

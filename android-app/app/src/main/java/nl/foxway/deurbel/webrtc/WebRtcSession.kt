@@ -79,8 +79,7 @@ class WebRtcSession(
     /**
      * Start connection to go2rtc stream.
      *
-     * Supports both WHEP HTTP endpoint (e.g. http://192.168.2.1:8090 or https://deurbel.foxway.nl)
-     * and WebSocket signaling.
+     * Supports both WHEP HTTP endpoint and WebSocket signaling.
      *
      * @param signalingUrl HTTP base URL or WS URL
      * @param streamName "deurbel"
@@ -96,12 +95,13 @@ class WebRtcSession(
 
         audioManager.startCommunicationMode(enableSpeaker = true)
 
-        val iceServers = listOf(
-            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-            PeerConnection.IceServer.builder("stun:sip.foxway.nl:8555").createIceServer(),
-            PeerConnection.IceServer.builder("stun:foxway.nl:8555").createIceServer(),
-            PeerConnection.IceServer.builder("stun:192.168.2.1:8555").createIceServer()
+        val host = signalingUrl.removePrefix("https://").removePrefix("http://").removePrefix("wss://").removePrefix("ws://").substringBefore(":").substringBefore("/")
+        val iceServers = mutableListOf(
+            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
         )
+        if (host.isNotBlank()) {
+            iceServers.add(PeerConnection.IceServer.builder("stun:$host:8555").createIceServer())
+        }
 
         val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN

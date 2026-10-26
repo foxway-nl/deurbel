@@ -115,11 +115,15 @@ data class UserInfo(
 data class OnboardingBootstrapResponse(
     val status: String,
     @SerializedName("server_name") val serverName: String = "",
+    @SerializedName("server_lan_url") val serverLanUrl: String = "",
+    @SerializedName("server_wan_url") val serverWanUrl: String = "",
     @SerializedName("lan_url") val lanUrl: String = "",
     @SerializedName("wan_url") val wanUrl: String = "",
+    @SerializedName("camera_discovered") val cameraDiscovered: Boolean = false,
     @SerializedName("camera_ip") val cameraIp: String = "",
     @SerializedName("camera_port") val cameraPort: Int = 8000,
     @SerializedName("camera_user") val cameraUser: String = "admin",
+    @SerializedName("camera_configured") val cameraConfigured: Boolean = false,
     @SerializedName("camera_credentials_configured") val cameraCredentialsConfigured: Boolean = false,
     @SerializedName("doorbell_online") val doorbellOnline: Boolean = true,
     @SerializedName("doorbell_status_message") val doorbellStatusMessage: String = "",
@@ -154,11 +158,18 @@ data class ShellyWebhookStatusResponse(
 //  WebSocket event model
 // ──────────────────────────────────────────────────────────────────
 
-/** Incoming WebSocket/FCM event envelope */
 data class DoorbellEvent(
     val event: String,
     val data: Map<String, Any?> = emptyMap()
 ) {
+    constructor(event: String, callId: String? = null, snapshotUrl: String? = null) : this(
+        event = event,
+        data = buildMap {
+            callId?.let { put("call_id", it) }
+            snapshotUrl?.let { put("snapshot_url", it) }
+        }
+    )
+
     val callId: String?
         get() = data["call_id"] as? String
 
@@ -263,13 +274,29 @@ data class EndpointConfig(
 ) {
     companion object {
         val DEFAULT = EndpointConfig(
-            lanApiUrl = "http://192.168.2.1:8090",
-            wanApiUrl = "https://deurbel.foxway.nl",
-            go2rtcLanWs = "ws://192.168.2.1:1984",
-            go2rtcWanWs = "wss://deurbel.foxway.nl/api/ws"
+            lanApiUrl = "",
+            wanApiUrl = "",
+            go2rtcLanWs = "",
+            go2rtcWanWs = ""
         )
     }
 }
+
+data class EventItemDto(
+    val id: Long = 0,
+    val type: String = "",
+    val category: String = "",
+    val title: String = "",
+    @SerializedName("clip_id") val clipId: String = "",
+    @SerializedName("snapshot_url") val snapshotUrl: String = "",
+    @SerializedName("created_at") val createdAt: String = ""
+)
+
+data class EventsResponse(
+    val status: String = "ok",
+    val events: List<EventItemDto> = emptyList(),
+    val count: Int = 0
+)
 
 data class AudioLoopbackResponse(
     val status: String = "",
@@ -280,5 +307,9 @@ data class AudioLoopbackResponse(
     @SerializedName("snr_db") val snrDb: Double = 0.0,
     val message: String = ""
 )
-
-
+data class CameraSettingsUpdate(
+    val ip: String,
+    val port: Int = 8000,
+    val user: String = "admin",
+    val password: String = ""
+)

@@ -85,6 +85,7 @@ fun LiveScreen() {
     // Stream mode: WebRTC or ExoPlayer (for 5G/WAN)
     var isExoMode by remember { mutableStateOf(false) }
     var isStreamBuffering by remember { mutableStateOf(true) }
+    var hasRenderedFirstFrame by remember { mutableStateOf(false) }
     var streamErrorMessage by remember { mutableStateOf<String?>(null) }
 
     // Manual recording state
@@ -123,10 +124,14 @@ fun LiveScreen() {
 
     DisposableEffect(exoPlayer) {
         val listener = object : Player.Listener {
+            override fun onRenderedFirstFrame() {
+                hasRenderedFirstFrame = true
+            }
             override fun onPlaybackStateChanged(state: Int) {
                 isStreamBuffering = (state == Player.STATE_BUFFERING)
                 if (state == Player.STATE_READY) {
                     streamErrorMessage = null
+                    hasRenderedFirstFrame = true
                 }
             }
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -168,6 +173,7 @@ fun LiveScreen() {
                 exoPlayer.stop()
                 streamErrorMessage = null
                 isStreamBuffering = true
+                hasRenderedFirstFrame = false
 
                 val resolved = resolver.resolve()
                 activeBaseUrl = resolved.apiBaseUrl
@@ -212,6 +218,7 @@ fun LiveScreen() {
                         exoPlayer.prepare()
                     } else if (session == s) {
                         isStreamBuffering = false
+                        hasRenderedFirstFrame = true
                     }
                 }
             } catch (e: Exception) {
@@ -225,7 +232,8 @@ fun LiveScreen() {
     val toggleRecording = {
         coroutineScope.launch {
             try {
-                val api = ApiClientFactory.createApi(activeBaseUrl.ifEmpty { "https://deurbel.foxway.nl" })
+                val targetUrl = activeBaseUrl.ifEmpty { resolver.activeApiUrl.value }
+                val api = ApiClientFactory.createApi(targetUrl)
                 val userName = prefs.getUserName().ifEmpty { "Gezinslid" }
                 if (!isRecording) {
                     val streamName = if (isHd) "deurbel" else "deurbel_sub"
@@ -448,8 +456,8 @@ fun LiveScreen() {
             }
         }
 
-        // ── Loading & Buffering Indicator ──
-        if (isStreamBuffering && streamErrorMessage == null) {
+        // ── Loading & Buffering Indicator (EXCLUSIVELY when !hasRenderedFirstFrame) ──
+        if (!hasRenderedFirstFrame && streamErrorMessage == null) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()

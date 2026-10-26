@@ -122,6 +122,22 @@ class PreferencesManager(private val context: Context) {
         }
     }
 
+    suspend fun updateEndpoints(lanUrl: String, wanUrl: String) {
+        context.dataStore.edit { prefs ->
+            if (lanUrl.isNotBlank()) {
+                prefs[Keys.LAN_API_URL] = lanUrl
+                val wsHost = lanUrl.removePrefix("http://").removePrefix("https://").substringBefore(":")
+                prefs[Keys.GO2RTC_LAN_WS] = "ws://$wsHost:1984"
+            }
+            if (wanUrl.isNotBlank()) {
+                prefs[Keys.WAN_API_URL] = wanUrl
+                val wssScheme = if (wanUrl.startsWith("https://")) "wss://" else "ws://"
+                val hostPart = wanUrl.removePrefix("https://").removePrefix("http://").trimEnd('/')
+                prefs[Keys.GO2RTC_WAN_WS] = "$wssScheme$hostPart/api/ws"
+            }
+        }
+    }
+
     /**
      * Clear all stored data (unpair / factory reset).
      */

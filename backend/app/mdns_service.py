@@ -91,19 +91,19 @@ class MdnsService:
 
     @staticmethod
     def _get_local_ip() -> str:
-        """
-        Best-effort detection of the machine's LAN IP.
-        Falls back to 192.168.2.1 for the NAS appliance.
-        """
+        """Best-effort dynamic detection of the machine's LAN IP without hardcoded fallback."""
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(0.1)
-            s.connect(("192.168.2.1", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
+            from app.camera_discovery import get_local_ip
+            return get_local_ip()
         except Exception:
-            return "192.168.2.1"
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("1.1.1.1", 80))
+                ip = s.getsockname()[0]
+                s.close()
+                return ip
+            except Exception:
+                return "127.0.0.1"
 
 
 # Module-level singleton

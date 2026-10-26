@@ -1,8 +1,7 @@
 """
 Foxway Smart Doorbell — Configuration.
 
-All settings are loaded from environment variables with sensible defaults
-for the 192.168.2.x home-lab network described in SPEC.md.
+All settings are dynamically discovered or loaded from environment variables.
 """
 
 from __future__ import annotations
@@ -13,17 +12,17 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # ── go2rtc media engine ────────────────────────────────────────────
-    GO2RTC_API_URL: str = "http://192.168.2.1:1984"
-    GO2RTC_RTSP_URL: str = "rtsp://192.168.2.1:8554/deurbel"
+    # ── go2rtc media engine (running locally on host) ───────────────────
+    GO2RTC_API_URL: str = "http://127.0.0.1:1984"
+    GO2RTC_RTSP_URL: str = "rtsp://127.0.0.1:8554/deurbel"
     GO2RTC_STREAM_NAME: str = "deurbel"
 
-    # ── Doorbell Hardware (EZVIZ DB1 Pro) ──────────────────────────────
-    DOORBELL_IP: str = "192.168.2.31"
+    # ── Doorbell Hardware ──────────────────────────────────────────────
+    DOORBELL_IP: str = ""
     DOORBELL_SDK_PORT: int = 8000
     DOORBELL_HTTPS_PORT: int = 8443
     DOORBELL_USER: str = "admin"
-    DOORBELL_PASS: str = "aero2006Mo_"
+    DOORBELL_PASS: str = ""
     DOORBELL_AUDIO_CODEC: str = "pcm_alaw"
 
     # ── Storage paths ──────────────────────────────────────────────────
@@ -44,12 +43,12 @@ class Settings(BaseSettings):
     # ── Firebase Cloud Messaging ───────────────────────────────────────
     FCM_CREDENTIALS_PATH: str = ""  # path to service-account JSON; empty = disabled
 
-    # ── Networking ─────────────────────────────────────────────────────
-    LAN_SUBNET: str = "192.168.2.0/24"
-    LAN_URL: str = "http://192.168.2.1:8090"
-    WAN_URL: str = "https://deurbel.foxway.nl"
-    GO2RTC_LAN_WS: str = "ws://192.168.2.1:1984"
-    GO2RTC_WAN_WS: str = "wss://webrtc.foxway.nl"
+    # ── Networking (Resolved dynamically at runtime) ──────────────────
+    LAN_SUBNET: str = ""
+    LAN_URL: str = ""
+    WAN_URL: str = ""
+    GO2RTC_LAN_WS: str = ""
+    GO2RTC_WAN_WS: str = ""
     HOST_PORT: int = 8090
 
     # ── Call behaviour ─────────────────────────────────────────────────

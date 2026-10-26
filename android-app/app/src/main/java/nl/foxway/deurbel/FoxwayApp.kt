@@ -72,10 +72,23 @@ class FoxwayApp : Application() {
             description = "Algemene meldingen"
         }
         manager.createNotificationChannel(infoChannel)
+
+        // High-importance motion & AI detection channel (Task 6)
+        val motionChannel = NotificationChannel(
+            CHANNEL_MOTION,
+            "Beweging & AI Detectie",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Meldingen bij gedetecteerde personen, voertuigen en dieren met momentopname"
+            enableVibration(true)
+            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+        }
+        manager.createNotificationChannel(motionChannel)
     }
 
     companion object {
         const val CHANNEL_RING = "foxway_doorbell_ring"
+        const val CHANNEL_MOTION = "foxway_doorbell_motion"
         const val CHANNEL_SERVICE = "foxway_doorbell_service"
         const val CHANNEL_INFO = "foxway_doorbell_info"
 
