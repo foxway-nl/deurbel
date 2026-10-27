@@ -733,13 +733,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "1.9.0",
-        "version_code": 10,
-        "build_time": "2026-10-26T22:30:00Z",
+        "version": "2.0.0",
+        "version_code": 11,
+        "build_time": "2026-10-27T18:00:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v1.9.0: Always-Warm RAM Live Hub (<200ms on 5G & LAN), seamless Opnemen transition, zero double-press bug",
+        "changelog": "v2.0.0: Full 5G/WAN dynamic URL routing, forced speakerphone, dynamic network badge, hardened chime debounce",
     }
 
 

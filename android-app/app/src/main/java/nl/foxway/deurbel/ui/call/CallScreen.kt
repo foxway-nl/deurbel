@@ -66,6 +66,13 @@ fun CallScreen(
     // Automatically manage audio mute: muted when ringing (so beltoon is clear), unmuted when answered or speaker on
     LaunchedEffect(isActive, isSpeakerOn) {
         liveStream.setAudioMuted(!isActive || !isSpeakerOn)
+        if (isActive && isSpeakerOn) {
+            try {
+                val audioManager = context.getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager
+                audioManager?.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
+                audioManager?.isSpeakerphoneOn = true
+            } catch (_: Exception) {}
+        }
     }
 
     Box(

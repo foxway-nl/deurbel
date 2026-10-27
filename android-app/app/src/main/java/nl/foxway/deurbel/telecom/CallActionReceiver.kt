@@ -32,9 +32,7 @@ class CallActionReceiver : BroadcastReceiver() {
                 if (callId.isNotBlank()) {
                     CoroutineScope(Dispatchers.IO).launch {
                         try {
-                            val resolver = EndpointResolver(FoxwayApp.instance.preferencesManager)
-                            val resolved = resolver.resolve()
-                            val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                            val api = ApiClientFactory.createApi()
                             api.hangup(callId)
                             Log.i(TAG, "Call $callId hung up via notification action")
                         } catch (e: Exception) {

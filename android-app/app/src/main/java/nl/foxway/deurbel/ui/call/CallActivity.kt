@@ -16,8 +16,10 @@ import nl.foxway.deurbel.FoxwayApp
 import nl.foxway.deurbel.audio.DoorbellAudioStreamer
 import nl.foxway.deurbel.data.models.ClaimRequest
 import nl.foxway.deurbel.data.models.DoorbellEvent
+import android.media.AudioManager
 import nl.foxway.deurbel.network.ApiClientFactory
 import nl.foxway.deurbel.network.CallEventBus
+import nl.foxway.deurbel.network.ConnectionManager
 import nl.foxway.deurbel.network.EndpointResolver
 import nl.foxway.deurbel.network.LiveStreamController
 import nl.foxway.deurbel.telecom.DoorbellConnectionService
@@ -62,6 +64,13 @@ class CallActivity : ComponentActivity() {
 
         setupLockscreenFlags()
 
+        // Force speakerphone on incoming/active doorbell call
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager?.isSpeakerphoneOn = true
+        } catch (_: Exception) {}
+
         // Pre-warm live stream immediately
         LiveStreamController.getInstance(this).start()
 
@@ -94,13 +103,12 @@ class CallActivity : ComponentActivity() {
                 }
 
                 // Handle two-way microphone talkback
-                val prefs = remember { FoxwayApp.instance.preferencesManager }
-                val resolver = remember { EndpointResolver(prefs) }
+                val connectionManager = remember { ConnectionManager.getInstance(this@CallActivity) }
                 LaunchedEffect(isActive, isMicMuted) {
                     if (isActive && !isMicMuted) {
                         try {
-                            val resolved = resolver.resolve()
-                            audioStreamer.startStreaming(resolved.apiBaseUrl)
+                            val targetUrl = connectionManager.getEffectiveBaseUrl()
+                            audioStreamer.startStreaming(targetUrl)
                         } catch (e: Exception) {
                             Log.w(TAG, "Error starting mic uplink: ${e.message}")
                         }
@@ -133,6 +141,11 @@ class CallActivity : ComponentActivity() {
                     },
                     onToggleSpeaker = {
                         isSpeakerOn = !isSpeakerOn
+                        try {
+                            val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                            audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
+                            audioManager?.isSpeakerphoneOn = isSpeakerOn
+                        } catch (_: Exception) {}
                         LiveStreamController.getInstance(this@CallActivity).setAudioMuted(!isSpeakerOn)
                     }
                 )
@@ -158,15 +171,21 @@ class CallActivity : ComponentActivity() {
     private fun handleAnswer() {
         isClaimedByMe = true
         DoorbellConnectionService.silenceRingtone()
+        DoorbellConnectionService.cancelCallNotification(this)
+
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager?.isSpeakerphoneOn = true
+        } catch (_: Exception) {}
+
         LiveStreamController.getInstance(this).setAudioMuted(false)
 
         FoxwayApp.instance.applicationScope.launch(Dispatchers.IO) {
             try {
                 DoorbellConnectionService.notifyAnswered()
                 val prefs = FoxwayApp.instance.preferencesManager
-                val resolver = EndpointResolver(prefs)
-                val resolved = resolver.resolve()
-                val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                val api = ApiClientFactory.createApi()
                 val userId = prefs.getUserId()
                 val userName = prefs.getUserName()
                 api.claim(callId, ClaimRequest(userId = userId, userName = userName))
@@ -182,6 +201,7 @@ class CallActivity : ComponentActivity() {
      */
     private fun handleSilence() {
         DoorbellConnectionService.silenceRingtone()
+        DoorbellConnectionService.cancelCallNotification(this)
     }
 
     /**
@@ -192,6 +212,8 @@ class CallActivity : ComponentActivity() {
     private fun handleHangup() {
         // Line 1: Dismiss UI immediately
         finishAndRemoveTask()
+        DoorbellConnectionService.silenceRingtone()
+        DoorbellConnectionService.cancelCallNotification(this)
         DoorbellConnectionService.notifyDisconnected()
         audioStreamer.stopStreaming()
 
@@ -199,10 +221,7 @@ class CallActivity : ComponentActivity() {
         val cid = callId
         FoxwayApp.instance.applicationScope.launch(Dispatchers.IO) {
             try {
-                val prefs = FoxwayApp.instance.preferencesManager
-                val resolver = EndpointResolver(prefs)
-                val resolved = resolver.resolve()
-                val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                val api = ApiClientFactory.createApi()
                 api.hangup(cid)
             } catch (e: Exception) {
                 Log.w(TAG, "Failed hangup API: ${e.message}")
@@ -231,15 +250,20 @@ class CallActivity : ComponentActivity() {
         super.onDestroy()
         isCallActivityVisible = false
         audioStreamer.stopStreaming()
+        DoorbellConnectionService.silenceRingtone()
         DoorbellConnectionService.cancelCallNotification(this)
+
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            audioManager?.mode = AudioManager.MODE_NORMAL
+            audioManager?.isSpeakerphoneOn = false
+        } catch (_: Exception) {}
+
         if (isClaimedByMe && callId.isNotEmpty()) {
             val cid = callId
             FoxwayApp.instance.applicationScope.launch(Dispatchers.IO) {
                 try {
-                    val prefs = FoxwayApp.instance.preferencesManager
-                    val resolver = EndpointResolver(prefs)
-                    val resolved = resolver.resolve()
-                    val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                    val api = ApiClientFactory.createApi()
                     api.hangup(cid)
                 } catch (_: Exception) {}
             }

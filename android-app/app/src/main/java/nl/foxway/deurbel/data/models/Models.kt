@@ -274,10 +274,10 @@ data class EndpointConfig(
 ) {
     companion object {
         val DEFAULT = EndpointConfig(
-            lanApiUrl = "",
-            wanApiUrl = "",
-            go2rtcLanWs = "",
-            go2rtcWanWs = ""
+            lanApiUrl = "http://192.168.2.1:8090",
+            wanApiUrl = "https://deurbel.foxway.nl",
+            go2rtcLanWs = "ws://192.168.2.1:8554/api/ws",
+            go2rtcWanWs = "wss://deurbel.foxway.nl/api/ws"
         )
     }
 }

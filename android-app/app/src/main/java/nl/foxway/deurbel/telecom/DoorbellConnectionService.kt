@@ -412,9 +412,7 @@ class DoorbellConnectionService : ConnectionService() {
             coroutineScope.launch {
                 try {
                     val prefs = FoxwayApp.instance.preferencesManager
-                    val resolver = EndpointResolver(prefs)
-                    val resolved = resolver.resolve()
-                    val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                    val api = ApiClientFactory.createApi()
                     api.claim(callId, ClaimRequest(prefs.getUserId(), prefs.getUserName()))
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to claim call in onAnswer", e)
@@ -435,10 +433,7 @@ class DoorbellConnectionService : ConnectionService() {
             // Hangup on backend
             coroutineScope.launch {
                 try {
-                    val prefs = FoxwayApp.instance.preferencesManager
-                    val resolver = EndpointResolver(prefs)
-                    val resolved = resolver.resolve()
-                    val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                    val api = ApiClientFactory.createApi()
                     api.hangup(callId)
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to hangup call in onReject", e)
@@ -457,10 +452,7 @@ class DoorbellConnectionService : ConnectionService() {
 
             coroutineScope.launch {
                 try {
-                    val prefs = FoxwayApp.instance.preferencesManager
-                    val resolver = EndpointResolver(prefs)
-                    val resolved = resolver.resolve()
-                    val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                    val api = ApiClientFactory.createApi()
                     api.hangup(callId)
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to hangup call in onDisconnect", e)

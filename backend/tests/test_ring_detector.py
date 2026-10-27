@@ -66,3 +66,28 @@ def test_dual_tone_ding_dong_triggers_ring():
     # Step 2: Dong (580 Hz) at 400ms after Ding
     triggered = detector.process_samples(tone2, t0 + 0.40)
     assert triggered, "Ding followed by Dong at 400ms MUST trigger the doorbell ring"
+
+
+def test_fifteen_second_debounce_blocks_rapid_triggers():
+    detector = DoorbellRingDetector()
+    t0 = 2000.0
+
+    tone1 = generate_tone(728.0)
+    tone2 = generate_tone(580.0)
+
+    # First valid chime: Ding -> Dong
+    detector.process_samples(tone1, t0)
+    assert detector.process_samples(tone2, t0 + 0.40), "First chime must trigger"
+
+    # Second chime at t0 + 5.0s (within 15s debounce) must be rejected
+    detector.process_samples(tone1, t0 + 5.0)
+    assert not detector.process_samples(tone2, t0 + 5.40), "Chime at +5s must be blocked by debounce"
+
+    # Third chime at t0 + 12.0s (still within 15s debounce) must be rejected
+    detector.process_samples(tone1, t0 + 12.0)
+    assert not detector.process_samples(tone2, t0 + 12.40), "Chime at +12s must be blocked by debounce"
+
+    # Fourth chime at t0 + 16.0s (> 15s debounce) must trigger
+    detector.process_samples(tone1, t0 + 16.0)
+    assert detector.process_samples(tone2, t0 + 16.40), "Chime at +16s must trigger after debounce expired"
+

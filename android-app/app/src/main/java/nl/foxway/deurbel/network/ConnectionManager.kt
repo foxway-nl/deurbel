@@ -160,6 +160,21 @@ class ConnectionManager private constructor(private val context: Context) {
         }
     }
 
+    fun getEffectiveBaseUrl(): String {
+        return if (_isWanMode.value) {
+            _wanUrl.value.ifBlank { "https://deurbel.foxway.nl" }.trimEnd('/')
+        } else {
+            _activeBaseUrl.value.ifBlank { "https://deurbel.foxway.nl" }.trimEnd('/')
+        }
+    }
+
+    fun getEffectiveWsUrl(path: String = ""): String {
+        val base = getEffectiveBaseUrl()
+        val wsBase = base.replace("https://", "wss://").replace("http://", "ws://").trimEnd('/')
+        val cleanPath = if (path.isEmpty()) "" else if (path.startsWith("/")) path else "/$path"
+        return "$wsBase$cleanPath"
+    }
+
     companion object {
         private const val TAG = "ConnectionManager"
 

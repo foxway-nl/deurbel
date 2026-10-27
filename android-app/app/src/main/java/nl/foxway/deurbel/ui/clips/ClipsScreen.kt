@@ -41,6 +41,7 @@ import kotlinx.coroutines.launch
 import nl.foxway.deurbel.FoxwayApp
 import nl.foxway.deurbel.data.models.ClipItem
 import nl.foxway.deurbel.network.ApiClientFactory
+import nl.foxway.deurbel.network.ConnectionManager
 import nl.foxway.deurbel.network.EndpointResolver
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -72,11 +73,18 @@ fun ClipsScreen(
     val coroutineScope = rememberCoroutineScope()
     val prefs = remember { FoxwayApp.instance.preferencesManager }
     val resolver = remember { EndpointResolver(prefs) }
+    val connectionManager = remember { ConnectionManager.getInstance(context) }
+    val activeBaseUrl by connectionManager.activeBaseUrl.collectAsState()
+    val isWanMode by connectionManager.isWanMode.collectAsState()
 
     var clips by remember { mutableStateOf<List<ClipItem>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
     var selectedClip by remember { mutableStateOf<ClipItem?>(null) }
-    var baseUrl by remember { mutableStateOf("") }
+    var baseUrl by remember { mutableStateOf(connectionManager.getEffectiveBaseUrl()) }
+
+    LaunchedEffect(activeBaseUrl, isWanMode) {
+        baseUrl = connectionManager.getEffectiveBaseUrl()
+    }
 
     // Auto-select initialClipId if passed (Deeplinking from notification)
     LaunchedEffect(initialClipId, clips) {
@@ -113,9 +121,9 @@ fun ClipsScreen(
         coroutineScope.launch {
             try {
                 isLoading = true
-                val resolved = resolver.resolve()
-                baseUrl = resolved.apiBaseUrl
-                val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                val currentBase = connectionManager.getEffectiveBaseUrl()
+                baseUrl = currentBase
+                val api = ApiClientFactory.createApi(currentBase)
                 val resp = api.getClips(limit = 50)
                 if (resp.isSuccessful) {
                     clips = (resp.body() ?: emptyList()).sortedByDescending { it.timestamp }
@@ -670,7 +678,8 @@ private fun ClipCard(
                 TextButton(
                     onClick = {
                         val filename = "foxway_${clip.id}.mp4"
-                        downloadClip(context, videoStreamUrl, filename)
+                        val fileDownloadUrl = "$baseUrl/api/v1/clips/${clip.id}/file"
+                        downloadClip(context, fileDownloadUrl, filename)
                     },
                     contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
                 ) {
@@ -1049,7 +1058,8 @@ private fun ClipPlayerDialog(
                             Button(
                                 onClick = {
                                     val filename = "foxway_${clip.id}.mp4"
-                                    downloadClip(context, videoStreamUrl, filename)
+                                    val fileDownloadUrl = "$baseUrl/api/v1/clips/${clip.id}/file"
+                                    downloadClip(context, fileDownloadUrl, filename)
                                 },
                                 shape = RoundedCornerShape(12.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),

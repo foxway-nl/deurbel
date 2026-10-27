@@ -66,8 +66,21 @@ class LiveStreamController private constructor(private val context: Context) {
         initAudioTrack()
     }
 
+    fun forceSpeakerphone() {
+        try {
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager?.isSpeakerphoneOn = true
+            Log.i(TAG, "Speakerphone forced: mode=MODE_IN_COMMUNICATION, isSpeakerphoneOn=true")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed setting speakerphone: ${e.message}")
+        }
+    }
+
     private fun initAudioTrack() {
         try {
+            forceSpeakerphone()
+
             val minBufferSize = AudioTrack.getMinBufferSize(
                 AUDIO_SAMPLE_RATE,
                 AudioFormat.CHANNEL_OUT_MONO,
@@ -78,6 +91,7 @@ class LiveStreamController private constructor(private val context: Context) {
             val audioAttributes = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .setLegacyStreamType(AudioManager.STREAM_MUSIC)
                 .build()
 
             val audioFormat = AudioFormat.Builder()
@@ -97,7 +111,7 @@ class LiveStreamController private constructor(private val context: Context) {
             } else {
                 @Suppress("DEPRECATION")
                 AudioTrack(
-                    AudioManager.STREAM_VOICE_CALL,
+                    AudioManager.STREAM_MUSIC,
                     AUDIO_SAMPLE_RATE,
                     AudioFormat.CHANNEL_OUT_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
@@ -117,6 +131,7 @@ class LiveStreamController private constructor(private val context: Context) {
             return
         }
         Log.i(TAG, "Starting LiveStreamController")
+        forceSpeakerphone()
         connectWebSocket()
     }
 
@@ -133,6 +148,9 @@ class LiveStreamController private constructor(private val context: Context) {
 
     fun setAudioMuted(muted: Boolean) {
         _isAudioMuted.value = muted
+        if (!muted) {
+            forceSpeakerphone()
+        }
         Log.d(TAG, "setAudioMuted: $muted")
     }
 

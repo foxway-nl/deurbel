@@ -46,6 +46,7 @@ import nl.foxway.deurbel.data.LogEntry
 import nl.foxway.deurbel.data.models.*
 import coil.compose.AsyncImage
 import nl.foxway.deurbel.network.ApiClientFactory
+import nl.foxway.deurbel.network.ConnectionManager
 import nl.foxway.deurbel.network.EndpointResolver
 import nl.foxway.deurbel.ui.theme.*
 import nl.foxway.deurbel.util.PermissionChecker
@@ -69,6 +70,9 @@ fun SettingsScreen(
     val coroutineScope = rememberCoroutineScope()
     val prefs = remember { FoxwayApp.instance.preferencesManager }
     val resolver = remember { EndpointResolver(prefs) }
+    val connectionManager = remember { ConnectionManager.getInstance(context) }
+    val activeBaseUrl by connectionManager.activeBaseUrl.collectAsState()
+    val isWanMode by connectionManager.isWanMode.collectAsState()
     val appLogger = remember { AppLogger.getInstance(context) }
 
     val userName by prefs.userName.collectAsState(initial = "")
@@ -98,8 +102,12 @@ fun SettingsScreen(
     // Smart AI Detection & Storage settings state
     var detectionSettings by remember { mutableStateOf(DetectionSettingsDto()) }
     var storageStats by remember { mutableStateOf(StorageStatsDto()) }
-    var currentApiBaseUrl by remember { mutableStateOf(resolver.activeApiUrl.value) }
+    var currentApiBaseUrl by remember { mutableStateOf(connectionManager.getEffectiveBaseUrl()) }
     var isCleaningJunk by remember { mutableStateOf(false) }
+
+    LaunchedEffect(activeBaseUrl, isWanMode) {
+        currentApiBaseUrl = connectionManager.getEffectiveBaseUrl()
+    }
 
     // Dialogs
     var showHardwareTestDialog by remember { mutableStateOf(false) }
@@ -118,9 +126,7 @@ fun SettingsScreen(
     val loadRemoteSettings = {
         coroutineScope.launch {
             try {
-                val resolved = resolver.resolve()
-                currentApiBaseUrl = resolved.apiBaseUrl
-                val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                val api = ApiClientFactory.createApi()
                 val det = api.getDetectionSettings()
                 if (det.isSuccessful) {
                     det.body()?.let { detectionSettings = it }
@@ -137,8 +143,7 @@ fun SettingsScreen(
         detectionSettings = updated
         coroutineScope.launch {
             try {
-                val resolved = resolver.resolve()
-                val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                val api = ApiClientFactory.createApi()
                 api.updateDetectionSettings(updated)
             } catch (_: Exception) {}
         }
@@ -147,8 +152,7 @@ fun SettingsScreen(
     val saveRetention: (Int) -> Unit = { days ->
         coroutineScope.launch {
             try {
-                val resolved = resolver.resolve()
-                val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                val api = ApiClientFactory.createApi()
                 val resp = api.updateStorageSettings(StorageSettingsUpdate(days, storageStats.maxStorageGb))
                 if (resp.isSuccessful) {
                     resp.body()?.let { storageStats = it }
@@ -162,8 +166,7 @@ fun SettingsScreen(
         coroutineScope.launch {
             try {
                 isLoadingUsers = true
-                val resolved = resolver.resolve()
-                val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                val api = ApiClientFactory.createApi()
                 val resp = api.getUsers()
                 if (resp.isSuccessful) {
                     activeUsers = resp.body() ?: emptyList()
@@ -179,8 +182,7 @@ fun SettingsScreen(
         coroutineScope.launch {
             try {
                 activeUsers = activeUsers.filter { it.userId != targetUserId }
-                val resolved = resolver.resolve()
-                val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                val api = ApiClientFactory.createApi()
                 api.deleteUser(targetUserId)
                 Toast.makeText(context, "Apparaat verwijderd", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
@@ -813,8 +815,7 @@ fun SettingsScreen(
                             coroutineScope.launch {
                                 try {
                                     isCleaningJunk = true
-                                    val resolved = resolver.resolve()
-                                    val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                                    val api = ApiClientFactory.createApi()
                                     val resp = api.cleanupUnclassifiedClips(includeVehicles = true)
                                     if (resp.isSuccessful) {
                                         val body = resp.body()
@@ -937,12 +938,12 @@ fun SettingsScreen(
                             coroutineScope.launch {
                                 try {
                                     isTesting = true
-                                    val resolved = resolver.resolve()
-                                    val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                                    val api = ApiClientFactory.createApi()
                                     val resp = api.getStatus()
                                     if (resp.isSuccessful) {
-                                        connectionStatus = "Verbonden (${if (resolved.isLan) "LAN" else "WAN"}) — Status: ${resp.body()?.state}"
-                                        appLogger.network("Handmatige netwerktest succesvol: ${resolved.apiBaseUrl}")
+                                        val effectiveUrl = connectionManager.getEffectiveBaseUrl()
+                                        connectionStatus = "Verbonden (${if (!isWanMode) "LAN" else "5G"}) — Status: ${resp.body()?.state}"
+                                        appLogger.network("Handmatige netwerktest succesvol: $effectiveUrl")
                                     } else {
                                         connectionStatus = "Fout: HTTP ${resp.code()}"
                                     }
@@ -1070,8 +1071,7 @@ fun SettingsScreen(
                                 try {
                                     isTriggeringShelly = true
                                     shellyTriggerResult = null
-                                    val resolved = resolver.resolve()
-                                    val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                                    val api = ApiClientFactory.createApi()
                                     val resp = api.triggerShellyWebhook()
                                     if (resp.isSuccessful) {
                                         shellyTriggerResult = "✅ Drukknop-oproep succesvol gesimuleerd!"
@@ -1415,8 +1415,7 @@ private fun HardwareTestDialog(
                                 testPassed = null
                                 audioTestResult = "Bezig met akoestische loopback test…"
                                 audioTestDetail = "Toon wordt verzonden naar de deurbel-luidspreker en microfoon-audio wordt geanalyseerd..."
-                                val resolved = resolver.resolve()
-                                val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+                                val api = ApiClientFactory.createApi()
                                 val resp = api.testAudioLoopback()
                                 if (resp.isSuccessful && resp.body() != null) {
                                     val b = resp.body()!!

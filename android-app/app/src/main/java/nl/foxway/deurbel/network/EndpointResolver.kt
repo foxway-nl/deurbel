@@ -97,13 +97,14 @@ class EndpointResolver(
                 isLan = true
             )
         } else {
-            val wanWs = config.wanApiUrl.replace("https://", "wss://").replace("http://", "ws://")
+            val wanBase = config.wanApiUrl.ifBlank { "https://deurbel.foxway.nl" }.trimEnd('/')
+            val wanWs = wanBase.replace("https://", "wss://").replace("http://", "ws://")
             val proxiedGo2rtc = "$wanWs/api/ws"
             _connectionType.value = ConnectionType.WAN
-            _activeApiUrl.value = config.wanApiUrl
+            _activeApiUrl.value = wanBase
             _activeGo2rtcWs.value = proxiedGo2rtc
             ResolvedEndpoints(
-                apiBaseUrl = config.wanApiUrl,
+                apiBaseUrl = wanBase,
                 go2rtcWsUrl = proxiedGo2rtc,
                 wsUrl = wanWs,
                 isLan = false

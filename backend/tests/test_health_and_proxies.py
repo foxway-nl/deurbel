@@ -25,8 +25,8 @@ async def test_app_version_endpoint(async_client):
     resp = await async_client.get("/api/v1/app/version")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["version"] == "1.9.0"
-    assert data["version_code"] == 10
+    assert data["version"] == "2.0.0"
+    assert data["version_code"] == 11
     assert "apk_url" in data
     assert "changelog" in data
 

@@ -66,6 +66,7 @@ fun LiveScreen() {
 
     val connectionManager = remember { ConnectionManager.getInstance(context) }
     val activeBaseUrl by connectionManager.activeBaseUrl.collectAsState()
+    val isWanMode by connectionManager.isWanMode.collectAsState()
     val connectionType by resolver.connectionType.collectAsState()
 
     val liveStream = remember { LiveStreamController.getInstance(context) }
@@ -324,12 +325,12 @@ fun LiveScreen() {
                         modifier = Modifier
                             .size(10.dp)
                             .background(
-                                if (connectionType == ConnectionType.LAN) LanGreen else CyanAccent,
+                                if (!isWanMode) LanGreen else CyanAccent,
                                 CircleShape
                             )
                     )
                     Text(
-                        text = if (connectionType == ConnectionType.LAN) "🟢 Direct LAN" else "🌐 5G Live Hub",
+                        text = if (!isWanMode) "🟢 Lokaal" else "🔵 Online (5G)",
                         style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                         color = TextPrimary
                     )

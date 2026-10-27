@@ -41,7 +41,7 @@ NOISE_REF_MAX = 500
 
 MIN_BELL_VOLUME = 500000
 MIN_SNR_RATIO = 2.5
-DEBOUNCE_SECONDS = 5.0
+DEBOUNCE_SECONDS = 15.0
 
 # Tone sequence timing window (seconds between Ding and Dong)
 TONE_SEQ_MIN_DELAY = 0.20  # Minimum 200ms
