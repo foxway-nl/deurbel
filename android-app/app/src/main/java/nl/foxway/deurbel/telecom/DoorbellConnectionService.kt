@@ -281,11 +281,13 @@ class DoorbellConnectionService : ConnectionService() {
         // Start ringtone & vibration for incoming doorbell call
         connection.startRingtone()
 
-        // Start WebRTC pre-warm immediately
-        PrewarmEngine.startPrewarm(this, callId)
+        // Start LiveStreamController pre-warm immediately
+        nl.foxway.deurbel.network.LiveStreamController.getInstance(this).start()
 
-        // Launch full-screen CallActivity over lockscreen
-        launchCallActivity(this, callId, snapshotUrl, false)
+        // Launch full-screen CallActivity over lockscreen only if not already visible
+        if (!CallActivity.isCallActivityVisible) {
+            launchCallActivity(this, callId, snapshotUrl, false)
+        }
 
         return connection
     }
@@ -299,8 +301,10 @@ class DoorbellConnectionService : ConnectionService() {
         val extras = request?.extras ?: Bundle()
         val callId = extras.getString(EXTRA_CALL_ID) ?: ""
         val snapshotUrl = extras.getString(EXTRA_SNAPSHOT_URL) ?: ""
-        PrewarmEngine.startPrewarm(this, callId)
-        launchCallActivity(this, callId, snapshotUrl, false)
+        nl.foxway.deurbel.network.LiveStreamController.getInstance(this).start()
+        if (!CallActivity.isCallActivityVisible) {
+            launchCallActivity(this, callId, snapshotUrl, false)
+        }
     }
 
     class DoorbellConnection(

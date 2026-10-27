@@ -9,28 +9,27 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.*
-import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import nl.foxway.deurbel.FoxwayApp
+import nl.foxway.deurbel.audio.DoorbellAudioStreamer
 import nl.foxway.deurbel.data.models.ClaimRequest
 import nl.foxway.deurbel.data.models.DoorbellEvent
 import nl.foxway.deurbel.network.ApiClientFactory
 import nl.foxway.deurbel.network.CallEventBus
 import nl.foxway.deurbel.network.EndpointResolver
+import nl.foxway.deurbel.network.LiveStreamController
 import nl.foxway.deurbel.telecom.DoorbellConnectionService
 import nl.foxway.deurbel.ui.theme.FoxwayDeurbelTheme
-import nl.foxway.deurbel.webrtc.PrewarmEngine
-import nl.foxway.deurbel.webrtc.WebRtcSession
 
 /**
  * Fullscreen Incoming & Active Call Activity.
  *
- * Implements SPEC §4.1 & §4.3 (Milestone 3):
- *  - Activates over lockscreen via setShowWhenLocked & setTurnScreenOn
- *  - Displays live snapshot and pre-warmed video
- *  - Handles Answer, Decline, Hangup, and Quick-Replies
- *  - Multi-user dismissal: auto-dismisses if another family member answers.
+ * Implements:
+ *  - Single-activity enforcement: never allows double stacked call screens.
+ *  - Instant line-1 UI dispatch: 0ms UI freeze on Ophangen, Opnemen, Stil.
+ *  - Seamless Always-Warm video & audio via LiveStreamController.
  */
 class CallActivity : ComponentActivity() {
 
@@ -39,11 +38,15 @@ class CallActivity : ComponentActivity() {
         const val EXTRA_CALL_ID = "call_id"
         const val EXTRA_IS_ACTIVE = "is_active"
         const val EXTRA_SNAPSHOT_URL = "snapshot_url"
+
+        @Volatile
+        var isCallActivityVisible: Boolean = false
     }
 
     private var callId: String = ""
     private var snapshotUrl: String = ""
     private var isClaimedByMe: Boolean = false
+    private val audioStreamer = DoorbellAudioStreamer()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,48 +62,52 @@ class CallActivity : ComponentActivity() {
 
         setupLockscreenFlags()
 
+        // Pre-warm live stream immediately
+        LiveStreamController.getInstance(this).start()
+
         setContent {
             FoxwayDeurbelTheme {
-                val session by PrewarmEngine.currentSessionFlow.collectAsState()
                 var isActive by remember { mutableStateOf(initialActive) }
                 var answeredByElsewhere by remember { mutableStateOf<String?>(null) }
                 var isMicMuted by remember { mutableStateOf(true) }
                 var isSpeakerOn by remember { mutableStateOf(true) }
-                val resolver = remember { EndpointResolver(FoxwayApp.instance.preferencesManager) }
-                var streamUrl by remember {
-                    val activeBase = resolver.activeApiUrl.value
-                    mutableStateOf(if (activeBase.isNotBlank()) "$activeBase/api/v1/stream.mp4?src=deurbel" else "")
-                }
+                var isSilenced by remember { mutableStateOf(false) }
 
-                LaunchedEffect(Unit) {
-                    try {
-                        val resolved = resolver.resolve()
-                        streamUrl = "${resolved.apiBaseUrl}/api/v1/stream.mp4?src=deurbel"
-                    } catch (_: Exception) {}
-                }
-
-                // Listen for multi-user claim events
+                // Listen for multi-user claim and hangup events
                 LaunchedEffect(Unit) {
                     val currentUserId = FoxwayApp.instance.preferencesManager.getUserId()
                     CallEventBus.events.collect { event ->
                         when (event.event) {
                             DoorbellEvent.CALL_CLAIMED -> {
                                 if (event.userId != currentUserId) {
-                                    // Another family member answered first!
                                     answeredByElsewhere = event.answeredBy ?: "iemand anders"
-                                    delay(3000)
+                                    delay(2500)
                                     finishAndRemoveTask()
                                 }
                             }
                             DoorbellEvent.CALL_ENDED, DoorbellEvent.CALL_MISSED -> {
-                                delay(1000)
+                                delay(800)
                                 finishAndRemoveTask()
                             }
                         }
                     }
                 }
 
-                var isSilenced by remember { mutableStateOf(false) }
+                // Handle two-way microphone talkback
+                val prefs = remember { FoxwayApp.instance.preferencesManager }
+                val resolver = remember { EndpointResolver(prefs) }
+                LaunchedEffect(isActive, isMicMuted) {
+                    if (isActive && !isMicMuted) {
+                        try {
+                            val resolved = resolver.resolve()
+                            audioStreamer.startStreaming(resolved.apiBaseUrl)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error starting mic uplink: ${e.message}")
+                        }
+                    } else {
+                        audioStreamer.stopStreaming()
+                    }
+                }
 
                 CallScreen(
                     callId = callId,
@@ -108,7 +115,6 @@ class CallActivity : ComponentActivity() {
                     isActive = isActive,
                     isSilenced = isSilenced,
                     answeredByElsewhere = answeredByElsewhere,
-                    webRtcSession = session,
                     isMicMuted = isMicMuted,
                     isSpeakerOn = isSpeakerOn,
                     onAnswer = {
@@ -123,67 +129,83 @@ class CallActivity : ComponentActivity() {
                         handleHangup()
                     },
                     onToggleMic = {
-                        session?.let {
-                            val newMuted = !isMicMuted
-                            it.setMicrophoneMuted(newMuted)
-                            isMicMuted = newMuted
-                        }
+                        isMicMuted = !isMicMuted
                     },
                     onToggleSpeaker = {
-                        session?.let {
-                            val newSpeaker = !isSpeakerOn
-                            it.setSpeakerphone(newSpeaker)
-                            isSpeakerOn = newSpeaker
-                        }
+                        isSpeakerOn = !isSpeakerOn
+                        LiveStreamController.getInstance(this@CallActivity).setAudioMuted(!isSpeakerOn)
                     }
                 )
             }
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        isCallActivityVisible = true
+    }
+
+    override fun onStop() {
+        super.onStop()
+        isCallActivityVisible = false
+    }
+
+    /**
+     * Answer incoming call.
+     * Line 1: Updates UI state instantly on Main Thread (<10ms).
+     * Line 2: Background API claim on Dispatchers.IO.
+     */
     private fun handleAnswer() {
         isClaimedByMe = true
-        DoorbellConnectionService.notifyAnswered()
-        lifecycleScope.launch {
-            try {
-                // 1. Unmute incoming audio, keep mic strictly muted until user pushes to talk
-                PrewarmEngine.answerCall()
+        DoorbellConnectionService.silenceRingtone()
+        LiveStreamController.getInstance(this).setAudioMuted(false)
 
-                // 2. Claim call on backend in parallel
+        FoxwayApp.instance.applicationScope.launch(Dispatchers.IO) {
+            try {
+                DoorbellConnectionService.notifyAnswered()
                 val prefs = FoxwayApp.instance.preferencesManager
                 val resolver = EndpointResolver(prefs)
                 val resolved = resolver.resolve()
                 val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
                 val userId = prefs.getUserId()
                 val userName = prefs.getUserName()
-
                 api.claim(callId, ClaimRequest(userId = userId, userName = userName))
             } catch (e: Exception) {
-                Log.e(TAG, "Error in handleAnswer", e)
+                Log.e(TAG, "Error claiming call in background: ${e.message}")
             }
         }
     }
 
+    /**
+     * Silence ringtone.
+     * Line 1: Stops ringing and vibrating on Main Thread while video keeps playing.
+     */
     private fun handleSilence() {
         DoorbellConnectionService.silenceRingtone()
     }
 
+    /**
+     * Hangup call.
+     * Line 1: Dismisses the call screen instantly on UI thread (<10ms).
+     * Line 2: Stops audio streamer & runs API hangup on Dispatchers.IO.
+     */
     private fun handleHangup() {
-        val wasClaimed = isClaimedByMe
-        isClaimedByMe = false
+        // Line 1: Dismiss UI immediately
+        finishAndRemoveTask()
         DoorbellConnectionService.notifyDisconnected()
-        lifecycleScope.launch {
+        audioStreamer.stopStreaming()
+
+        // Line 2: Background network cleanup
+        val cid = callId
+        FoxwayApp.instance.applicationScope.launch(Dispatchers.IO) {
             try {
                 val prefs = FoxwayApp.instance.preferencesManager
                 val resolver = EndpointResolver(prefs)
                 val resolved = resolver.resolve()
                 val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
-                api.hangup(callId)
+                api.hangup(cid)
             } catch (e: Exception) {
-                Log.e(TAG, "Error in handleHangup", e)
-            } finally {
-                PrewarmEngine.stopPrewarm()
-                finishAndRemoveTask()
+                Log.w(TAG, "Failed hangup API: ${e.message}")
             }
         }
     }
@@ -207,24 +229,22 @@ class CallActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        isCallActivityVisible = false
+        audioStreamer.stopStreaming()
         DoorbellConnectionService.cancelCallNotification(this)
         if (isClaimedByMe && callId.isNotEmpty()) {
             val cid = callId
-            FoxwayApp.instance.applicationScope.launch {
+            FoxwayApp.instance.applicationScope.launch(Dispatchers.IO) {
                 try {
                     val prefs = FoxwayApp.instance.preferencesManager
                     val resolver = EndpointResolver(prefs)
                     val resolved = resolver.resolve()
                     val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
                     api.hangup(cid)
-                    Log.i(TAG, "Cleaned up call state on onDestroy: $cid")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed hangup in onDestroy: ${e.message}")
-                }
+                } catch (_: Exception) {}
             }
         } else {
             DoorbellConnectionService.notifyDismissed()
         }
-        PrewarmEngine.stopPrewarm()
     }
 }

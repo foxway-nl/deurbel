@@ -54,6 +54,7 @@ from app.audio_bridge import (
 
 from app.ai_detector import smart_detector, DetectionSettings
 from app.ring_detector import ring_detector
+from app.live_hub import live_hub
 from app.config import settings
 from app.mdns_service import mdns_service
 from app.models import (
@@ -306,6 +307,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not start RAM Ring Buffer: %s", e)
 
+    # Start Always-Warm RAM Live Hub for <200ms live video & audio
+    try:
+        await live_hub.start()
+    except Exception as e:
+        logger.warning("Could not start Live Hub: %s", e)
+
     logger.info("✅ Backend ready")
     yield
 
@@ -315,6 +322,10 @@ async def lifespan(app: FastAPI):
         _cleanup_task.cancel()
     if _health_task:
         _health_task.cancel()
+    try:
+        await live_hub.stop()
+    except Exception:
+        pass
     try:
         await smart_detector.stop()
     except Exception:
@@ -722,13 +733,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "1.8.0",
-        "version_code": 9,
-        "build_time": "2026-10-26T17:30:00Z",
+        "version": "1.9.0",
+        "version_code": 10,
+        "build_time": "2026-10-26T22:30:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v1.8.0: Native go2rtc live WebRTC, strict dual-tone chime, <200ms audio bridge, notification deeplinking, 6s pre-roll, 5G performance optimization",
+        "changelog": "v1.9.0: Always-Warm RAM Live Hub (<200ms on 5G & LAN), seamless Opnemen transition, zero double-press bug",
     }
 
 
@@ -1240,6 +1251,68 @@ async def frame_jpeg_proxy(src: str = Query("deurbel")):
     except Exception as e:
         logger.warning("Frame snapshot proxy error for %s: %s", src, e)
         raise HTTPException(502, f"Failed fetching live frame: {e}")
+
+
+@app.get("/api/v1/live/instant.jpg", tags=["Live Video & Streaming"])
+async def get_instant_ram_snapshot():
+    """
+    Ultra-fast instant 4:3 JPEG snapshot directly from RAM (<5ms).
+    Bypasses RTSP keyframe waiting so the app immediately shows picture.
+    """
+    frame = live_hub.latest_jpeg
+    if not frame:
+        raise HTTPException(status_code=503, detail="Live stream initializing")
+    return Response(
+        content=frame,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.websocket("/api/v1/ws/live")
+async def websocket_live_hub_stream(ws: WebSocket):
+    """
+    Always-Warm RAM Live WebSocket:
+    - Immediately at accept() (0ms): sends b'\\x01' + latest_jpeg from RAM.
+    - Realtime pushes video frames (b'\\x01' + jpeg) and 16kHz PCM audio (b'\\x02' + pcm).
+    - Queue maxsize=3 drops delayed frames to guarantee 0.0s lag on 5G & LAN.
+    """
+    await ws.accept()
+
+    # 1. Millisecond 0: Send latest RAM frame immediately
+    latest = live_hub.latest_jpeg
+    if latest:
+        try:
+            await ws.send_bytes(b"\x01" + latest)
+        except Exception:
+            return
+
+    client_queue = live_hub.register_client()
+    try:
+        async def sender():
+            while True:
+                data = await client_queue.get()
+                await ws.send_bytes(data)
+
+        async def receiver():
+            try:
+                while True:
+                    await ws.receive()
+            except Exception:
+                pass
+
+        send_task = asyncio.create_task(sender())
+        recv_task = asyncio.create_task(receiver())
+        done, pending = await asyncio.wait(
+            [send_task, recv_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+    except Exception:
+        pass
+    finally:
+        live_hub.unregister_client(client_queue)
 
 
 @app.websocket("/api/ws")

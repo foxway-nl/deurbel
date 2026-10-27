@@ -60,6 +60,7 @@ class MainActivity : ComponentActivity() {
                     if (isPaired) {
                         try {
                             WebSocketForegroundService.start(this@MainActivity)
+                            nl.foxway.deurbel.network.LiveStreamController.getInstance(this@MainActivity).start()
                         } catch (_: Exception) {}
                     }
                 }

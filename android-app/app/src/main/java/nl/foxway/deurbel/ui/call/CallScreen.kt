@@ -1,6 +1,8 @@
 package nl.foxway.deurbel.ui.call
 
+import android.graphics.Bitmap
 import androidx.compose.animation.*
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -13,43 +15,27 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.MediaItem
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.DefaultLoadControl
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.AspectRatioFrameLayout
-import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.launch
-import nl.foxway.deurbel.network.ConnectionManager
-import nl.foxway.deurbel.ui.theme.*
-import nl.foxway.deurbel.webrtc.WebRtcSession
-import org.webrtc.SurfaceViewRenderer
+import nl.foxway.deurbel.network.LiveStreamController
 
 /**
- * Professional Incoming & Active Doorbell Call UI.
+ * Fullscreen Incoming & Active Call Screen (Instant RAM Live Stream).
  *
- * Implements Task 2:
- *  - Immediate Pre-Answer Live Video Preview: video starts automatically when screen opens.
- *  - 100% removal of quick-reply pills ("Pakketje", "Ik kom eraan", "Geen...").
- *  - 3 equally sized (64.dp) instant-response buttons in horizontal row:
- *      1. 🔴 Ophangen / Sluiten (64.dp, #E53935)
- *      2. 🔕 Stil / Negeren (64.dp, #37474F, label "Stil kijker")
- *      3. 🟢 Opnemen (64.dp, #2E7D32)
- *  - Active Call controls: Hangup, Mic toggle, Speaker toggle.
- *  - Reactive 5G/WAN switch without reload via LaunchedEffect(activeBaseUrl).
+ * Requirements:
+ *  - 100% Shared LiveStreamController across RINGING and ANSWERED states.
+ *  - Pressing "Opnemen" NEVER restarts video, NEVER shows a loading spinner.
+ *  - 4:3 aspect ratio native fit with toggle to fill.
+ *  - Instant single-touch reaction on buttons (<10ms).
  */
 @Composable
 fun CallScreen(
@@ -58,7 +44,6 @@ fun CallScreen(
     isActive: Boolean,
     isSilenced: Boolean = false,
     answeredByElsewhere: String?,
-    webRtcSession: WebRtcSession?,
     isMicMuted: Boolean,
     isSpeakerOn: Boolean,
     onAnswer: () -> Unit,
@@ -68,77 +53,19 @@ fun CallScreen(
     onToggleSpeaker: () -> Unit
 ) {
     val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
-    val connectionManager = remember { ConnectionManager.getInstance(context) }
-    val activeBaseUrl by connectionManager.activeBaseUrl.collectAsState()
-    val isWanMode by connectionManager.isWanMode.collectAsState()
+    val liveStream = remember { LiveStreamController.getInstance(context) }
+    val frame by liveStream.currentBitmap.collectAsState()
+    val isConnected by liveStream.isConnected.collectAsState()
 
-    val hasWebRtcVideo by (webRtcSession?.hasVideoTrack ?: remember { MutableStateFlow(false) }).collectAsState()
-    var isExoBuffering by remember { mutableStateOf(true) }
     var isFitMode by remember { mutableStateOf(true) }
 
-    // ExoPlayer for instant pre-answer live stream and 5G playback
-    val exoPlayer = remember {
-        val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(400, 1200, 200, 400)
-            .build()
-        ExoPlayer.Builder(context)
-            .setLoadControl(loadControl)
-            .build().apply {
-                playWhenReady = true
-                repeatMode = Player.REPEAT_MODE_OFF
-            }
+    LaunchedEffect(Unit) {
+        liveStream.start()
     }
 
-    DisposableEffect(exoPlayer) {
-        val listener = object : Player.Listener {
-            override fun onPlaybackStateChanged(state: Int) {
-                isExoBuffering = (state == Player.STATE_BUFFERING)
-            }
-            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                isExoBuffering = false
-                // Auto reconnect after 500ms
-                coroutineScope.launch {
-                    delay(500L)
-                    connectionManager.refreshRoute()
-                    val currentBase = connectionManager.activeBaseUrl.value.ifBlank { "https://deurbel.foxway.nl" }
-                    val streamUrl = "$currentBase/api/v1/stream.mp4?src=deurbel_sd"
-                    val mediaItem = MediaItem.fromUri(streamUrl)
-                    exoPlayer.setMediaItem(mediaItem)
-                    exoPlayer.prepare()
-                    exoPlayer.play()
-                }
-            }
-        }
-        exoPlayer.addListener(listener)
-        onDispose {
-            exoPlayer.removeListener(listener)
-            exoPlayer.stop()
-            exoPlayer.release()
-        }
-    }
-
-    // Direct Pre-Answer Live Stream Auto-Start & Network Switch (Task 1 & Task 2)
-    LaunchedEffect(activeBaseUrl) {
-        if (activeBaseUrl.isNotBlank()) {
-            val streamUrl = "$activeBaseUrl/api/v1/stream.mp4?src=deurbel_sd"
-            val mediaItem = MediaItem.Builder()
-                .setUri(streamUrl)
-                .setLiveConfiguration(
-                    MediaItem.LiveConfiguration.Builder()
-                        .setMaxPlaybackSpeed(1.02f)
-                        .build()
-                )
-                .build()
-            exoPlayer.setMediaItem(mediaItem)
-            exoPlayer.prepare()
-            exoPlayer.play()
-        }
-    }
-
-    // Control volume: muted during pre-answer ringtone so beltoon isn't disturbed, unmuted after answer
+    // Automatically manage audio mute: muted when ringing (so beltoon is clear), unmuted when answered or speaker on
     LaunchedEffect(isActive, isSpeakerOn) {
-        exoPlayer.volume = if (isActive && isSpeakerOn) 1f else 0f
+        liveStream.setAudioMuted(!isActive || !isSpeakerOn)
     }
 
     Box(
@@ -146,77 +73,54 @@ fun CallScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // ── 1. Live Video Stream / Snapshot Background (Always active) ──
+        // ── 1. Live Video Stream Container (4:3 Native Aspect Ratio) ──
         Box(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize(),
             contentAlignment = Alignment.Center
         ) {
-            if (webRtcSession != null && hasWebRtcVideo) {
-                AndroidView(
-                    factory = { ctx ->
-                        SurfaceViewRenderer(ctx).apply {
-                            val scaling = if (isFitMode) org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT
-                            else org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FILL
-                            setScalingType(scaling)
-                            setEnableHardwareScaler(true)
-                            webRtcSession.attachRenderer(this, scaling)
-                            requestLayout()
-                        }
-                    },
-                    update = { view ->
-                        val scaling = if (isFitMode) org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT
-                        else org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FILL
-                        view.setScalingType(scaling)
-                        view.requestLayout()
-                        webRtcSession.setScalingType(scaling)
-                    },
-                    modifier = if (isFitMode) {
-                        Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(4f / 3f)
-                    } else {
-                        Modifier.fillMaxSize()
-                    }
-                )
-            } else {
-                // Live ExoPlayer stream running before and after answering
-                AndroidView(
-                    factory = { ctx ->
-                        PlayerView(ctx).apply {
-                            player = exoPlayer
-                            useController = false
-                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        }
-                    },
-                    update = { view ->
-                        view.player = exoPlayer
-                        view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    },
-                    modifier = if (isFitMode) {
-                        Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(4f / 3f)
-                    } else {
-                        Modifier.fillMaxSize()
-                    }
-                )
-
-                if (isExoBuffering && snapshotUrl.isNotBlank()) {
+            Box(
+                modifier = if (isFitMode) {
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(4f / 3f)
+                        .clipToBounds()
+                } else {
+                    Modifier.fillMaxSize()
+                },
+                contentAlignment = Alignment.Center
+            ) {
+                if (frame != null) {
+                    Image(
+                        bitmap = frame!!.asImageBitmap(),
+                        contentDescription = "Live beeld voordeur",
+                        contentScale = if (isFitMode) ContentScale.Fit else ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else if (snapshotUrl.isNotBlank()) {
                     AsyncImage(
                         model = snapshotUrl,
-                        contentDescription = "Snapshot preview",
+                        contentDescription = "Snapshot voordeur",
                         contentScale = if (isFitMode) ContentScale.Fit else ContentScale.Crop,
-                        modifier = if (isFitMode) Modifier.fillMaxWidth().aspectRatio(4f / 3f) else Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize()
                     )
-                }
-
-                if (isExoBuffering) {
-                    CircularProgressIndicator(color = Color(0xFF2E7D32), modifier = Modifier.size(36.dp))
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color(0xFF111827)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(
+                            color = Color(0xFF10B981),
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
                 }
             }
         }
 
-        // Dark gradient overlay for readability of controls
+        // ── 2. Gradient Overlays for Readability ──
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -231,7 +135,7 @@ fun CallScreen(
                 )
         )
 
-        // ── 2. Top Bar: Caller Info & Status Badge + Aspect Ratio Toggle ──
+        // ── 3. Top Bar: Status Badge + Fit/Fill Toggle ──
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -254,9 +158,9 @@ fun CallScreen(
                         modifier = Modifier
                             .size(10.dp)
                             .background(
-                                if (isActive) Color(0xFF2E7D32)
+                                if (isActive) Color(0xFF10B981)
                                 else if (isSilenced) Color(0xFFF59E0B)
-                                else Color(0xFFE53935),
+                                else Color(0xFFEF4444),
                                 CircleShape
                             )
                     )
@@ -271,7 +175,6 @@ fun CallScreen(
                 }
             }
 
-            // Fit / Fill toggle
             Surface(
                 color = Color(0xCC1E293B),
                 shape = RoundedCornerShape(20.dp),
@@ -290,7 +193,7 @@ fun CallScreen(
                         modifier = Modifier.size(16.dp)
                     )
                     Text(
-                        text = if (isFitMode) "Fit" else "Fill",
+                        text = if (isFitMode) "4:3 Fit" else "Fill",
                         style = MaterialTheme.typography.labelSmall,
                         color = Color.White
                     )
@@ -324,7 +227,7 @@ fun CallScreen(
             }
         }
 
-        // ── 3. Multi-User Claim Banner ──
+        // ── 4. Multi-User Claim Banner ──
         AnimatedVisibility(
             visible = answeredByElsewhere != null,
             enter = fadeIn(),
@@ -365,7 +268,7 @@ fun CallScreen(
             }
         }
 
-        // ── 4. Bottom Controls: Incoming (3 equal 64.dp buttons) vs Active ──
+        // ── 5. Bottom Controls (Incoming 3-Buttons vs Active Controls) ──
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -375,7 +278,7 @@ fun CallScreen(
             contentAlignment = Alignment.Center
         ) {
             if (!isActive && answeredByElsewhere == null) {
-                // 3 Perfect Geproportioneerde, Direct Reagerende Knoppen (Task 2)
+                // Incoming Call: 3 Equal 64.dp Buttons
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -383,7 +286,7 @@ fun CallScreen(
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 1. 🔴 Ophangen / Sluiten
+                    // 1. 🔴 Ophangen / Weigeren
                     CallActionButton(
                         icon = Icons.Default.CallEnd,
                         label = "Ophangen",
@@ -395,17 +298,17 @@ fun CallScreen(
                     // 2. 🔕 Stil / Negeren
                     CallActionButton(
                         icon = Icons.Default.NotificationsOff,
-                        label = "Stil kijker",
+                        label = "Stil meekijken",
                         backgroundColor = Color(0xFF37474F),
                         iconTint = Color.White,
                         onClick = onSilence
                     )
 
-                    // 3. 🟢 Opnemen (EXACT 64.dp, same as red)
+                    // 3. 🟢 Opnemen
                     CallActionButton(
                         icon = Icons.Default.Call,
                         label = "Opnemen",
-                        backgroundColor = Color(0xFF2E7D32),
+                        backgroundColor = Color(0xFF10B981),
                         iconTint = Color.White,
                         onClick = onAnswer
                     )
@@ -422,7 +325,7 @@ fun CallScreen(
                         horizontalArrangement = Arrangement.spacedBy(24.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Mic toggle
+                        // Mic toggle (Two-way voice to outdoor speaker)
                         IconButton(
                             onClick = onToggleMic,
                             modifier = Modifier
@@ -477,8 +380,7 @@ fun CallScreen(
 }
 
 /**
- * 64.dp Circular Action Button with Label for incoming calls.
- * Immediate touch feedback without heavy animation loops (<10ms UI response).
+ * 64.dp Circular Action Button for incoming calls with instant touch response (<10ms).
  */
 @Composable
 private fun CallActionButton(
