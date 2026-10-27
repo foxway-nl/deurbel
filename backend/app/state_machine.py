@@ -89,9 +89,10 @@ class CallStateMachine:
 
     # ── RING ──────────────────────────────────────────────────────────
 
-    async def ring(self) -> Optional[ActiveCall]:
+    async def ring(self, force: bool = False) -> Optional[ActiveCall]:
         """
         Called by Shelly webhook or 728 Hz detector.
+        If force=True, bypasses the 15s cooldown (used by the Test Aanbel Trigger button).
 
         Returns the new ``ActiveCall`` or ``None`` if the ring was
         suppressed by cooldown / existing call.
@@ -114,13 +115,13 @@ class CallStateMachine:
                     asyncio.create_task(self.on_ringing(call))
                 return call
 
-            # Ignore duplicate presses during cooldown
-            if now - self._last_ring_ts < settings.RING_COOLDOWN_SECONDS:
+            # Ignore duplicate presses during cooldown (unless force=True)
+            if not force and (now - self._last_ring_ts < settings.RING_COOLDOWN_SECONDS):
                 logger.info("Ring suppressed (cooldown %.1fs remaining)", settings.RING_COOLDOWN_SECONDS - (now - self._last_ring_ts))
                 return None
 
-            # Already in an active conversation
-            if self._current and self._current.state == CallState.IN_CALL:
+            # Already in an active conversation (unless force=True)
+            if not force and self._current and self._current.state == CallState.IN_CALL:
                 logger.info("Ring suppressed (active call %s in progress)", self._current.call_id)
                 return None
 

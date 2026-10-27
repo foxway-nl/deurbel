@@ -1000,7 +1000,8 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.labelMedium,
                         color = CyanAccent
                     )
-                    val lanWebhookUrl = "$currentApiBaseUrl/api/v1/webhook/shelly-ring"
+                    val lanBase = endpointConfig.lanApiUrl.ifBlank { "http://192.168.2.1:8090" }.trimEnd('/')
+                    val lanWebhookUrl = "$lanBase/api/v1/webhook/shelly-ring"
                     Surface(
                         color = SurfaceVariantDark,
                         shape = RoundedCornerShape(8.dp),
@@ -1030,7 +1031,8 @@ fun SettingsScreen(
                         }
                     }
 
-                    val wanWebhookUrl = "${resolver.activeApiUrl.value.ifBlank { currentApiBaseUrl }}/api/v1/webhook/shelly-ring"
+                    val wanBase = endpointConfig.wanApiUrl.ifBlank { "https://deurbel.foxway.nl" }.trimEnd('/')
+                    val wanWebhookUrl = "$wanBase/api/v1/webhook/shelly-ring"
                     Text(
                         text = "Shelly Plus Uni Webhook URL (WAN / Foxway Cloud):",
                         style = MaterialTheme.typography.labelMedium,
@@ -1072,9 +1074,15 @@ fun SettingsScreen(
                                     isTriggeringShelly = true
                                     shellyTriggerResult = null
                                     val api = ApiClientFactory.createApi()
-                                    val resp = api.triggerShellyWebhook()
+                                    val resp = api.triggerShellyWebhook(force = true)
                                     if (resp.isSuccessful) {
                                         shellyTriggerResult = "✅ Drukknop-oproep succesvol gesimuleerd!"
+                                        // Open belscherm direct op de telefoon (5G en Wi-Fi)
+                                        nl.foxway.deurbel.telecom.DoorbellConnectionService.startIncomingCall(
+                                            context,
+                                            "test_ring_${System.currentTimeMillis()}",
+                                            ""
+                                        )
                                     } else {
                                         shellyTriggerResult = "⚠️ Reactie: HTTP ${resp.code()}"
                                     }

@@ -80,7 +80,7 @@ class WebSocketForegroundService : Service() {
             }
         }
 
-        // Start 3-second polling fallback loop (Task 6)
+        // Start 2-second polling fallback loop (Task 3)
         pollJob?.cancel()
         pollJob = serviceScope.launch(Dispatchers.IO) {
             while (isActive) {
@@ -89,11 +89,11 @@ class WebSocketForegroundService : Service() {
                 } catch (e: Exception) {
                     Log.w(TAG, "Event poll failed: ${e.message}")
                 }
-                delay(3000L)
+                delay(2000L)
             }
         }
 
-        Log.i(TAG, "Service started, WebSocket & 3s Polling Fallback active")
+        Log.i(TAG, "Service started, WebSocket & 2s Polling Fallback active")
         return START_STICKY
     }
 

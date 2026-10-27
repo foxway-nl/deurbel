@@ -77,3 +77,43 @@ async def test_pairing_unique_username_enforcement(async_client):
     # Device 1 re-pairs with same name -> MUST succeed (same device)
     resp3 = await async_client.post("/api/v1/pair", json=p1)
     assert resp3.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_5g_wan_onboarding_bootstrap_and_pairing(async_client):
+    """
+    Test 5G onboarding outside local subnet:
+    - Simulates an external 5G client (WAN IP via X-Forwarded-For).
+    - Probes GET /api/v1/onboarding/bootstrap (3s timeout).
+    - Pairs via POST /api/v1/devices/pair using the bootstrap token.
+    - Asserts 200, JWT token, lan_url and wan_url returned.
+    """
+    wan_headers = {"X-Forwarded-For": "82.165.197.10"}
+
+    # 1. Bootstrap probe over WAN
+    resp = await async_client.get("/api/v1/onboarding/bootstrap", headers=wan_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert "bootstrap_token" in data
+    token = data["bootstrap_token"]
+    assert len(token) > 10
+
+    # 2. Pair via WAN
+    dev_id = f"5g_device_{uuid.uuid4().hex[:6]}"
+    pair_payload = {
+        "user_name": f"User5G_{uuid.uuid4().hex[:4]}",
+        "device_name": "Galaxy S24 (5G)",
+        "fcm_token": "fcm_5g_token",
+        "device_id": dev_id,
+        "android_version": "Android 15",
+        "connection_type": "5G_WAN",
+        "token": token,
+    }
+    pair_resp = await async_client.post("/api/v1/devices/pair", json=pair_payload, headers=wan_headers)
+    assert pair_resp.status_code == 200
+    pair_data = pair_resp.json()
+    assert "jwt_token" in pair_data
+    assert "lan_url" in pair_data
+    assert "wan_url" in pair_data
+

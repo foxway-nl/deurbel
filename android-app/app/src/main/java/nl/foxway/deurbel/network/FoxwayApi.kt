@@ -160,7 +160,12 @@ interface FoxwayApi {
     suspend fun getShellyWebhookStatus(): Response<ShellyWebhookStatusResponse>
 
     @POST("/api/v1/webhook/shelly-ring")
-    suspend fun triggerShellyWebhook(): Response<Map<String, Any>>
+    suspend fun triggerShellyWebhook(@Query("force") force: Boolean = true): Response<Map<String, Any>>
+
+    // ── Live Stream Anti-Freeze Restart ──────────────────────────────
+
+    @POST("/api/v1/live/restart")
+    suspend fun restartLiveStream(): Response<Map<String, Any>>
 
     // ── Junk Clips Cleanup ────────────────────────────────────────────
 

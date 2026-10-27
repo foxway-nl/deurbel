@@ -83,10 +83,8 @@ def is_parked_vehicle(
 
 
 async def get_substream_rtsp() -> str:
-    """Dynamically resolve camera substream RTSP URL from SQLite app_settings or configuration."""
-    from app.models import get_camera_credentials
-    creds = await get_camera_credentials()
-    return f"rtsp://{creds['user']}:{creds['pass']}@{creds['ip']}:554/H.264/ch1/sub/av_stream"
+    """Dynamically resolve camera substream RTSP URL via local go2rtc to eliminate connection contention."""
+    return "rtsp://127.0.0.1:8554/deurbel_sub"
 
 
 class DetectionSettings:
@@ -137,6 +135,11 @@ class SmartDetector:
 
         # Multi-frame tracking history: track_id -> list of (cx, cy)
         self.track_history: dict[int, list[tuple[float, float]]] = {}
+
+        # Multi-frame animal tracking history for anti-rain filtering
+        self.animal_tracks: dict[int, list[dict]] = {}
+        self.next_animal_track_id: int = 1
+        self.frame_num: int = 0
 
         self._running: bool = False
         self._task: Optional[asyncio.Task] = None
@@ -211,6 +214,67 @@ class SmartDetector:
         except Exception as e:
             logger.warning("Error updating parked baseline: %s", e)
             return self.parked_vehicle_boxes
+
+    def is_vehicle_moving(self, centroids: list[tuple[float, float]], width: float) -> bool:
+        """
+        Determines whether a vehicle's centroid sequence represents a moving vehicle:
+        - Visible in >= 3 frames
+        - Horizontal displacement abs(cx_last - cx_first) >= 0.10 * width
+        - Consistent horizontal progression
+        """
+        if len(centroids) < 3:
+            return False
+        cx_first = centroids[0][0]
+        cx_last = centroids[-1][0]
+        dx_total = cx_last - cx_first
+        if abs(dx_total) < (0.10 * width):
+            return False
+        # Consistent direction check
+        steps = [centroids[k][0] - centroids[k - 1][0] for k in range(1, len(centroids))]
+        sign = 1 if dx_total > 0 else -1
+        consistent_steps = sum(1 for s in steps if (s * sign) >= -0.01 * width)
+        return consistent_steps >= (len(steps) - 1)
+
+    def is_valid_animal_trajectory(
+        self,
+        box_history: list[tuple[float, float, float, float]],
+        conf: float,
+        label: str,
+        frame_area: float,
+        is_ir_night: bool = False,
+    ) -> bool:
+        """
+        Multi-frame anti-rain filter for animal detections:
+        - confidence >= 0.48 (>= 0.62 for bird during IR night vision)
+        - box_area >= 0.008 * frame_area, aspect ratio between 0.3 and 3.0
+        - visible in >= 3 consecutive frames with IoU >= 0.25 between frames
+        """
+        min_conf = 0.62 if (label.lower() == "bird" and is_ir_night) else 0.48
+        if conf < min_conf:
+            return False
+        if not box_history:
+            return False
+
+        # Validate box shape of latest box
+        box = box_history[-1]
+        bw = box[2] - box[0]
+        bh = box[3] - box[1]
+        box_area = bw * bh
+        if box_area < (0.008 * frame_area):
+            return False
+        ar = bw / max(1.0, bh)
+        if ar < 0.3 or ar > 3.0:
+            return False
+
+        # Trajectory must have >= 3 frames with overlapping IoU >= 0.25
+        if len(box_history) < 3:
+            return False
+
+        for k in range(1, len(box_history)):
+            if compute_iou(box_history[k - 1], box_history[k]) < 0.25:
+                return False
+
+        return True
 
     def evaluate_detections(
         self,
@@ -322,60 +386,130 @@ class SmartDetector:
             )
             return "person", "Persoon", best_person["conf"]
 
-        # ── PRIORITY 2: Dier (classes 14, 15, 16, conf >= 0.35) ───────────
-        animal_candidates = [
-            d for d in detections
-            if d["cid"] in ANIMAL_CLASSES and d["conf"] >= 0.35 and d["fg_ratio"] >= 0.04
+        # Check if IR night vision is active (monochrome image / saturation < 18)
+        is_ir_night = False
+        if len(frame.shape) == 3 and frame.shape[2] == 3:
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            if float(hsv[:, :, 1].mean()) < 18.0:
+                is_ir_night = True
+
+        # ── PRIORITY 2: Dier (classes 14, 15, 16) — Multi-Frame Anti-Regen Filter ─
+        frame_area = float(w * h)
+        animal_candidates = []
+        for d in detections:
+            if d["cid"] not in ANIMAL_CLASSES:
+                continue
+
+            # 1. Confidence check (>= 0.48, or >= 0.62 for bird during IR night vision)
+            min_conf = 0.62 if (d["cid"] == 14 and is_ir_night) else 0.48
+            if d["conf"] < min_conf:
+                continue
+
+            # 2. Bounding box shape & size (area >= 0.008 * frame_area, aspect ratio 0.3 - 3.0)
+            box = d["box"]
+            bw = box[2] - box[0]
+            bh = box[3] - box[1]
+            box_area = bw * bh
+            if box_area < (0.008 * frame_area):
+                continue
+            ar = bw / max(1.0, bh)
+            if ar < 0.3 or ar > 3.0:
+                continue
+
+            # 3. Trajectory matching over consecutive frames (IoU >= 0.25)
+            matched_track_id = None
+            for at_id, at_history in self.animal_tracks.items():
+                if not at_history:
+                    continue
+                last_entry = at_history[-1]
+                if (self.frame_num - last_entry["frame_num"]) <= 2:
+                    if compute_iou(box, last_entry["box"]) >= 0.25:
+                        matched_track_id = at_id
+                        break
+
+            if matched_track_id is None:
+                matched_track_id = self.next_animal_track_id
+                self.next_animal_track_id += 1
+                self.animal_tracks[matched_track_id] = []
+
+            self.animal_tracks[matched_track_id].append({
+                "box": box,
+                "conf": d["conf"],
+                "cid": d["cid"],
+                "frame_num": self.frame_num,
+                "time": time.time(),
+            })
+
+            # Check if animal is visible in >= 3 consecutive frames (>= 0.75s)
+            track = self.animal_tracks[matched_track_id]
+            if len(track) >= 3:
+                animal_candidates.append(d)
+
+        # Cleanup stale animal tracks (> 4 frames old)
+        stale_animal_tracks = [
+            tid for tid, trk in self.animal_tracks.items()
+            if trk and (self.frame_num - trk[-1]["frame_num"]) > 4
         ]
+        for tid in stale_animal_tracks:
+            del self.animal_tracks[tid]
+
         if animal_candidates:
             best_animal = max(animal_candidates, key=lambda a: a["conf"])
             lbl = COCO_NAMES.get(best_animal["cid"], "Dier")
             logger.info(
-                "Dier detected (%s): conf=%.2f, fg_ratio=%.3f",
+                "Dier detected (%s): conf=%.2f, fg_ratio=%.3f (multi-frame confirmed)",
                 lbl, best_animal["conf"], best_animal["fg_ratio"],
             )
             return "animal", lbl, best_animal["conf"]
 
-        # ── PRIORITY 3: Rijdend Voertuig (classes 1, 2, 3, 5, 7, conf >= 0.45)
+        # ── PRIORITY 3: Rijdend Voertuig (classes 1, 2, 3, 5, 7, conf >= 0.45) ────
+        # Detects moving cars/trucks/vans across frames while ignoring parked cars
         vehicle_candidates = [
             d for d in detections
             if d["cid"] in VEHICLE_CLASSES and d["conf"] >= 0.45
         ]
         best_vehicle = None
         for v in vehicle_candidates:
-            box = v["box"]
             tid = v["tid"]
-
-            # Hard Rule: Check IoU with parked baseline
-            if is_parked_vehicle(box, self.parked_vehicle_boxes, threshold=0.45):
-                logger.debug("Vehicle with IoU >= 0.45 is parked car on driveway -> 100%% ignored")
-                continue
-
-            # Moving vehicle requirement: tracked in >= 3 frames with displacement >= 12% width
             history = self.track_history.get(tid, [])
+
             if len(history) < 3:
                 logger.debug("Vehicle track_id=%d tracked in only %d frames (< 3)", tid, len(history))
                 continue
 
-            dx = history[-1][0] - history[0][0]
-            dy = history[-1][1] - history[0][1]
-            total_displacement = math.hypot(dx, dy)
-            disp_ratio = total_displacement / float(w)
+            cx_first = history[0][0]
+            cx_last = history[-1][0]
+            dx_total = cx_last - cx_first
+            h_disp = abs(dx_total)
 
-            if disp_ratio >= 0.12:
+            # Ignore stationary parked cars (horizontal displacement < 2% screen width)
+            if h_disp < (0.02 * float(w)):
+                logger.debug("Vehicle track_id=%d stationary parked (dx=%.1f < 0.02*w) -> ignored", tid, h_disp)
+                continue
+
+            # Check consistent horizontal direction across tracked frames
+            steps = [history[j + 1][0] - history[j][0] for j in range(len(history) - 1)]
+            if dx_total > 0:
+                agreed_steps = sum(1 for s in steps if s >= -0.01 * w)
+            else:
+                agreed_steps = sum(1 for s in steps if s <= 0.01 * w)
+            is_consistent_direction = (agreed_steps / len(steps)) >= 0.65
+
+            # Moving vehicle: >=10% width horizontal displacement, consistent direction, MOG2 ratio >= 0.18
+            if h_disp >= (0.10 * float(w)) and is_consistent_direction and v["fg_ratio"] >= 0.18:
                 if best_vehicle is None or v["conf"] > best_vehicle["conf"]:
                     best_vehicle = v
             else:
                 logger.debug(
-                    "Vehicle track_id=%d displacement %.3f < 0.12 threshold",
-                    tid, disp_ratio,
+                    "Vehicle track_id=%d not confirmed (h_disp=%.3f, consistent=%s, fg_ratio=%.3f)",
+                    tid, h_disp / float(w), is_consistent_direction, v["fg_ratio"],
                 )
 
         if best_vehicle is not None:
             lbl = COCO_NAMES.get(best_vehicle["cid"], "Voertuig")
             logger.info(
-                "Moving vehicle confirmed: conf=%.2f, track_id=%d, label=%s",
-                best_vehicle["conf"], best_vehicle["tid"], lbl,
+                "Moving vehicle confirmed: conf=%.2f, track_id=%d, label=%s, fg_ratio=%.2f",
+                best_vehicle["conf"], best_vehicle["tid"], lbl, best_vehicle["fg_ratio"],
             )
             return "vehicle", lbl, best_vehicle["conf"]
 
@@ -401,9 +535,9 @@ class SmartDetector:
                 pass
 
     async def _detection_loop(self) -> None:
-        """Main non-blocking detection loop (runs at ~2 fps / 0.5s)."""
+        """Main non-blocking detection loop (runs at 4 fps / 0.25s)."""
         await asyncio.sleep(5)  # Wait for system startup
-        frame_interval = 0.50
+        frame_interval = 0.25
 
         while self._running:
             cfg = await DetectionSettings.load()

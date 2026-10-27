@@ -17,16 +17,17 @@ import okhttp3.*
 import okio.ByteString
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.CRC32
 
 /**
- * Always-Warm Live Stream Controller.
+ * Always-Warm Live Stream Controller with Real-Time Freeze Detection & Auto-Heal.
  *
  * Connects to `/api/v1/ws/live` on LAN or WAN/5G over standard port 8090/443:
  *  - First frame arrives in <100ms directly from server RAM (zero wait for keyframes).
  *  - Decodes 15 fps 4:3 JPEG video frames into [currentBitmap].
+ *  - Tracks [lastNewFrameMs] and [isFrozen] state for live status indicators.
+ *  - Triggers automatic background reconnect + /api/v1/live/restart when frozen >2.0s.
  *  - Plays incoming 16kHz PCM audio via low-latency [AudioTrack].
- *  - Shared across LiveScreen and CallScreen so transitioning from RINGING to ANSWERED
- *    never interrupts video playback.
  */
 class LiveStreamController private constructor(private val context: Context) {
 
@@ -53,17 +54,28 @@ class LiveStreamController private constructor(private val context: Context) {
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
+    private val _lastNewFrameMs = MutableStateFlow(0L)
+    val lastNewFrameMs: StateFlow<Long> = _lastNewFrameMs.asStateFlow()
+
+    private val _isFrozen = MutableStateFlow(false)
+    val isFrozen: StateFlow<Boolean> = _isFrozen.asStateFlow()
+
     private val _isAudioMuted = MutableStateFlow(true)
     val isAudioMuted: StateFlow<Boolean> = _isAudioMuted.asStateFlow()
+
+    private var lastFrameLen: Int = 0
+    private var lastFrameCrc: Long = 0L
 
     private var client: OkHttpClient? = null
     private var webSocket: WebSocket? = null
     private var audioTrack: AudioTrack? = null
     private val isRunning = AtomicBoolean(false)
     private var reconnectJob: Job? = null
+    private var freezeWatchdogJob: Job? = null
 
     init {
         initAudioTrack()
+        startFreezeWatchdog()
     }
 
     fun forceSpeakerphone() {
@@ -125,6 +137,26 @@ class LiveStreamController private constructor(private val context: Context) {
         }
     }
 
+    private fun startFreezeWatchdog() {
+        freezeWatchdogJob?.cancel()
+        freezeWatchdogJob = scope.launch {
+            while (isActive) {
+                delay(500L)
+                if (isRunning.get() && _isConnected.value) {
+                    val last = _lastNewFrameMs.value
+                    val now = System.currentTimeMillis()
+                    if (last > 0L && (now - last) > 2000L) {
+                        if (!_isFrozen.value) {
+                            _isFrozen.value = true
+                            Log.w(TAG, "Live stream freeze detected (>2.0s without fresh frame). Auto-healing...")
+                            restartStream(forceServerRestart = true)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fun start() {
         if (isRunning.getAndSet(true)) {
             // Already running
@@ -154,6 +186,34 @@ class LiveStreamController private constructor(private val context: Context) {
         Log.d(TAG, "setAudioMuted: $muted")
     }
 
+    fun restartStream(forceServerRestart: Boolean = true) {
+        scope.launch {
+            Log.i(TAG, "restartStream: forcing stream restart (serverRestart=$forceServerRestart)")
+            _isFrozen.value = true
+
+            if (forceServerRestart) {
+                try {
+                    val activeBase = connectionManager.activeBaseUrl.value.ifBlank { "https://deurbel.foxway.nl" }
+                    val api = ApiClientFactory.createApi(activeBase)
+                    api.restartLiveStream()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Live restart API call failed: ${e.message}")
+                }
+            }
+
+            try {
+                webSocket?.close(1000, "Restarting stream")
+            } catch (_: Exception) {}
+            webSocket = null
+            _isConnected.value = false
+
+            delay(150L)
+            if (isRunning.get()) {
+                connectWebSocket()
+            }
+        }
+    }
+
     private fun connectWebSocket() {
         if (!isRunning.get()) return
 
@@ -178,6 +238,8 @@ class LiveStreamController private constructor(private val context: Context) {
             override fun onOpen(ws: WebSocket, response: Response) {
                 Log.i(TAG, "Live stream WebSocket opened: $wsUrl")
                 _isConnected.value = true
+                _lastNewFrameMs.value = System.currentTimeMillis()
+                _isFrozen.value = false
             }
 
             override fun onMessage(ws: WebSocket, bytes: ByteString) {
@@ -186,8 +248,21 @@ class LiveStreamController private constructor(private val context: Context) {
                 when (data[0]) {
                     0x01.toByte() -> {
                         // Video Frame: JPEG bytes
+                        val frameLen = data.size - 1
+                        val crcCalculator = CRC32()
+                        crcCalculator.update(data, 1, frameLen)
+                        val crc = crcCalculator.value
+                        val now = System.currentTimeMillis()
+
+                        if (frameLen != lastFrameLen || crc != lastFrameCrc) {
+                            lastFrameLen = frameLen
+                            lastFrameCrc = crc
+                            _lastNewFrameMs.value = now
+                            _isFrozen.value = false
+                        }
+
                         try {
-                            val bitmap = BitmapFactory.decodeByteArray(data, 1, data.size - 1)
+                            val bitmap = BitmapFactory.decodeByteArray(data, 1, frameLen)
                             if (bitmap != null) {
                                 _currentBitmap.value = bitmap
                             }
@@ -211,6 +286,7 @@ class LiveStreamController private constructor(private val context: Context) {
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 Log.w(TAG, "Live stream WebSocket error: ${t.message}")
                 _isConnected.value = false
+                _isFrozen.value = true
                 scheduleReconnect()
             }
 

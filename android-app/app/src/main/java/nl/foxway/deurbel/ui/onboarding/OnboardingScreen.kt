@@ -27,12 +27,15 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import nl.foxway.deurbel.FoxwayApp
 import nl.foxway.deurbel.data.AppLogger
 import nl.foxway.deurbel.data.models.CameraSettingsUpdate
 import nl.foxway.deurbel.data.models.PairRequest
 import nl.foxway.deurbel.network.ApiClientFactory
+import nl.foxway.deurbel.network.ConnectionManager
 import nl.foxway.deurbel.network.NetworkDiscovery
 import nl.foxway.deurbel.ui.theme.*
 import org.json.JSONObject
@@ -40,13 +43,14 @@ import org.json.JSONObject
 /**
  * 100% Dynamic Onboarding & Pairing Screen for Foxway Doorbell.
  *
- * Implements Task 1:
- * - Dynamic Wi-Fi subnet scanning & mDNS discovery with 0 hardcoded IPs
- * - Live Status Card (Auto-discovered camera & server vs fallback retry)
+ * Implements Task 1 & 2:
+ * - Parallel LAN subnet scanning + WAN cloud bootstrap (deurbel.foxway.nl)
+ * - 5G Cloud connection detection & instant spinner stop
+ * - Live Status Card (5G Cloud vs Local LAN auto-discovery)
  * - Veld 1: Jouw naam (verplicht, standaard "")
  * - Veld 2: Deurbel Gebruikersnaam (standaard "admin")
  * - Veld 3: Deurbel Wachtwoord / Verificatiecode met wachtwoord-oogje en [i] info icoon
- * - Eén enkele "Koppelen" knop
+ * - Eén enkele "Koppelen" knop die LAN en WAN opslaat in ConnectionManager
  * - Full-screen Samsung One UI permission setup
  */
 @Composable
@@ -84,25 +88,59 @@ fun OnboardingScreen(
 
     val isNameValid = userName.trim().length >= 2
 
-    // Perform dynamic subnet discovery
+    // Perform parallel discovery: Wi-Fi subnet scan + WAN cloud bootstrap
     val performDiscovery: () -> Unit = {
         coroutineScope.launch {
             isScanning = true
             scanFailed = false
             errorMessage = null
-            val result = networkDiscovery.discoverServer()
-            isScanning = false
-            if (result != null) {
-                discoveryResult = result
-                scanFailed = false
-                if (result.serverLanUrl.isNotBlank() && manualLanUrl.isBlank()) {
-                    manualLanUrl = result.serverLanUrl
-                }
-                if (result.serverWanUrl.isNotBlank() && manualWanUrl.isBlank()) {
-                    manualWanUrl = result.serverWanUrl
+
+            val isWifi = networkDiscovery.isWifiConnected()
+
+            // 1. Probe WAN bootstrap always (timeout 3000ms)
+            val wanDeferred = async(Dispatchers.IO) {
+                networkDiscovery.probeWanBootstrap("https://deurbel.foxway.nl")
+            }
+
+            if (!isWifi) {
+                // Phone is on 5G / Cellular: directly await WAN bootstrap!
+                val wanResult = wanDeferred.await()
+                isScanning = false
+                if (wanResult != null) {
+                    discoveryResult = wanResult
+                    scanFailed = false
+                    manualLanUrl = wanResult.serverLanUrl.ifBlank { "http://192.168.2.1:8090" }
+                    manualWanUrl = wanResult.serverWanUrl.ifBlank { "https://deurbel.foxway.nl" }
+                } else {
+                    scanFailed = true
                 }
             } else {
-                scanFailed = true
+                // Phone is on Wi-Fi: scan local /24 subnet on port 8090 in parallel
+                val lanDeferred = async(Dispatchers.IO) {
+                    networkDiscovery.discoverServer(timeoutMs = 2500)
+                }
+
+                val lanResult = lanDeferred.await()
+                if (lanResult != null) {
+                    wanDeferred.cancel()
+                    isScanning = false
+                    discoveryResult = lanResult
+                    scanFailed = false
+                    if (lanResult.serverLanUrl.isNotBlank()) manualLanUrl = lanResult.serverLanUrl
+                    if (lanResult.serverWanUrl.isNotBlank()) manualWanUrl = lanResult.serverWanUrl
+                } else {
+                    // LAN timed out, fallback to WAN cloud probe
+                    val wanResult = wanDeferred.await()
+                    isScanning = false
+                    if (wanResult != null) {
+                        discoveryResult = wanResult
+                        scanFailed = false
+                        if (wanResult.serverLanUrl.isNotBlank()) manualLanUrl = wanResult.serverLanUrl
+                        if (wanResult.serverWanUrl.isNotBlank()) manualWanUrl = wanResult.serverWanUrl
+                    } else {
+                        scanFailed = true
+                    }
+                }
             }
         }
     }
@@ -230,23 +268,50 @@ fun OnboardingScreen(
                         }
                     } else if (discoveryResult != null) {
                         val res = discoveryResult!!
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(10.dp)
-                                    .background(LanGreen, CircleShape)
-                            )
-                            Text(
-                                text = if (res.cameraIp.isNotBlank())
-                                    "✅ Server & Deurbel automatisch gevonden op netwerk (${res.cameraIp})"
-                                else
-                                    "✅ Server automatisch gevonden op netwerk (${res.serverLanUrl})",
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                                color = LanGreen
-                            )
+                        val isWan = res.discoveredViaWan || !networkDiscovery.isWifiConnected()
+
+                        if (isWan) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .background(LanGreen, CircleShape)
+                                )
+                                Column {
+                                    Text(
+                                        text = "✅ Verbonden via 5G Cloud (deurbel.foxway.nl)",
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                        color = LanGreen
+                                    )
+                                    Text(
+                                        text = "Deurbel online op server",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
+                        } else {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .background(LanGreen, CircleShape)
+                                )
+                                Text(
+                                    text = if (res.cameraIp.isNotBlank())
+                                        "✅ Server & Deurbel automatisch gevonden op netwerk (${res.cameraIp})"
+                                    else
+                                        "✅ Server automatisch gevonden op netwerk (${res.serverLanUrl})",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = LanGreen
+                                )
+                            }
                         }
 
                         if (res.cameraConfigured) {
@@ -268,7 +333,10 @@ fun OnboardingScreen(
                                         modifier = Modifier.size(16.dp)
                                     )
                                     Text(
-                                        text = "Deurbel is reeds geconfigureerd. Je hoeft alleen je naam in te vullen!",
+                                        text = if (isWan)
+                                            "Deurbel is reeds geconfigureerd op server."
+                                        else
+                                            "Deurbel is reeds geconfigureerd. Je hoeft alleen je naam in te vullen!",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = EmeraldLight
                                     )
@@ -400,34 +468,52 @@ fun OnboardingScreen(
             // ══════════════════════════════════════════════════════════════
             // Veld 2 & 3 — Deurbel Inloggegevens
             // ══════════════════════════════════════════════════════════════
+            val isWan = discoveryResult?.discoveredViaWan == true || !networkDiscovery.isWifiConnected()
             val isCameraAlreadyConfigured = discoveryResult?.cameraConfigured == true
 
-            if (isCameraAlreadyConfigured) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+            if (isCameraAlreadyConfigured && !isWan) {
+                // Op vertrouwd lokaal Wi-Fi (LAN): standaard ingeklapt onder "⚙️ Deurbel-inloggegevens"
+                Surface(
+                    color = SurfaceVariantDark,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        text = "Camera-inloggegevens reeds opgeslagen",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary
-                    )
-                    TextButton(onClick = { showManualCredentials = !showManualCredentials }) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(
-                            text = if (showManualCredentials) "Sluiten" else "Aanpassen",
-                            color = CyanAccent,
-                            fontSize = 12.sp
+                            text = "⚙️ Deurbel-inloggegevens (al geconfigureerd op server)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
                         )
+                        TextButton(onClick = { showManualCredentials = !showManualCredentials }) {
+                            Text(
+                                text = if (showManualCredentials) "Sluiten" else "Aanpassen",
+                                color = CyanAccent,
+                                fontSize = 12.sp
+                            )
+                        }
                     }
                 }
             }
 
-            if (!isCameraAlreadyConfigured || showManualCredentials) {
+            if (!isCameraAlreadyConfigured || showManualCredentials || isWan) {
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    if (isWan && isCameraAlreadyConfigured) {
+                        Text(
+                            text = "Ter beveiliging op 5G Cloud: controleer gebruikersnaam en wachtwoord.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
+                        )
+                    }
+
                     // Veld 2: Deurbel Gebruikersnaam
                     OutlinedTextField(
                         value = doorbellUser,
@@ -561,8 +647,10 @@ fun OnboardingScreen(
                                 token = bootstrapToken
                             )
 
-                            // 1. Probeer eerst LAN
-                            var resp = if (targetLan != null) {
+                            val isWanOnly = discoveryResult?.discoveredViaWan == true || !networkDiscovery.isWifiConnected()
+
+                            // 1. Probeer eerst LAN indien niet op WAN/5G
+                            var resp = if (!isWanOnly && targetLan != null) {
                                 try {
                                     val lanApi = ApiClientFactory.createApi(targetLan)
                                     lanApi.pair(pairRequest)
@@ -571,7 +659,7 @@ fun OnboardingScreen(
                                 }
                             } else null
 
-                            // 2. Als LAN niet reageert of faalt, probeer WAN
+                            // 2. Als LAN faalt of op 5G/WAN zit: roep direct WAN (https://deurbel.foxway.nl) aan
                             if ((resp == null || !resp.isSuccessful) && targetWan != null) {
                                 try {
                                     val wanApi = ApiClientFactory.createApi(targetWan)
@@ -583,15 +671,22 @@ fun OnboardingScreen(
 
                             if (resp != null && resp.isSuccessful && resp.body() != null) {
                                 val body = resp.body()!!
+                                val lanToSave = body.lanUrl.ifBlank { targetLan ?: "http://192.168.2.1:8090" }
+                                val wanToSave = body.wanUrl.ifBlank { targetWan ?: "https://deurbel.foxway.nl" }
+
                                 prefs.savePairingData(
                                     userId = body.userId,
                                     userName = body.userName,
                                     deviceName = body.deviceName,
                                     jwtToken = body.jwtToken,
-                                    lanUrl = body.lanUrl,
-                                    wanUrl = body.wanUrl,
+                                    lanUrl = lanToSave,
+                                    wanUrl = wanToSave,
                                     go2rtcLanWs = body.go2rtcLanWs,
                                     go2rtcWanWs = body.go2rtcWanWs
+                                )
+                                ConnectionManager.getInstance(context).updateEndpoints(
+                                    lan = lanToSave,
+                                    wan = wanToSave
                                 )
                                 AppLogger.getInstance(context).info("Toestel gekoppeld als ${body.userName}")
                                 onPairingSuccess()

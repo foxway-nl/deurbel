@@ -79,6 +79,11 @@ class DoorbellConnectionService : ConnectionService() {
 
         fun showIncomingCallNotification(context: Context, callId: String, snapshotUrl: String) {
             try {
+                if (CallActivity.isCallActivityVisible) {
+                    Log.i(TAG, "CallActivity is already visible in foreground — suppressing duplicate heads-up notification banner")
+                    cancelCallNotification(context)
+                    return
+                }
                 val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
 
                 val fullScreenIntent = Intent(context, CallActivity::class.java).apply {

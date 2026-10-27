@@ -52,6 +52,8 @@ class CallActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        isCallActivityVisible = true
+        DoorbellConnectionService.cancelCallNotification(this)
 
         callId = intent.getStringExtra(EXTRA_CALL_ID) ?: ""
         snapshotUrl = intent.getStringExtra(EXTRA_SNAPSHOT_URL) ?: ""
@@ -156,6 +158,13 @@ class CallActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         isCallActivityVisible = true
+        DoorbellConnectionService.cancelCallNotification(this)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        isCallActivityVisible = true
+        DoorbellConnectionService.cancelCallNotification(this)
     }
 
     override fun onStop() {

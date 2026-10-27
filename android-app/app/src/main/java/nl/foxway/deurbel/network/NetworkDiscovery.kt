@@ -41,6 +41,13 @@ class NetworkDiscovery(private val context: Context) {
         .retryOnConnectionFailure(false)
         .build()
 
+    private val wanProbeClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(3000, TimeUnit.MILLISECONDS)
+        .readTimeout(3000, TimeUnit.MILLISECONDS)
+        .callTimeout(3500, TimeUnit.MILLISECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
+
     data class DiscoveryResult(
         val serverLanUrl: String,
         val serverWanUrl: String,
@@ -49,8 +56,68 @@ class NetworkDiscovery(private val context: Context) {
         val cameraConfigured: Boolean,
         val doorbellOnline: Boolean,
         val statusMessage: String,
-        val bootstrapToken: String
+        val bootstrapToken: String,
+        val discoveredViaWan: Boolean = false
     )
+
+    /**
+     * Checks if the device is currently connected to an active Wi-Fi network.
+     */
+    fun isWifiConnected(): Boolean {
+        return try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+            val activeNetwork = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(activeNetwork) ?: return false
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Probes the WAN cloud bootstrap endpoint (e.g. https://deurbel.foxway.nl/api/v1/onboarding/bootstrap)
+     * with a 3-second timeout. Works on 5G / cellular and off-site networks.
+     */
+    suspend fun probeWanBootstrap(wanUrl: String = "https://deurbel.foxway.nl"): DiscoveryResult? = withContext(Dispatchers.IO) {
+        val cleanUrl = wanUrl.trimEnd('/')
+        val request = Request.Builder()
+            .url("$cleanUrl/api/v1/onboarding/bootstrap")
+            .get()
+            .build()
+
+        try {
+            wanProbeClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val bodyString = response.body?.string() ?: return@withContext null
+                    val boot = gson.fromJson(bodyString, OnboardingBootstrapResponse::class.java)
+
+                    val lanUrl = boot.serverLanUrl.ifBlank { boot.lanUrl.ifBlank { "http://192.168.2.1:8090" } }
+                    val wanUrlRet = boot.serverWanUrl.ifBlank { boot.wanUrl.ifBlank { cleanUrl } }
+                    val camIp = boot.cameraIp
+                    val camDiscovered = boot.cameraDiscovered || camIp.isNotBlank()
+                    val camConfigured = boot.cameraConfigured || boot.cameraCredentialsConfigured
+
+                    val res = DiscoveryResult(
+                        serverLanUrl = lanUrl,
+                        serverWanUrl = wanUrlRet,
+                        cameraDiscovered = camDiscovered,
+                        cameraIp = camIp,
+                        cameraConfigured = camConfigured,
+                        doorbellOnline = boot.doorbellOnline,
+                        statusMessage = boot.doorbellStatusMessage,
+                        bootstrapToken = boot.bootstrapToken.ifBlank { boot.token },
+                        discoveredViaWan = true
+                    )
+                    updateStoredEndpoints(res)
+                    Log.i(TAG, "WAN bootstrap succeeded via $cleanUrl (Cam Configured: $camConfigured)")
+                    return@withContext res
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "WAN bootstrap probe failed: ${e.message}")
+        }
+        return@withContext null
+    }
 
     /**
      * Determines the active Wi-Fi IPv4 subnet prefix (e.g. "192.168.1." or "10.0.0.").

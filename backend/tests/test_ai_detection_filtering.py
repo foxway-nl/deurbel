@@ -125,3 +125,66 @@ def test_vehicle_displacement_rule():
     dy = history_moving[-1][1] - history_moving[0][1]
     disp_moving = math.hypot(dx, dy) / w
     assert disp_moving >= 0.12, f"Moving car displacement must be >= 0.12, got {disp_moving}"
+
+
+def test_moving_vehicle_past_parked_cars_detected():
+    """
+    Taak 6: Test horizontal vehicle displacement tracking.
+    - Moving car/van past parked cars across >= 3 frames with dx >= 10% width -> DETECTED.
+    - Parked car with jitter dx < 2% width -> IGNORED.
+    """
+    w = 768.0
+
+    # 1. Parked car (jitter only: dx < 0.02 * w)
+    parked_centroids = [(200.0, 150.0), (201.0, 150.5), (200.5, 150.2)]
+    dx_parked = abs(parked_centroids[-1][0] - parked_centroids[0][0])
+    assert dx_parked < 0.02 * w, "Parked car must have displacement < 2% of width"
+    assert not smart_detector.is_vehicle_moving(parked_centroids, width=w), "Parked car must NOT be detected as moving"
+
+    # 2. Driving car / delivery van (consistent horizontal translation: dx >= 0.10 * w)
+    driving_centroids = [(100.0, 180.0), (145.0, 182.0), (190.0, 183.0)]  # dx = 90px > 76.8px (10%)
+    dx_driving = abs(driving_centroids[-1][0] - driving_centroids[0][0])
+    assert dx_driving >= 0.10 * w, f"Moving car dx ({dx_driving}) must be >= 10% of width"
+    assert smart_detector.is_vehicle_moving(driving_centroids, width=w), "Moving car/van MUST be detected as moving"
+
+
+def test_single_frame_rain_streak_ignored():
+    """
+    Taak 6: Test multi-frame anti-rain filter.
+    - 1-frame transient streak (aspect ratio > 3.0 or only 1 frame) -> IGNORED.
+    - True animal across >= 3 frames with overlapping IoU >= 0.25 -> ACCEPTED.
+    """
+    w, h = 768.0, 432.0
+    frame_area = w * h
+
+    # 1. Single-frame rain streak (thin vertical streak: width=4, height=40 -> aspect ratio 0.1 < 0.3)
+    streak_box = (100.0, 50.0, 104.0, 90.0)
+    streak_w = streak_box[2] - streak_box[0]
+    streak_h = streak_box[3] - streak_box[1]
+    streak_aspect = streak_w / streak_h
+    streak_area = (streak_w * streak_h) / frame_area
+
+    # Must fail geometric aspect ratio (aspect < 0.3) and small area
+    assert streak_aspect < 0.3, "Rain streak has aspect ratio < 0.3"
+    assert not smart_detector.is_valid_animal_trajectory(
+        box_history=[streak_box],
+        conf=0.70,
+        label="bird",
+        frame_area=frame_area,
+        is_ir_night=True
+    ), "1-frame rain streak must be rejected"
+
+    # 2. Legitimate animal (cat/dog/bird) across 3 consecutive frames with IoU >= 0.25
+    animal_f1 = (200.0, 250.0, 260.0, 310.0)  # 60x60, area=3600 (0.0108 of frame)
+    animal_f2 = (205.0, 252.0, 265.0, 312.0)
+    animal_f3 = (210.0, 255.0, 270.0, 315.0)
+    animal_history = [animal_f1, animal_f2, animal_f3]
+
+    assert smart_detector.is_valid_animal_trajectory(
+        box_history=animal_history,
+        conf=0.65,
+        label="cat",
+        frame_area=frame_area,
+        is_ir_night=False
+    ), "Real animal with valid 3-frame trajectory must be accepted"
+

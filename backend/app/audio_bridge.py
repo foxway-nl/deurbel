@@ -577,7 +577,7 @@ def _run_acoustic_loopback_sync(rtsp_url: Optional[str] = None) -> dict:
     proc = None
     buf = bytearray()
     running = True
-    first_chunk_event = threading.Event()
+    ready_event = threading.Event()
 
     try:
         proc = subprocess.Popen(
@@ -595,23 +595,27 @@ def _run_acoustic_loopback_sync(rtsp_url: Optional[str] = None) -> dict:
                     if not chunk:
                         break
                     buf.extend(chunk)
-                    if not first_chunk_event.is_set():
-                        first_chunk_event.set()
+                    if len(buf) >= 12800 and not ready_event.is_set():
+                        ready_event.set()
                 except Exception:
                     break
 
         t = threading.Thread(target=reader, daemon=True)
         t.start()
 
-        # Wait until ffmpeg is actively receiving audio before playing the tone
-        first_chunk_event.wait(timeout=3.0)
+        # Wait until mic RTSP reader has actually received >= 0.4s PCM audio (12800 bytes)
+        ready_event.wait(timeout=4.0)
         speaker_ok = send_test_tone_to_doorbell(duration=2.0, volume=0.85)
         time.sleep(1.0)
         running = False
         try:
-            proc.kill()
+            proc.terminate()
+            proc.wait(timeout=1.0)
         except Exception:
-            pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
         t.join(timeout=1.0)
 
         if len(buf) < 16000:

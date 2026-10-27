@@ -28,3 +28,13 @@ async def test_shelly_webhook_trigger_and_debounce(async_client):
     data2 = resp2.json()
     # Second ring is suppressed or maintains active call
     assert data2["status"] in ("SUPPRESSED", "RINGING")
+
+
+@pytest.mark.asyncio
+async def test_shelly_webhook_force_trigger(async_client):
+    resp = await async_client.post("/api/v1/webhook/shelly-ring?force=true")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert "call_id" in data
+

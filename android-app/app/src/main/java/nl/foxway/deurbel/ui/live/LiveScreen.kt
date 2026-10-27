@@ -8,6 +8,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -72,6 +73,17 @@ fun LiveScreen() {
     val liveStream = remember { LiveStreamController.getInstance(context) }
     val frame by liveStream.currentBitmap.collectAsState()
     val isConnected by liveStream.isConnected.collectAsState()
+    val isFrozen by liveStream.isFrozen.collectAsState()
+    val lastNewFrameMs by liveStream.lastNewFrameMs.collectAsState()
+
+    var currentSystemTimeMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(400L)
+            currentSystemTimeMs = System.currentTimeMillis()
+        }
+    }
+    val isActuallyFrozen = isFrozen || (lastNewFrameMs > 0L && (currentSystemTimeMs - lastNewFrameMs) > 2000L)
 
     val audioStreamer = remember { DoorbellAudioStreamer() }
 
@@ -83,7 +95,7 @@ fun LiveScreen() {
     var isRecording by remember { mutableStateOf(false) }
     var recordSeconds by remember { mutableStateOf(0) }
 
-    // Pulsing animation for recording dot
+    // Pulsing animation for recording dot & live indicator
     val infiniteTransition = rememberInfiniteTransition(label = "recording_pulse")
     val pulseAlpha by infiniteTransition.animateFloat(
         initialValue = 1f,
@@ -93,6 +105,15 @@ fun LiveScreen() {
             repeatMode = RepeatMode.Reverse
         ),
         label = "pulse_alpha"
+    )
+    val liveDotPulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.35f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "live_pulse"
     )
 
     // Start live stream when screen enters
@@ -229,6 +250,22 @@ fun LiveScreen() {
                                 panOffsetY = 0f
                             }
                         }
+                    }
+                    .pointerInput(Unit) {
+                        var totalDragY = 0f
+                        detectVerticalDragGestures(
+                            onDragStart = { totalDragY = 0f },
+                            onVerticalDrag = { _, dragAmount ->
+                                if (dragAmount > 0) totalDragY += dragAmount
+                            },
+                            onDragEnd = {
+                                if (totalDragY > 120f) {
+                                    liveStream.restartStream(forceServerRestart = true)
+                                    Toast.makeText(context, "Beeld vernieuwd (Pull-to-Refresh)", Toast.LENGTH_SHORT).show()
+                                }
+                                totalDragY = 0f
+                            }
+                        )
                     },
                 contentAlignment = Alignment.Center
             ) {
@@ -310,38 +347,88 @@ fun LiveScreen() {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Connection badge
-            Surface(
-                color = SurfaceGlass,
-                shape = RoundedCornerShape(20.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, DividerDark)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+            // Connection / Freeze badge
+            if (isActuallyFrozen) {
+                Surface(
+                    color = Color(0xFFF97316).copy(alpha = 0.25f),
+                    shape = RoundedCornerShape(20.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFF97316)),
+                    modifier = Modifier.clickable {
+                        liveStream.restartStream(forceServerRestart = true)
+                        Toast.makeText(context, "Beeld herverbinden…", Toast.LENGTH_SHORT).show()
+                    }
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(10.dp)
-                            .background(
-                                if (!isWanMode) LanGreen else CyanAccent,
-                                CircleShape
-                            )
-                    )
-                    Text(
-                        text = if (!isWanMode) "🟢 Lokaal" else "🔵 Online (5G)",
-                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                        color = TextPrimary
-                    )
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .background(Color(0xFFF97316), CircleShape)
+                        )
+                        Text(
+                            text = "🟠 Beeld bevroren — Herverbinden...",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = Color(0xFFFDBA74)
+                        )
+                    }
+                }
+            } else {
+                Surface(
+                    color = SurfaceGlass,
+                    shape = RoundedCornerShape(20.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, DividerDark)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .alpha(liveDotPulseAlpha)
+                                .background(
+                                    if (!isWanMode) LanGreen else CyanAccent,
+                                    CircleShape
+                                )
+                        )
+                        Text(
+                            text = if (!isWanMode) "🟢 Lokaal" else "🔵 Online (5G)",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = TextPrimary
+                        )
+                    }
                 }
             }
 
-            // Controls: Mute Speaker + Fit/Fill
+            // Controls: Mute Speaker + Fit/Fill + Always-Visible Refresh (🔄)
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Always-visible Round Refresh Button (🔄)
+                Surface(
+                    color = SurfaceGlass,
+                    shape = CircleShape,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, DividerDark),
+                    modifier = Modifier.clickable {
+                        liveStream.restartStream(forceServerRestart = true)
+                        Toast.makeText(context, "Live stream vernieuwen…", Toast.LENGTH_SHORT).show()
+                    }
+                ) {
+                    Box(modifier = Modifier.padding(8.dp)) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Ververs live stream",
+                            tint = CyanAccent,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
                 // Speaker Mute Toggle
                 Surface(
                     color = if (isSpeakerMuted) CoralDecline.copy(alpha = 0.3f) else SurfaceGlass,

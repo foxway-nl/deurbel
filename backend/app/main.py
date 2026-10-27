@@ -163,7 +163,7 @@ async def _doorbell_health_monitor() -> None:
 
             if cam_ip:
                 for port in (cam_port, 554):
-                    if await loop.run_in_executor(None, _check_tcp_port, cam_ip, port, 2.0):
+                    if await loop.run_in_executor(None, _check_tcp_port, cam_ip, port, 5.0):
                         online = True
                         break
 
@@ -733,13 +733,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "2.0.0",
-        "version_code": 11,
-        "build_time": "2026-10-27T18:00:00Z",
+        "version": "2.1.0",
+        "version_code": 12,
+        "build_time": "2026-10-27T23:30:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v2.0.0: Full 5G/WAN dynamic URL routing, forced speakerphone, dynamic network badge, hardened chime debounce",
+        "changelog": "v2.1.0: Anti-freeze live stream architecture, 5G cloud onboarding, instant test trigger, AI vehicle displacement tracking & rain filter",
     }
 
 
@@ -753,12 +753,13 @@ async def app_version_endpoint():
 @app.get("/api/v1/ring")
 @app.post("/api/ring")
 @app.get("/api/ring")
-async def shelly_ring_webhook(request: Request):
+async def shelly_ring_webhook(request: Request, force: bool = False):
     """
     Dedicated webhook endpoint for Shelly Plus Uni chime input trigger.
-    Debounced by 15s to prevent duplicate calls.
+    Debounced by 15s to prevent duplicate calls unless force=True.
     """
-    call = await call_sm.ring()
+    is_force = force or (request.query_params.get("force", "").lower() in ("true", "1"))
+    call = await call_sm.ring(force=is_force)
     if call is None:
         return JSONResponse(status_code=200, content={"status": "SUPPRESSED", "reason": "cooldown or active call"})
 
@@ -766,7 +767,8 @@ async def shelly_ring_webhook(request: Request):
     return JSONResponse(
         status_code=200,
         content={
-            "status": "RINGING",
+            "status": "ok" if is_force else "RINGING",
+            "ring_status": "RINGING",
             "call_id": call.call_id,
             "snapshot_url": snapshot_url,
             "timestamp": call.started_at,
@@ -1253,15 +1255,25 @@ async def frame_jpeg_proxy(src: str = Query("deurbel")):
         raise HTTPException(502, f"Failed fetching live frame: {e}")
 
 
+@app.post("/api/v1/live/restart", tags=["Live Video & Streaming"])
+async def live_stream_restart():
+    """
+    Force immediate live hub stream restart (Anti-Freeze self-heal).
+    Kills any stalled ffmpeg reader and re-initializes within 100ms.
+    """
+    await live_hub.restart()
+    return {"status": "ok", "message": "Live stream reader reset and re-initialized"}
+
+
 @app.get("/api/v1/live/instant.jpg", tags=["Live Video & Streaming"])
 async def get_instant_ram_snapshot():
     """
     Ultra-fast instant 4:3 JPEG snapshot directly from RAM (<5ms).
-    Bypasses RTSP keyframe waiting so the app immediately shows picture.
+    Returns frame only if fresh (<2.5s old). Rejects stale cached frames with 503.
     """
-    frame = live_hub.latest_jpeg
+    frame = live_hub.get_fresh_jpeg()
     if not frame:
-        raise HTTPException(status_code=503, detail="Live stream initializing")
+        raise HTTPException(status_code=503, detail="Live stream initializing or refreshing")
     return Response(
         content=frame,
         media_type="image/jpeg",
@@ -1273,17 +1285,17 @@ async def get_instant_ram_snapshot():
 async def websocket_live_hub_stream(ws: WebSocket):
     """
     Always-Warm RAM Live WebSocket:
-    - Immediately at accept() (0ms): sends b'\\x01' + latest_jpeg from RAM.
+    - Sends fresh b'\\x01' + latest_jpeg from RAM only if decoded within last 2.5s.
     - Realtime pushes video frames (b'\\x01' + jpeg) and 16kHz PCM audio (b'\\x02' + pcm).
-    - Queue maxsize=3 drops delayed frames to guarantee 0.0s lag on 5G & LAN.
+    - Drops stale/queued frames to guarantee zero lag on 5G & LAN.
     """
     await ws.accept()
 
-    # 1. Millisecond 0: Send latest RAM frame immediately
-    latest = live_hub.latest_jpeg
-    if latest:
+    # 1. Millisecond 0: Send latest RAM frame ONLY if fresh (<2.5s)
+    fresh_latest = live_hub.get_fresh_jpeg()
+    if fresh_latest:
         try:
-            await ws.send_bytes(b"\x01" + latest)
+            await ws.send_bytes(b"\x01" + fresh_latest)
         except Exception:
             return
 
@@ -1595,8 +1607,17 @@ async def test_audio_loopback_endpoint():
     2. While recording, transmits 1000 Hz sine wave via Port 8000 SDK to doorbell outdoor speaker for 2.0s.
     3. Runs FFT frequency analysis (numpy.fft.rfft) on captured mic audio.
     4. Verifies peak at 950 Hz - 1050 Hz with SNR calculation.
+    Includes automatic retry (max 2 attempts) if RTSP stream was still cold.
     """
-    return await run_acoustic_loopback_test()
+    last_res = {}
+    for attempt in range(2):
+        last_res = await run_acoustic_loopback_test()
+        if last_res.get("passed"):
+            return last_res
+        if attempt == 0:
+            logger.info("Audio loopback test attempt 1 cold (%s), retrying immediately...", last_res.get("message"))
+            await asyncio.sleep(0.3)
+    return last_res
 
 
 # ══════════════════════════════════════════════════════════════════════
