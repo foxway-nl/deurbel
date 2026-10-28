@@ -557,57 +557,49 @@ class SmartDetector:
         Main continuous 3-Layer Verification Loop.
         Operates on 960x720 4:3 video frames at 5 FPS (0.20s interval).
         """
-        await asyncio.sleep(4)  # Wait for go2rtc & LiveHub initialization
+        await asyncio.sleep(2)  # Wait for LiveHub initialization
         frame_interval = 0.20
+        last_processed_ts = 0.0
 
         while self._running:
-            cfg = await DetectionSettings.load()
-            if not cfg["detection_enabled"]:
-                await asyncio.sleep(4)
-                continue
-
-            cap = None
             try:
-                stream_url = await get_mainstream_rtsp()
-                cap = cv2.VideoCapture(stream_url, cv2.CAP_FFMPEG)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                cfg = await DetectionSettings.load()
+                if not cfg["detection_enabled"]:
+                    await asyncio.sleep(2)
+                    continue
 
-                if not cap.isOpened():
-                    logger.warning("Could not open stream for AI detection, falling back to substream...")
-                    await asyncio.sleep(4)
-                    substream_url = await get_substream_rtsp()
-                    cap = cv2.VideoCapture(substream_url, cv2.CAP_FFMPEG)
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    if not cap.isOpened():
-                        await asyncio.sleep(8)
-                        continue
+                from app.live_hub import live_hub
+                jpeg_bytes = live_hub.get_latest_frame()
+                frame_ts = live_hub.latest_frame_ts
 
-                while self._running:
-                    t_start = time.time()
-                    ret, raw_frame = cap.read()
-                    if not ret or raw_frame is None:
-                        logger.warning("Failed to read video frame for AI, reconnecting...")
-                        break
+                if not jpeg_bytes or frame_ts <= 0 or frame_ts == last_processed_ts:
+                    await asyncio.sleep(0.04)
+                    continue
 
-                    # Resize to crisp native 4:3 resolution (960x720)
+                last_processed_ts = frame_ts
+                now_t = time.time()
+
+                # Decode JPEG directly from RAM (0 extra RTSP connections, 0 extra CPU)
+                raw_frame = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
+                if raw_frame is None:
+                    await asyncio.sleep(0.04)
+                    continue
+
+                # Native 4:3 target resolution (960x720)
+                if raw_frame.shape[1] != 960 or raw_frame.shape[0] != 720:
                     frame_960 = cv2.resize(raw_frame, (960, 720))
-                    now_t = time.time()
+                else:
+                    frame_960 = raw_frame
 
-                    # Run 3-Layer Verification Gatekeeper
-                    await self._process_frame_gatekeeper(frame_960, now_t, cfg)
-
-                    elapsed = time.time() - t_start
-                    sleep_dur = max(0.02, frame_interval - elapsed)
-                    await asyncio.sleep(sleep_dur)
+                # Run 3-Layer Verification Gatekeeper
+                await self._process_frame_gatekeeper(frame_960, now_t, cfg)
+                await asyncio.sleep(frame_interval)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("AI detection loop error: %s", e)
-                await asyncio.sleep(8)
-            finally:
-                if cap is not None:
-                    cap.release()
+                await asyncio.sleep(2)
 
     async def _process_frame_gatekeeper(
         self,
@@ -1022,9 +1014,9 @@ class SmartDetector:
         try:
             from app.recorder import record_smart_clip, ensure_thumbnail, compress_clip_background
             sys_settings = await get_system_settings()
-            preroll = float(sys_settings.get("pre_roll_seconds", "6"))
-            postroll = float(sys_settings.get("post_roll_seconds", "5"))
-            max_duration = float(sys_settings.get("max_clip_seconds", "25"))
+            preroll = float(sys_settings.get("pre_roll_seconds", "20"))
+            postroll = float(sys_settings.get("post_roll_seconds", "20"))
+            max_duration = float(sys_settings.get("max_active_motion_seconds", sys_settings.get("max_clip_seconds", "30")))
 
             duration = await record_smart_clip(
                 clip_id=clip_id,
@@ -1035,12 +1027,13 @@ class SmartDetector:
                 max_duration=max_duration,
             )
 
+            snapshot_path = await ensure_thumbnail(clip_id, clip_path, preroll_seconds=preroll)
             if duration > 0.0:
                 await save_clip(
                     clip_id=clip_id,
                     call_id=clip_id,
                     video_path=clip_path,
-                    snapshot_path=str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg"),
+                    snapshot_path=snapshot_path or str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg"),
                     answered_by=f"AI: {category} ({label})",
                     duration=duration,
                 )

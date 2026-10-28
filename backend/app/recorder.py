@@ -136,7 +136,7 @@ class RamRingBuffer:
                 "-c:a", "aac",
                 "-f", "segment",
                 "-segment_time", "2",
-                "-segment_wrap", "15",
+                "-segment_wrap", "25",
                 "-reset_timestamps", "1",
                 str(self.ring_dir / "seg_%03d.ts"),
             ]
@@ -163,18 +163,35 @@ ring_buffer = RamRingBuffer()
 async def record_smart_clip(
     clip_id: str,
     clip_path: str,
-    preroll_seconds: float = 6.0,
-    postroll_seconds: float = 6.0,
+    preroll_seconds: float = 20.0,
+    postroll_seconds: float = 20.0,
     motion_active_func: Optional[Callable[[], bool]] = None,
-    max_duration: float = 45.0,
+    max_duration: float = 30.0,
+    t0: Optional[float] = None,
 ) -> float:
     """
-    Dynamic Clip-Opbouw:
-      1. Grabs 3 segments prior to T0 (6s Pre-Roll, capturing the lead-up + snapshot).
-      2. Appends incoming 2s segments as long as motion continues.
-      3. Appends 3 segments (6s Post-Roll) after motion stops.
-      4. Stitches & transcodes with nice -n 15 libx264 yuv420p +faststart.
+    Dynamic Clip-Opbouw (v2.4.0):
+      1. Grabs exact segments prior to T0 within [T0 - preroll_seconds, T0] (e.g. 10x 2s = 20s pre-roll).
+      2. Saves immediate snapshot at T0 from live_hub.latest_jpeg.
+      3. Appends incoming 2s segments as long as motion continues (up to max_duration active motion).
+      4. Appends exact postroll_seconds segments (e.g. 10x 2s = 20s post-roll) after motion stops.
+      5. Stitches & transcodes with nice -n 15 libx264 yuv420p +faststart.
     """
+    if t0 is None:
+        t0 = time.time()
+
+    # Save immediate snapshot from live_hub frame if not already present
+    try:
+        from app.live_hub import live_hub
+        snapshot_dest = settings.SNAPSHOTS_DIR / f"{clip_id}.jpg"
+        latest_jpeg = live_hub.get_latest_frame()
+        if latest_jpeg and len(latest_jpeg) > 1000 and (not snapshot_dest.exists() or snapshot_dest.stat().st_size < 1000):
+            snapshot_dest.parent.mkdir(parents=True, exist_ok=True)
+            with open(snapshot_dest, "wb") as f:
+                f.write(latest_jpeg)
+    except Exception as e:
+        logger.debug("Could not save initial snapshot for %s: %s", clip_id, e)
+
     work_dir = RING_BUFFER_DIR / f"work_{clip_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -182,14 +199,18 @@ async def record_smart_clip(
     seen_mtimes: set[float] = set()
 
     try:
-        # 1. Capture Pre-Roll: 4 segments (8 seconds) before trigger T0 to guarantee >=6s
-        # Give ring buffer 0.2s to stabilize
-        await asyncio.sleep(0.2)
+        # 1. Capture Pre-Roll: exactly within [T0 - preroll_seconds, T0]
+        await asyncio.sleep(0.3)
         available = ring_buffer.get_available_segments()
-
-        # The very latest segment is actively being written by ffmpeg, so completed segments are available[:-1]
         completed = available[:-1] if len(available) > 1 else available
-        preroll_segs = completed[-4:] if len(completed) >= 4 else completed
+
+        target_preroll_count = max(1, int(round(preroll_seconds / 2.0)))
+        # Select segments modified between (T0 - preroll_seconds - 2.5s) and (T0 + 1.0s)
+        preroll_segs = [s for s in completed if (t0 - preroll_seconds - 2.5) <= s[0] <= (t0 + 1.0)]
+        if len(preroll_segs) > target_preroll_count:
+            preroll_segs = preroll_segs[-target_preroll_count:]
+        elif not preroll_segs and completed:
+            preroll_segs = completed[-target_preroll_count:]
 
         seq = 0
         for mtime, seg_path in preroll_segs:
@@ -202,12 +223,14 @@ async def record_smart_clip(
             except Exception:
                 pass
 
-        # 2. Active motion & 3-segment (6s) post-roll collection
-        start_time = time.time()
-        last_motion_time = time.time()
-        postroll_segs_collected = 0
+        logger.info(
+            "Smart clip %s pre-roll captured: %d segments (%.1fs) for T0=%.2f",
+            clip_id, len(copied_files), len(copied_files) * 2.0, t0,
+        )
 
-        while (time.time() - start_time) < max_duration:
+        # 2. Active motion collection (capped at max_duration)
+        motion_start = time.time()
+        while (time.time() - motion_start) < max_duration:
             await asyncio.sleep(1.8)
 
             current_segs = ring_buffer.get_available_segments()
@@ -225,13 +248,31 @@ async def record_smart_clip(
                         pass
 
             is_motion = motion_active_func() if motion_active_func else False
-            if is_motion:
-                last_motion_time = time.time()
-                postroll_segs_collected = 0
-            else:
-                postroll_segs_collected += 1
-                if postroll_segs_collected >= 3:  # 3 segments = 6s post-roll
-                    break
+            if not is_motion:
+                break
+
+        # 3. Post-Roll collection: exactly postroll_seconds worth of segments
+        target_postroll_count = max(1, int(round(postroll_seconds / 2.0)))
+        postroll_start = time.time()
+        postroll_segs_collected = 0
+
+        while (time.time() - postroll_start) < (postroll_seconds + 3.0) and postroll_segs_collected < target_postroll_count:
+            await asyncio.sleep(1.8)
+
+            current_segs = ring_buffer.get_available_segments()
+            completed_now = current_segs[:-1] if len(current_segs) > 1 else current_segs
+
+            for mtime, seg_path in completed_now:
+                if mtime not in seen_mtimes:
+                    seen_mtimes.add(mtime)
+                    dest = work_dir / f"clip_{seq:04d}.ts"
+                    try:
+                        shutil.copy2(seg_path, dest)
+                        copied_files.append(dest)
+                        seq += 1
+                        postroll_segs_collected += 1
+                    except Exception:
+                        pass
 
         if not copied_files:
             logger.warning("No segments collected for smart clip %s, falling back to direct record", clip_id)
@@ -404,15 +445,26 @@ async def _record(call_id: str, clip_path: str) -> None:
     )
 
 
-async def ensure_thumbnail(clip_id: str, video_path: Optional[str] = None) -> str:
+async def ensure_thumbnail(clip_id: str, video_path: Optional[str] = None, preroll_seconds: float = 20.0) -> str:
     """
     Ensure a thumbnail exists for a clip. If not present on disk, extract
-    the first clear frame from the MP4 using FFmpeg so no clip ever has
-    a gray/missing thumbnail.
+    the frame at preroll_seconds (the moment of detection) from the MP4 using FFmpeg
+    so no clip ever has a black or gray missing thumbnail.
     """
     snapshot_path = str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg")
-    if os.path.exists(snapshot_path) and os.path.getsize(snapshot_path) > 0:
+    if os.path.exists(snapshot_path) and os.path.getsize(snapshot_path) > 1000:
         return snapshot_path
+
+    # Try live_hub frame if available
+    try:
+        from app.live_hub import live_hub
+        jpeg = live_hub.get_latest_frame()
+        if jpeg and len(jpeg) > 1000:
+            with open(snapshot_path, "wb") as f:
+                f.write(jpeg)
+            return snapshot_path
+    except Exception:
+        pass
 
     if not video_path:
         video_path = str(settings.CLIPS_DIR / f"{clip_id}.mp4")
@@ -421,9 +473,11 @@ async def ensure_thumbnail(clip_id: str, video_path: Optional[str] = None) -> st
         return ""
 
     try:
+        ss_val = max(0.5, preroll_seconds)
         proc = await asyncio.create_subprocess_exec(
+            "nice", "-n", "15",
             "ffmpeg", "-y",
-            "-ss", "00:00:00.500",
+            "-ss", f"{ss_val:.2f}",
             "-i", video_path,
             "-vframes", "1",
             "-q:v", "2",
@@ -433,7 +487,7 @@ async def ensure_thumbnail(clip_id: str, video_path: Optional[str] = None) -> st
         )
         await proc.communicate()
         if os.path.exists(snapshot_path) and os.path.getsize(snapshot_path) > 0:
-            logger.info("Generated thumbnail from video for %s", clip_id)
+            logger.info("Generated thumbnail from video for %s at ss=%.1fs", clip_id, ss_val)
             try:
                 await update_clip(clip_id, snapshot_path=snapshot_path)
             except Exception:
@@ -890,13 +944,12 @@ async def cleanup_today_false_clips() -> dict:
     Purge today's false wind/leaf clips (durations >= 55s created by the old motion crop).
     Leaves user starred clips untouched.
     """
-    import aiosqlite
+    from app.database import get_db
     today_str = datetime.now().strftime("%Y-%m-%d")
     deleted_count = 0
     freed_bytes = 0
 
-    async with aiosqlite.connect(settings.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(write=True) as db:
         cur = await db.execute(
             """
             SELECT clip_id, video_path, snapshot_path 

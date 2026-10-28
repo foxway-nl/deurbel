@@ -289,21 +289,21 @@
                         <h3 class="text-xs font-bold text-purple-400 uppercase tracking-wider">Opname & Cooldown Tijden</h3>
                         
                         <div>
-                            <label class="block text-xs font-medium text-gray-300 mb-1">Pre-Roll Seconden (RAM Buffer)</label>
-                            <input type="number" step="1" min="2" max="15" id="setting-pre_roll_seconds" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-purple-500 focus:outline-none">
-                            <span class="text-[10px] text-gray-500">Standaard: 6s</span>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">Pre-Roll Seconden (RAM Buffer vóór event)</label>
+                            <input type="number" step="1" min="2" max="30" id="setting-pre_roll_seconds" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-purple-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 20s (exact 10 segmenten vóór T0)</span>
                         </div>
 
                         <div>
-                            <label class="block text-xs font-medium text-gray-300 mb-1">Post-Roll Seconden (na verdwijnen)</label>
-                            <input type="number" step="1" min="2" max="15" id="setting-post_roll_seconds" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-purple-500 focus:outline-none">
-                            <span class="text-[10px] text-gray-500">Standaard: 5s</span>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">Post-Roll Seconden (ná verdwijnen object)</label>
+                            <input type="number" step="1" min="2" max="30" id="setting-post_roll_seconds" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-purple-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 20s (exact 10 segmenten)</span>
                         </div>
 
                         <div>
-                            <label class="block text-xs font-medium text-gray-300 mb-1">Max Clip Duur bij AI Beweging (sec)</label>
-                            <input type="number" step="1" min="10" max="60" id="setting-max_clip_seconds" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-purple-500 focus:outline-none">
-                            <span class="text-[10px] text-gray-500">Standaard: 25s (nooit meer 65s wind-clips!)</span>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">Max Actieve Bewegingsduur (sec)</label>
+                            <input type="number" step="1" min="10" max="60" id="setting-max_active_motion_seconds" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-purple-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 30s (Totale clipduur = 20s + beweging + 20s)</span>
                         </div>
 
                         <div>
@@ -574,7 +574,7 @@
             const keys = [
                 'person_conf_threshold', 'vehicle_conf_threshold', 'animal_conf_threshold',
                 'min_person_displacement_pct', 'min_vehicle_displacement_pct', 'verify_frames_required',
-                'pre_roll_seconds', 'post_roll_seconds', 'max_clip_seconds', 'event_cooldown_seconds'
+                'pre_roll_seconds', 'post_roll_seconds', 'max_active_motion_seconds', 'max_clip_seconds', 'event_cooldown_seconds'
             ];
             for (const k of keys) {
                 const el = document.getElementById('setting-' + k);

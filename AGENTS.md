@@ -7,13 +7,14 @@ Welkom in het Foxway Smart Doorbell project. Lees deze regels zorgvuldig voordat
 ## 🚨 HARDE ANTI-REGRESSIE REGELS
 
 1. **NOOIT OUDE SPECS GEBRUIKEN:**
-   - De codebase bevindt zich op versie **v2.3.0** (`versionCode = 14`).
-   - Oude documenten over v1.0 / v2.0 mogen nooit leidend zijn.
+   - De codebase bevindt zich op versie **v2.4.0** (`versionCode = 15`).
+   - Oude documenten over v1.0 / v2.0 / v2.3 mogen nooit leidend zijn.
 
 2. **BESCHERMDE KERN-COMPONENTEN (NIET AANRAKEN):**
    - **Tweeweg-Audio (`backend/app/audio_bridge.py`):** De Hikvision Poort 8000 C-SDK (`libhcnetsdk.so`) met pre-warmed login sessies en 1000 Hz loopback FFT test werkt foutloos. Wijzig deze logica NIET.
    - **4:3 Beeldverhouding:** De EZVIZ DB1 heeft een native 4:3 sensor. Alle videostreams, opnames en Android UI-containers (`LiveScreen.kt`, `CallScreen.kt`, `ClipsScreen.kt`, `/admin`) moeten 4:3 blijven.
-   - **RAM Ring-Buffer:** `/dev/shm/deurbel_ring` schrijft 2-seconden Pre-Roll segmenten in RAM.
+   - **RAM Ring-Buffer & Sourcing:** `/dev/shm/deurbel_ring` schrijft 2-seconden segmenten in RAM (`-segment_wrap 25`). `live_hub.latest_jpeg` dient als de centrale frame-bron voor zowel `ai_detector.py` als `/admin`.
+   - **Gecentraliseerde SQLite WAL (`backend/app/database.py`):** Alle database-operaties verlopen via `get_db()` met WAL mode, busy timeout 60s en write-lock bescherming.
    - **Netwerk & Routing:** Server draait lokaal op `http://192.168.2.1:8090` en extern via Cloudflare op `https://deurbel.foxway.nl`.
 
 3. **SYSTEEMBRONNEN & CGROUP REGELS:**

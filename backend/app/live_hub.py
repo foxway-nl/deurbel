@@ -1,13 +1,14 @@
 """
-Foxway Smart Doorbell — Always-Warm RAM Live Hub.
+Foxway Smart Doorbell — Always-Warm RAM Live Hub (v2.4.0).
 
 Keeps a persistent 24/7 connection to go2rtc RTSP in memory:
-- Decodes 15 fps 4:3 video (768x576) into RAM (self.latest_jpeg).
-- Reads 16kHz mono 16-bit PCM incoming audio from doorbell microphone.
-- Streams realtime frames and audio over WebSocket /api/v1/ws/live (<200ms latency on 5G & LAN).
+- Decodes 10 fps 4:3 video (768x576) into RAM (self.latest_jpeg).
+- Reads 16kHz mono 16-bit PCM incoming audio from doorbell microphone via UDP.
+- Streams realtime frames and audio over WebSocket /api/v1/ws/live (<100ms latency on 5G & LAN).
 - Instant snapshot endpoint /api/v1/live/instant.jpg (<5ms from RAM).
-- Anti-Freeze Watchdog (Task 1): CRC32 validation, 2.0s freshness watchdog,
-  SIGKILL recovery within 100ms, zero stale frame delivery (>2.5s).
+- Zero-lag pipe drain worker ensures freshest frame in RAM with zero OS buffer bloat.
+- Anti-Freeze Watchdog (Task 1): CRC32 validation, 4.0s freshness watchdog,
+  SIGKILL recovery within 100ms.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ class LiveHub:
         self._proc: Optional[subprocess.Popen] = None
         self._udp_sock: Optional[socket.socket] = None
 
-    def is_fresh(self, max_age: float = 2.5, max_age_sec: Optional[float] = None) -> bool:
+    def is_fresh(self, max_age: float = 4.0, max_age_sec: Optional[float] = None) -> bool:
         """Return True only if the latest frame was decoded within the last max_age seconds."""
         limit = max_age_sec if max_age_sec is not None else max_age
         if not self.latest_jpeg:
@@ -56,12 +57,16 @@ class LiveHub:
             return False
         return (time.monotonic() - self.last_fresh_frame_time) <= limit
 
-    def get_fresh_jpeg(self, max_age: float = 2.5, max_age_sec: Optional[float] = None) -> Optional[bytes]:
+    def get_fresh_jpeg(self, max_age: float = 4.0, max_age_sec: Optional[float] = None) -> Optional[bytes]:
         """Get latest JPEG frame only if fresh (<max_age old). Never return stale cached frame."""
         limit = max_age_sec if max_age_sec is not None else max_age
         if self.is_fresh(max_age=limit):
             return self.latest_jpeg
         return None
+
+    def get_latest_frame(self) -> Optional[bytes]:
+        """Returns latest in-memory JPEG frame, or None if stream is not ready."""
+        return self.latest_jpeg
 
     async def start(self) -> None:
         """Start the supervisor background task."""
@@ -157,24 +162,20 @@ class LiveHub:
                 self.last_fresh_frame_time = 0.0
                 self._proc_start_time = time.monotonic()
 
-                # 3. Launch nice -n 15 ffmpeg process with strict timeouts & zero-latency flags
+                # 3. Launch nice -n 15 ffmpeg process with clean, compatible zero-latency flags
                 cmd = [
                     "nice", "-n", "15",
                     "ffmpeg", "-y", "-nostdin",
+                    "-hide_banner", "-loglevel", "error",
                     "-rtsp_transport", "tcp",
-                    "-timeout", "2000000",
                     "-fflags", "nobuffer",
-                    "-flags", "low_latency",
-                    "-avioflags", "direct",
-                    "-fps_mode", "drop",
-                    "-r", "10",
                     "-i", RTSP_SOURCE,
                     "-map", "0:v:0",
-                    "-vf", "scale=768:576,fps=10",
-                    "-q:v", "4",
+                    "-vf", "scale=768:576,setsar=1:1",
+                    "-r", "10",
                     "-f", "image2pipe",
-                    "-flush_packets", "1",
                     "-vcodec", "mjpeg",
+                    "-q:v", "5",
                     "pipe:1",
                     "-map", "0:a:0?",
                     "-f", "s16le",
@@ -251,7 +252,7 @@ class LiveHub:
 
         while self._running and not stop_event.is_set():
             try:
-                chunk = os.read(fd, 65536)
+                chunk = os.read(fd, 16384)
                 if not chunk:
                     break
             except Exception:
@@ -299,9 +300,9 @@ class LiveHub:
     async def _watchdog_loop(self) -> None:
         """
         Anti-Freeze Watchdog (Runs every 1.0s):
-        - If monotonic() - last_fresh_frame_time > 2.0s: kill SIGKILL immediately.
-        - If CRC32 remains identical for >= 15 frames: kill SIGKILL immediately.
-        - If process running >3.0s without receiving any frame: kill SIGKILL immediately.
+        - If monotonic() - last_fresh_frame_time > 4.0s: kill SIGKILL immediately.
+        - If CRC32 remains identical for >= 30 frames: kill SIGKILL immediately.
+        - If process running >15.0s without receiving any frame: kill SIGKILL immediately.
         """
         while self._running:
             await asyncio.sleep(1.0)
@@ -309,8 +310,8 @@ class LiveHub:
                 continue
 
             now = time.monotonic()
-            is_stale_time = (self.last_fresh_frame_time > 0 and (now - self.last_fresh_frame_time > 2.0))
-            is_stale_crc = (self.identical_crc_count >= 15)
+            is_stale_time = (self.last_fresh_frame_time > 0 and (now - self.last_fresh_frame_time > 4.0))
+            is_stale_crc = (self.identical_crc_count >= 30)
             is_stale_startup = (self.last_fresh_frame_time == 0.0 and (now - self._proc_start_time > 15.0))
 
             if is_stale_time or is_stale_crc or is_stale_startup:

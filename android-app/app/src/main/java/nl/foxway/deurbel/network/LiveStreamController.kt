@@ -20,11 +20,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.CRC32
 
 /**
- * Always-Warm Live Stream Controller with Real-Time Freeze Detection & Auto-Heal (v2.3.0).
+ * Always-Warm Live Stream Controller with Real-Time Freeze Detection & Auto-Heal (v2.4.0).
  *
  * Connects to `/api/v1/ws/live` on LAN or WAN/5G over standard port 8090/443:
  *  - First frame arrives in <100ms directly from server RAM.
  *  - Decodes 4:3 JPEG video frames into [currentBitmap] using RGB_565 (50% RAM savings, OOM protected).
+ *  - Automatic 150ms HTTP instant snapshot fallback whenever WebSocket is connecting or delayed.
  *  - AudioTrack operations protected by mutex/lock and state validation.
  *  - Tracks [lastNewFrameMs] and [isFrozen] state for live status indicators.
  *  - Triggers automatic background reconnect + /api/v1/live/restart when frozen >2.0s.
@@ -73,10 +74,12 @@ class LiveStreamController private constructor(private val context: Context) {
     private val isRunning = AtomicBoolean(false)
     private var reconnectJob: Job? = null
     private var freezeWatchdogJob: Job? = null
+    private var httpFallbackJob: Job? = null
 
     init {
         initAudioTrack()
         startFreezeWatchdog()
+        startHttpFallbackWatcher()
     }
 
     fun forceSpeakerphone() {
@@ -150,13 +153,60 @@ class LiveStreamController private constructor(private val context: Context) {
                 if (isRunning.get() && _isConnected.value) {
                     val last = _lastNewFrameMs.value
                     val now = System.currentTimeMillis()
-                    if (last > 0L && (now - last) > 2000L) {
+                    if (last > 0L && (now - last) > 2500L) {
                         if (!_isFrozen.value) {
                             _isFrozen.value = true
-                            Log.w(TAG, "Live stream freeze detected (>2.0s without fresh frame). Auto-healing...")
+                            Log.w(TAG, "Live stream freeze detected (>2.5s without fresh frame). Auto-healing...")
                             restartStream(forceServerRestart = true)
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /**
+     * HTTP Instant Snapshot Fallback:
+     * When WebSocket is connecting, stalled, or behind a restrictive proxy,
+     * automatically polls /api/v1/live/instant.jpg every 150ms so video never blacks out.
+     */
+    private fun startHttpFallbackWatcher() {
+        httpFallbackJob?.cancel()
+        httpFallbackJob = scope.launch(Dispatchers.IO) {
+            val httpClient = OkHttpClient.Builder()
+                .connectTimeout(1500, TimeUnit.MILLISECONDS)
+                .readTimeout(1500, TimeUnit.MILLISECONDS)
+                .build()
+
+            while (isActive) {
+                delay(150L)
+                if (!isRunning.get()) continue
+
+                val now = System.currentTimeMillis()
+                val lastFrame = _lastNewFrameMs.value
+                // If no frame has arrived for >1200ms, immediately fetch via HTTP fallback
+                if (lastFrame == 0L || (now - lastFrame) > 1200L) {
+                    try {
+                        val activeBase = connectionManager.activeBaseUrl.value.ifBlank { "https://deurbel.foxway.nl" }
+                        val url = "$activeBase/api/v1/live/instant.jpg?t=$now"
+                        val req = Request.Builder().url(url).build()
+                        httpClient.newCall(req).execute().use { resp ->
+                            if (resp.isSuccessful) {
+                                val bytes = resp.body?.bytes()
+                                if (bytes != null && bytes.size > 1000) {
+                                    val options = BitmapFactory.Options().apply {
+                                        inPreferredConfig = Bitmap.Config.RGB_565
+                                    }
+                                    val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+                                    if (bmp != null) {
+                                        _currentBitmap.value = bmp
+                                        _lastNewFrameMs.value = System.currentTimeMillis()
+                                        _isFrozen.value = false
+                                    }
+                                }
+                            }
+                        }
+                    } catch (_: Throwable) {}
                 }
             }
         }

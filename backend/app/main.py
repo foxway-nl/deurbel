@@ -736,13 +736,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "2.3.0",
-        "version_code": 14,
-        "build_time": "2026-10-28T15:00:00Z",
+        "version": "2.4.0",
+        "version_code": 15,
+        "build_time": "2026-10-28T18:30:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v2.3.0: 3-Laags VerificationGatekeeper, <1.5s directe push, zero-lag live stream, /admin webpaneel, en Android crash-logger",
+        "changelog": "v2.4.0: Herstel live beeld, zero-lag drain, 20s/20s pre/post-roll, SQLite WAL concurrency & HTTP fallback",
     }
 
 
@@ -1098,7 +1098,7 @@ async def cleanup_unclassified_clips(include_unstarred_vehicles: bool = Query(Tr
     """
     Cleans up junk unclassified and unstarred motion/vehicle clips to free server storage.
     """
-    import aiosqlite
+    from app.database import get_db
     deleted_count = 0
     freed_bytes = 0
 
@@ -1106,8 +1106,7 @@ async def cleanup_unclassified_clips(include_unstarred_vehicles: bool = Query(Tr
     if include_unstarred_vehicles:
         where_clause += " OR (starred = 0 AND clip_id LIKE 'ai_vehicle_%')"
 
-    async with aiosqlite.connect(settings.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(write=True) as db:
         cur = await db.execute(f"SELECT clip_id, video_path, snapshot_path FROM clips WHERE {where_clause}")
         rows = await cur.fetchall()
 
@@ -1276,15 +1275,19 @@ async def live_stream_restart():
 async def get_instant_ram_snapshot():
     """
     Ultra-fast instant 4:3 JPEG snapshot directly from RAM (<5ms).
-    Returns frame only if fresh (<2.5s old). Rejects stale cached frames with 503.
+    Returns fresh frame or latest in-memory JPEG frame with zero-cache headers.
     """
-    frame = live_hub.get_fresh_jpeg()
+    frame = live_hub.get_fresh_jpeg(max_age=5.0) or live_hub.get_latest_frame()
     if not frame:
         raise HTTPException(status_code=503, detail="Live stream initializing or refreshing")
     return Response(
         content=frame,
         media_type="image/jpeg",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
     )
 
 
@@ -1298,16 +1301,15 @@ async def websocket_live_hub_stream(ws: WebSocket):
     """
     await ws.accept()
 
-    # 1. Millisecond 0: Send latest RAM frame ONLY if fresh (<2.5s)
-    fresh_latest = live_hub.get_fresh_jpeg()
-    if fresh_latest:
-        try:
-            await ws.send_bytes(b"\x01" + fresh_latest)
-        except Exception:
-            return
-
     client_queue = live_hub.register_client()
     try:
+        # Millisecond 0: Send latest RAM frame immediately (<10ms)
+        fresh_latest = live_hub.get_fresh_jpeg(max_age=5.0) or live_hub.get_latest_frame()
+        if fresh_latest:
+            try:
+                await ws.send_bytes(b"\x01" + fresh_latest)
+            except Exception:
+                return
         async def sender():
             while True:
                 data = await client_queue.get()

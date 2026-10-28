@@ -351,3 +351,4 @@ async def ingest_client_crash(body: ClientCrashReport):
         screen_state=body.screen_state,
     )
     return {"status": "ok", "log_id": log_id, "message": "Crash stacktrace gelogd"}
+

@@ -1,8 +1,8 @@
 """
 Foxway Smart Doorbell — Pydantic schemas & SQLite persistence.
 
-Stores paired family devices, call logs, and clip metadata in a single
-lightweight SQLite database on the NAS volume.
+Stores paired family devices, call logs, clip metadata, system settings,
+and audit logs in a robust SQLite database using WAL mode and write-lock serialization.
 """
 
 from __future__ import annotations
@@ -14,10 +14,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-import aiosqlite
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.database import get_db, init_wal_mode
 
 # ──────────────────────────────────────────────────────────────────────
 #  Pydantic request / response schemas
@@ -48,10 +48,10 @@ class PairResponse(BaseModel):
     user_name: str
     device_name: str
     jwt_token: str
-    lan_url: str
-    wan_url: str
-    go2rtc_lan_ws: str
-    go2rtc_wan_ws: str
+    lan_url: str = ""
+    wan_url: str = ""
+    go2rtc_lan_ws: str = ""
+    go2rtc_wan_ws: str = ""
 
 
 class UserInfo(BaseModel):
@@ -64,21 +64,40 @@ class UserInfo(BaseModel):
     last_seen: str = ""
 
 
-# — Ring —
+class DeviceInfo(BaseModel):
+    user_id: str
+    user_name: str
+    device_name: str
+    fcm_token: str
+    paired_at: str
+    last_seen: str = ""
+    device_id: str = ""
+    android_version: str = ""
+    connection_type: str = ""
+
 
 class RingEvent(BaseModel):
     call_id: str
     state: CallState
     snapshot_url: str
     timestamp: str
+    android_version: str = ""
+    connection_type: str = ""
 
 
-# — Claim —
+# — Call state machine —
+
+class RingRequest(BaseModel):
+    caller_name: Optional[str] = "Bezoeker"
+
 
 class ClaimRequest(BaseModel):
     user_id: str
     user_name: str
     call_id: Optional[str] = None
+
+
+CallClaimRequest = ClaimRequest
 
 
 class ClaimResponse(BaseModel):
@@ -87,11 +106,50 @@ class ClaimResponse(BaseModel):
     answered_by: Optional[str] = None
 
 
-# — Quick-reply —
+class CallHangupRequest(BaseModel):
+    user_id: Optional[str] = None
+    reason: Optional[str] = "Normal hangup"
+
 
 class QuickReplyRequest(BaseModel):
-    reply_id: str = Field(..., examples=["pakketje", "kom_eraan"])
-    user_name: str
+    audio_file: Optional[str] = None
+    reply_id: Optional[str] = None
+    user_id: Optional[str] = None
+    user_name: Optional[str] = None
+    call_id: Optional[str] = None
+
+
+class CallStatusResponse(BaseModel):
+    state: CallState
+    call_id: Optional[str] = None
+    started_at: Optional[str] = None
+    answered_by: Optional[str] = None
+    active_user_name: Optional[str] = None
+    snapshot_url: Optional[str] = None
+    participants: list[str] = []
+    quick_replies: list[dict] = []
+
+
+class CallLogItem(BaseModel):
+    call_id: str
+    started_at: str
+    ended_at: Optional[str] = None
+    answered_by: Optional[str] = None
+    state: str
+    snapshot_path: Optional[str] = None
+    clip_path: Optional[str] = None
+
+
+# — Event —
+
+class EventItem(BaseModel):
+    id: int
+    type: str  # "ring" | "motion"
+    category: str = "general"
+    title: str = "Gebeurtenis"
+    created_at: str
+    clip_id: Optional[str] = None
+    snapshot_url: Optional[str] = None
     call_id: Optional[str] = None
 
 
@@ -128,52 +186,52 @@ _DB_PATH = str(settings.DB_PATH)
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS devices (
-    user_id       TEXT PRIMARY KEY,
-    user_name     TEXT NOT NULL,
-    device_name   TEXT NOT NULL,
-    fcm_token     TEXT NOT NULL DEFAULT '',
-    jwt_token     TEXT NOT NULL,
-    paired_at     TEXT NOT NULL,
-    last_seen     TEXT DEFAULT ''
+    user_id     TEXT PRIMARY KEY,
+    user_name   TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    fcm_token   TEXT NOT NULL,
+    jwt_token   TEXT NOT NULL,
+    paired_at   TEXT NOT NULL,
+    last_seen   TEXT DEFAULT '',
+    device_id   TEXT DEFAULT '',
+    android_version TEXT DEFAULT '',
+    connection_type TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS call_logs (
     call_id       TEXT PRIMARY KEY,
     started_at    TEXT NOT NULL,
     ended_at      TEXT,
-    state         TEXT NOT NULL DEFAULT 'RINGING',
     answered_by   TEXT,
-    answered_by_user_id TEXT,
+    state         TEXT NOT NULL,
     snapshot_path TEXT,
-    clip_path     TEXT,
-    duration      REAL DEFAULT 0.0
+    clip_path     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS clips (
     clip_id       TEXT PRIMARY KEY,
     call_id       TEXT,
     created_at    TEXT NOT NULL,
-    duration      REAL DEFAULT 0.0,
+    duration      REAL NOT NULL DEFAULT 0.0,
     snapshot_path TEXT,
     video_path    TEXT NOT NULL,
     answered_by   TEXT,
-    starred       INTEGER DEFAULT 0,
-    FOREIGN KEY (call_id) REFERENCES call_logs(call_id)
-);
-
-CREATE TABLE IF NOT EXISTS app_settings (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
+    starred       INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS events (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     type          TEXT NOT NULL,
-    category      TEXT NOT NULL,
+    category      TEXT DEFAULT 'general',
     title         TEXT NOT NULL,
-    clip_id       TEXT DEFAULT '',
-    snapshot_url  TEXT DEFAULT '',
+    clip_id       TEXT,
+    snapshot_url  TEXT,
     created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS system_settings (
@@ -210,26 +268,21 @@ CREATE TABLE IF NOT EXISTS crash_logs (
 
 
 async def init_db() -> None:
-    """Create tables if they don't exist and run schema migrations."""
-    async with aiosqlite.connect(_DB_PATH) as db:
+    """Create tables if they don't exist, initialize WAL mode, and run schema migrations."""
+    init_wal_mode()
+    async with get_db(write=True) as db:
         await db.executescript(_SCHEMA_SQL)
         # Migration: ensure last_seen, device_id, android_version, connection_type columns exist
-        try:
-            await db.execute("ALTER TABLE devices ADD COLUMN last_seen TEXT DEFAULT ''")
-        except Exception:
-            pass
-        try:
-            await db.execute("ALTER TABLE devices ADD COLUMN device_id TEXT DEFAULT ''")
-        except Exception:
-            pass
-        try:
-            await db.execute("ALTER TABLE devices ADD COLUMN android_version TEXT DEFAULT ''")
-        except Exception:
-            pass
-        try:
-            await db.execute("ALTER TABLE devices ADD COLUMN connection_type TEXT DEFAULT ''")
-        except Exception:
-            pass
+        for col_def in [
+            "last_seen TEXT DEFAULT ''",
+            "device_id TEXT DEFAULT ''",
+            "android_version TEXT DEFAULT ''",
+            "connection_type TEXT DEFAULT ''",
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE devices ADD COLUMN {col_def}")
+            except Exception:
+                pass
 
         # Deduplicate stale duplicate registrations keeping the newest record
         try:
@@ -252,7 +305,8 @@ async def init_db() -> None:
         except Exception:
             pass
 
-        # Seed default system_settings
+        # Seed default system_settings (v2.4.0 standards: 20s pre-roll, 20s post-roll, 30s max motion)
+        now_iso = datetime.now(timezone.utc).isoformat()
         default_settings = [
             ("person_conf_threshold", "0.52", "Minimale betrouwbaarheid voor personen (0.1 - 1.0)"),
             ("vehicle_conf_threshold", "0.55", "Minimale betrouwbaarheid voor voertuigen (0.1 - 1.0)"),
@@ -260,9 +314,10 @@ async def init_db() -> None:
             ("min_person_displacement_pct", "6.0", "Minimale verplaatsing persoon (% schermbreedte)"),
             ("min_vehicle_displacement_pct", "12.0", "Minimale verplaatsing voertuig (% schermbreedte)"),
             ("verify_frames_required", "3", "Aantal opeenvolgende frames voor traject-verificatie"),
-            ("pre_roll_seconds", "6", "Pre-roll seconden uit RAM buffer"),
-            ("post_roll_seconds", "5", "Post-roll seconden na object verdwijnt"),
-            ("max_clip_seconds", "25", "Maximale opnameduur bij AI detectie (sec)"),
+            ("pre_roll_seconds", "20", "Pre-roll seconden uit RAM buffer vóór gebeurtenis"),
+            ("post_roll_seconds", "20", "Post-roll seconden ná verdwijnen van object"),
+            ("max_active_motion_seconds", "30", "Maximale actieve bewegingsduur tijdens opname (sec)"),
+            ("max_clip_seconds", "70", "Totale maximale clipduur (sec)"),
             ("event_cooldown_seconds", "20", "Afkoelperiode tussen opeenvolgende meldingen (sec)"),
             ("ring_ding_hz", "728", "Frequentie Ding toonbel (Hz)"),
             ("ring_dong_hz", "580", "Frequentie Dong toonbel (Hz)"),
@@ -270,7 +325,6 @@ async def init_db() -> None:
             ("exclusion_zones", "[]", "JSON lijst van gemaskeerde zones [x1, y1, x2, y2]"),
             ("admin_password", "foxway2024", "Beheerderswachtwoord voor /admin"),
         ]
-        now_iso = datetime.now(timezone.utc).isoformat()
         for k, v, desc in default_settings:
             try:
                 await db.execute(
@@ -280,26 +334,38 @@ async def init_db() -> None:
             except Exception:
                 pass
 
+        # Migration: update pre_roll_seconds and post_roll_seconds if still old defaults
+        try:
+            await db.execute("UPDATE system_settings SET value = '20' WHERE key = 'pre_roll_seconds' AND value = '6'")
+            await db.execute("UPDATE system_settings SET value = '20' WHERE key = 'post_roll_seconds' AND value = '5'")
+            await db.execute(
+                "INSERT OR IGNORE INTO system_settings (key, value, description, updated_at) VALUES ('max_active_motion_seconds', '30', 'Maximale actieve bewegingsduur tijdens opname (sec)', ?)",
+                (now_iso,),
+            )
+        except Exception:
+            pass
+
         # Cleanup orphan events without a valid clip_id in clips table and deduplicate to strict 1-to-1 coupling
         try:
             await db.execute("""
                 DELETE FROM events
-                WHERE clip_id NOT IN (SELECT clip_id FROM clips)
-                   OR clip_id IS NULL
-                   OR clip_id = ''
+                WHERE clip_id IS NOT NULL
+                  AND clip_id != ''
+                  AND clip_id NOT IN (SELECT clip_id FROM clips)
+                  AND (julianday('now') - julianday(created_at)) >= 0.003
             """)
             await db.execute("""
                 DELETE FROM events
                 WHERE id NOT IN (
-                    SELECT max(id)
+                    SELECT MIN(id)
                     FROM events
+                    WHERE clip_id IS NOT NULL AND clip_id != ''
                     GROUP BY clip_id
                 )
+                AND clip_id IS NOT NULL AND clip_id != ''
             """)
         except Exception:
             pass
-
-        await db.commit()
 
 
 # ── Device helpers ────────────────────────────────────────────────────
@@ -313,8 +379,7 @@ async def find_existing_device(
     clean_user = (user_name or "").strip().lower()
     clean_dev_id = (device_id or "").strip()
     clean_dev_name = (device_name or "").strip().lower()
-    async with aiosqlite.connect(_DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(write=False) as db:
         if clean_dev_id:
             cursor = await db.execute("SELECT * FROM devices WHERE device_id = ?", (clean_dev_id,))
             row = await cursor.fetchone()
@@ -336,8 +401,7 @@ async def is_username_taken(user_name: str, device_id: str = "", device_name: st
     clean_user = (user_name or "").strip().lower()
     clean_dev_id = (device_id or "").strip()
     clean_dev_name = (device_name or "").strip().lower()
-    async with aiosqlite.connect(_DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(write=False) as db:
         cursor = await db.execute("SELECT * FROM devices WHERE LOWER(TRIM(user_name)) = ?", (clean_user,))
         rows = await cursor.fetchall()
         for r in rows:
@@ -353,7 +417,7 @@ async def is_username_taken(user_name: str, device_id: str = "", device_name: st
 
 async def get_next_default_username() -> str:
     """Return next available 'Onbekend #X' username."""
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=False) as db:
         cursor = await db.execute("SELECT user_name FROM devices WHERE user_name LIKE 'Onbekend #%'")
         rows = await cursor.fetchall()
         existing_numbers = set()
@@ -380,7 +444,7 @@ async def save_device(
     connection_type: str = "",
 ) -> None:
     now_iso = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         await db.execute(
             """
             INSERT INTO devices (user_id, user_name, device_name, fcm_token, jwt_token, paired_at, last_seen, device_id, android_version, connection_type)
@@ -398,7 +462,6 @@ async def save_device(
             """,
             (user_id, user_name, device_name, fcm_token, jwt_token, now_iso, now_iso, device_id, android_version, connection_type),
         )
-        await db.commit()
 
 
 async def get_camera_credentials() -> dict:
@@ -426,46 +489,41 @@ async def set_camera_credentials(ip: str, port: int, user: str, password: str) -
 
 async def delete_device(user_id: str) -> bool:
     """Delete a paired device by user_id."""
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         cursor = await db.execute("DELETE FROM devices WHERE user_id = ?", (user_id,))
-        await db.commit()
         return cursor.rowcount > 0
 
 
 async def update_device_last_seen(user_id: str, last_seen: Optional[str] = None) -> None:
     if not last_seen:
         last_seen = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         await db.execute(
             "UPDATE devices SET last_seen = ? WHERE user_id = ?",
             (last_seen, user_id),
         )
-        await db.commit()
 
 
 async def get_all_devices() -> list[dict]:
-    async with aiosqlite.connect(_DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(write=False) as db:
         cursor = await db.execute("SELECT * FROM devices")
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
 
 async def get_device(user_id: str) -> Optional[dict]:
-    async with aiosqlite.connect(_DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(write=False) as db:
         cursor = await db.execute("SELECT * FROM devices WHERE user_id = ?", (user_id,))
         row = await cursor.fetchone()
         return dict(row) if row else None
 
 
 async def update_fcm_token(user_id: str, fcm_token: str) -> None:
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         await db.execute(
             "UPDATE devices SET fcm_token = ? WHERE user_id = ?",
             (fcm_token, user_id),
         )
-        await db.commit()
 
 
 # ── Call log helpers ──────────────────────────────────────────────────
@@ -476,7 +534,7 @@ async def save_call_log(
     snapshot_path: str = "",
     clip_path: str = "",
 ) -> None:
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         await db.execute(
             """
             INSERT INTO call_logs (call_id, started_at, state, snapshot_path, clip_path)
@@ -488,7 +546,6 @@ async def save_call_log(
             """,
             (call_id, datetime.now(timezone.utc).isoformat(), state, snapshot_path, clip_path),
         )
-        await db.commit()
 
 
 async def update_call_log(call_id: str, **fields) -> None:
@@ -496,17 +553,15 @@ async def update_call_log(call_id: str, **fields) -> None:
         return
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [call_id]
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         await db.execute(
             f"UPDATE call_logs SET {set_clause} WHERE call_id = ?",
             values,
         )
-        await db.commit()
 
 
 async def get_call_log(call_id: str) -> Optional[dict]:
-    async with aiosqlite.connect(_DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(write=False) as db:
         cursor = await db.execute("SELECT * FROM call_logs WHERE call_id = ?", (call_id,))
         row = await cursor.fetchone()
         return dict(row) if row else None
@@ -522,7 +577,7 @@ async def save_clip(
     answered_by: str = "",
     duration: float = 0.0,
 ) -> None:
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         await db.execute(
             """
             INSERT INTO clips (clip_id, call_id, created_at, duration, snapshot_path, video_path, answered_by)
@@ -534,12 +589,10 @@ async def save_clip(
             """,
             (clip_id, call_id, datetime.now(timezone.utc).isoformat(), duration, snapshot_path, video_path, answered_by),
         )
-        await db.commit()
 
 
 async def list_clips(limit: int = 100, offset: int = 0) -> list[dict]:
-    async with aiosqlite.connect(_DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(write=False) as db:
         cursor = await db.execute(
             "SELECT * FROM clips ORDER BY created_at DESC LIMIT ? OFFSET ?",
             (limit, offset),
@@ -549,17 +602,15 @@ async def list_clips(limit: int = 100, offset: int = 0) -> list[dict]:
 
 
 async def get_clip(clip_id: str) -> Optional[dict]:
-    async with aiosqlite.connect(_DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(write=False) as db:
         cursor = await db.execute("SELECT * FROM clips WHERE clip_id = ?", (clip_id,))
         row = await cursor.fetchone()
         return dict(row) if row else None
 
 
 async def delete_clip(clip_id: str) -> bool:
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         cursor = await db.execute("DELETE FROM clips WHERE clip_id = ?", (clip_id,))
-        await db.commit()
         return cursor.rowcount > 0
 
 
@@ -568,18 +619,16 @@ async def update_clip(clip_id: str, **fields) -> None:
         return
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [clip_id]
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         await db.execute(
             f"UPDATE clips SET {set_clause} WHERE clip_id = ?",
             values,
         )
-        await db.commit()
 
 
 async def get_expired_clips(retention_days: int) -> list[dict]:
     """Return clips older than *retention_days* that are not starred."""
-    async with aiosqlite.connect(_DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(write=False) as db:
         cursor = await db.execute(
             """
             SELECT * FROM clips
@@ -594,8 +643,7 @@ async def get_expired_clips(retention_days: int) -> list[dict]:
 
 async def get_unlocked_clips_oldest_first() -> list[dict]:
     """Return all clips where starred = 0, sorted oldest first (for storage cap pruning)."""
-    async with aiosqlite.connect(_DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(write=False) as db:
         cursor = await db.execute("SELECT * FROM clips WHERE starred = 0 ORDER BY created_at ASC")
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
@@ -603,7 +651,7 @@ async def get_unlocked_clips_oldest_first() -> list[dict]:
 
 async def get_setting(key: str, default: str = "") -> str:
     """Retrieve an application setting by key."""
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=False) as db:
         cursor = await db.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
         row = await cursor.fetchone()
         return row[0] if row else default
@@ -611,12 +659,11 @@ async def get_setting(key: str, default: str = "") -> str:
 
 async def set_setting(key: str, value: str) -> None:
     """Save or update an application setting."""
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         await db.execute(
             "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
-        await db.commit()
 
 
 async def save_event(
@@ -628,7 +675,7 @@ async def save_event(
 ) -> dict:
     """Record an event (ring or confirmed motion) in the events table."""
     now_iso = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         cursor = await db.execute(
             """
             INSERT INTO events (type, category, title, clip_id, snapshot_url, created_at)
@@ -636,7 +683,6 @@ async def save_event(
             """,
             (event_type, category, title, clip_id, snapshot_url, now_iso),
         )
-        await db.commit()
         event_id = cursor.lastrowid
         return {
             "id": event_id,
@@ -654,10 +700,9 @@ async def get_events_since(since_id: int = 0, limit: int = 50, order: str = "asc
     Retrieve new events with strict clip coupling or recent active event window.
     If order == 'desc' or (since_id == 0 and limit == 1), returns the latest events.
     Permits events coupled to clips table OR events created in the last 180 seconds
-    (so immediate push notifications are visible on phone before 25s video finishes recording).
+    (so immediate push notifications are visible on phone before video finishes recording).
     """
-    async with aiosqlite.connect(_DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(write=False) as db:
         filter_clause = """
             (e.clip_id IN (SELECT clip_id FROM clips) 
              OR (julianday('now') - julianday(e.created_at)) < 0.003)
@@ -703,7 +748,7 @@ async def set_dynamic_wan_url(url: str) -> None:
 
 async def get_system_settings() -> dict[str, str]:
     """Return all system settings as a dictionary."""
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=False) as db:
         cursor = await db.execute("SELECT key, value FROM system_settings")
         rows = await cursor.fetchall()
         return {r[0]: r[1] for r in rows}
@@ -711,7 +756,7 @@ async def get_system_settings() -> dict[str, str]:
 
 async def get_system_setting(key: str, default: str = "") -> str:
     """Get a single system setting value by key."""
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=False) as db:
         cursor = await db.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
         row = await cursor.fetchone()
         return row[0] if row else default
@@ -720,7 +765,7 @@ async def get_system_setting(key: str, default: str = "") -> str:
 async def set_system_setting(key: str, value: str, description: str = "") -> None:
     """Update or insert a system setting."""
     now_iso = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         if description:
             await db.execute(
                 """
@@ -739,13 +784,12 @@ async def set_system_setting(key: str, value: str, description: str = "") -> Non
                 """,
                 (key, value, now_iso),
             )
-        await db.commit()
 
 
 async def update_system_settings(updates: dict[str, str]) -> None:
     """Batch update multiple system settings."""
     now_iso = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         for k, v in updates.items():
             await db.execute(
                 """
@@ -755,7 +799,6 @@ async def update_system_settings(updates: dict[str, str]) -> None:
                 """,
                 (k, str(v), now_iso),
             )
-        await db.commit()
 
 
 # ── AI Audit Logs (Task 1 & Task 3) ──────────────────────────────────
@@ -772,7 +815,7 @@ async def save_ai_audit_log(
 ) -> int:
     """Record an AI evaluation attempt (both APPROVED and REJECTED) for auditing."""
     now_iso = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         cursor = await db.execute(
             """
             INSERT INTO ai_audit_logs (timestamp, status, category, label, confidence, displacement_pct, reason, snapshot_path, boxes_json)
@@ -780,14 +823,12 @@ async def save_ai_audit_log(
             """,
             (now_iso, status, category, label, confidence, displacement_pct, reason, snapshot_path, boxes_json),
         )
-        await db.commit()
         return cursor.lastrowid or 0
 
 
 async def get_recent_ai_audit_logs(limit: int = 50) -> list[dict]:
     """Return the most recent AI verification audit logs."""
-    async with aiosqlite.connect(_DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(write=False) as db:
         cursor = await db.execute(
             "SELECT * FROM ai_audit_logs ORDER BY id DESC LIMIT ?",
             (max(1, min(limit, 200)),),
@@ -808,7 +849,7 @@ async def save_crash_log(
 ) -> int:
     """Save an Android client crash stacktrace."""
     now_iso = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with get_db(write=True) as db:
         cursor = await db.execute(
             """
             INSERT INTO crash_logs (timestamp, device_name, device_id, app_version, error_message, stacktrace, screen_state)
@@ -816,19 +857,15 @@ async def save_crash_log(
             """,
             (now_iso, device_name, device_id, app_version, error_message, stacktrace, screen_state),
         )
-        await db.commit()
         return cursor.lastrowid or 0
 
 
 async def get_recent_crash_logs(limit: int = 50) -> list[dict]:
     """Retrieve recent client crash logs."""
-    async with aiosqlite.connect(_DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db(write=False) as db:
         cursor = await db.execute(
             "SELECT * FROM crash_logs ORDER BY id DESC LIMIT ?",
             (max(1, min(limit, 200)),),
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
-
-
