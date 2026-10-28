@@ -736,13 +736,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "2.4.0",
-        "version_code": 15,
-        "build_time": "2026-10-28T18:30:00Z",
+        "version": "2.5.0",
+        "version_code": 16,
+        "build_time": "2026-10-28T22:45:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v2.4.0: Herstel live beeld, zero-lag drain, 20s/20s pre/post-roll, SQLite WAL concurrency & HTTP fallback",
+        "changelog": "v2.5.0: Anti-freeze camera clock watchdog, epoch ts segments, person priority vehicle filter, telecom deduplication, clean 4-card settings",
     }
 
 
@@ -1265,10 +1265,11 @@ async def frame_jpeg_proxy(src: str = Query("deurbel")):
 async def live_stream_restart():
     """
     Force immediate live hub stream restart (Anti-Freeze self-heal).
-    Kills any stalled ffmpeg reader and re-initializes within 100ms.
+    Kills any stalled ffmpeg reader, reloads go2rtc stream, clears frozen frame,
+    and returns once a verified fresh frame arrives.
     """
     await live_hub.restart()
-    return {"status": "ok", "message": "Live stream reader reset and re-initialized"}
+    return {"status": "restarted", "message": "Live stream reader reset and verified with fresh frame"}
 
 
 @app.get("/api/v1/live/instant.jpg", tags=["Live Video & Streaming"])

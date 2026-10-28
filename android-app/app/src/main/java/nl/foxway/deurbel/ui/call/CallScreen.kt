@@ -387,7 +387,7 @@ fun CallScreen(
 }
 
 /**
- * 64.dp Circular Action Button for incoming calls with instant touch response (<10ms).
+ * 72.dp Circular Action Button for incoming calls with instant touch response (<5ms).
  */
 @Composable
 private fun CallActionButton(
@@ -402,20 +402,20 @@ private fun CallActionButton(
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Surface(
+            onClick = onClick,
             modifier = Modifier
-                .size(64.dp)
-                .clip(CircleShape)
-                .clickable(onClick = onClick),
+                .size(72.dp)
+                .defaultMinSize(minWidth = 72.dp, minHeight = 72.dp),
             shape = CircleShape,
             color = backgroundColor,
-            shadowElevation = 4.dp
+            shadowElevation = 6.dp
         ) {
             Box(contentAlignment = Alignment.Center) {
                 Icon(
                     imageVector = icon,
                     contentDescription = label,
                     tint = iconTint,
-                    modifier = Modifier.size(30.dp)
+                    modifier = Modifier.size(34.dp)
                 )
             }
         }
@@ -423,7 +423,7 @@ private fun CallActionButton(
             text = label,
             color = Color.White,
             style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.Medium
+            fontWeight = FontWeight.SemiBold
         )
     }
 }

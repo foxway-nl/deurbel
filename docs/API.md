@@ -1,4 +1,4 @@
-# Foxway Smart Doorbell API Documentatie (v2.4.0)
+# Foxway Smart Doorbell API Documentatie (v2.5.0)
 
 De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8090`, WAN: `https://deurbel.foxway.nl`).
 
@@ -21,7 +21,7 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
 
 ---
 
-## 2. Admin REST API (`/api/v1/admin/*`)
+## 2. Admin REST API (`/api/v1/admin/*` & `/api/v1/live/*`)
 *Vereist actieve admin sessiecookie.*
 
 ### `GET /api/v1/admin/settings`
@@ -45,15 +45,15 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
 }
 ```
 
+### `POST /api/v1/live/restart` (ook `POST /api/v1/admin/resync-live`)
+- **Beschrijving:** Forceert een herstart van go2rtc en de live FFmpeg stream, wist het bevroren frame, en wacht tot er een daadwerkelijk nieuw frame met klokbeweging is ontvangen.
+
 ### `GET /api/v1/admin/detections`
 - **Beschrijving:** Haalt de laatste 50 AI audit logs op (zowel goedgekeurd als geblokkeerd).
 - **Parameters:** `limit` (standaard 50).
 
 ### `GET /api/v1/admin/crash-logs`
 - **Beschrijving:** Haalt alle geregistreerde Android crash rapporten op.
-
-### `POST /api/v1/admin/resync-live`
-- **Beschrijving:** Forceert een herstart van de live FFmpeg stream en herinitialiseert de centrale frame buffer.
 
 ### `POST /api/v1/admin/cleanup-false-clips`
 - **Beschrijving:** Wist valse clips van vandaag die door wind/struiken zijn ontstaan.
@@ -73,12 +73,12 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
 - **Payload:**
 ```json
 {
-  "device_model": "Samsung SM-S928B",
-  "os_version": "Android 14 (API 34)",
+  "device_model": "Samsung SM-S936B",
+  "os_version": "Android 15 (API 35)",
   "error_message": "OutOfMemoryError: Failed to allocate",
   "stacktrace": "java.lang.OutOfMemoryError: ... at nl.foxway.deurbel...",
   "screen_state": "LiveScreen",
-  "app_version": "2.4.0"
+  "app_version": "2.5.0"
 }
 ```
 - **Reactie:** `{"status": "ok", "id": 12}`
@@ -109,3 +109,6 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
 
 ### `GET /api/v1/clips`
 - **Beschrijving:** Lijst van opgeslagen clips met thumbnails, duur en AI-gebeurtenislabels.
+
+### `GET /api/v1/app/version`
+- **Beschrijving:** Geeft huidige server-versie (`2.5.0`), build code (`16`) en download link voor de Android APK.

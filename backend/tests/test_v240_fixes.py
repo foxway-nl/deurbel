@@ -103,3 +103,4 @@ async def test_v240_system_settings_defaults():
     assert float(settings.get("pre_roll_seconds", "20")) == 20.0
     assert float(settings.get("post_roll_seconds", "20")) == 20.0
     assert float(settings.get("max_active_motion_seconds", "30")) == 30.0
+

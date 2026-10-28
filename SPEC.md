@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell System Specification (v2.4.0)
+# Foxway Smart Doorbell System Specification (v2.5.0)
 
-**Versie:** `v2.4.0` (`versionCode = 15`)  
+**Versie:** `v2.5.0` (`versionCode = 16`)  
 **Datum:** 28 Oktober 2026  
 **Productie-omgeving:** `foxway` (`192.168.2.1`), WAN: `https://deurbel.foxway.nl`  
 **Camera:** EZVIZ DB1 (`192.168.2.31`), native **4:3 aspect ratio** (`768x576` / `960x720`)
@@ -15,24 +15,25 @@ Het Foxway Deurbelsysteem is een end-to-end, privacy-vriendelijk en ultra-low-la
 2. **FastAPI & Python Media Server (`backend` in Docker):**
    - Draait op poort 8090 met `network_mode: host`.
    - **Gecentraliseerde SQLite WAL Database (`app/database.py`):** WAL mode met `PRAGMA synchronous=NORMAL;`, `PRAGMA busy_timeout=60000;`, timeout=60.0s en async write lock serialisatie voorkomt `database is locked` definitief.
-   - **Zero-lag Live Drain & RAM Sourcing (`app/live_hub.py`):** Dedicated achtergrond-drain leest via FFmpeg van lokale go2rtc stream en bewaart het actuele JPEG frame in RAM (`<100ms` latentie). `ai_detector.py` en `/admin` halen hun frames direct uit deze centrale RAM buffer zonder extra RTSP sessies.
-   - **3-Laags AI Gatekeeper (`VerificationGatekeeper`):** YOLOv8s op volledig 4:3 frame, grondvlak-filtering ($y_2 \ge 0.25h$), interactieve uitsluitingszones, 3-frame trajectcontrole ($\Delta d \ge 6\%$ voor persoon/dier, $\ge 12\%$ voor voertuig).
-   - **Direct Push Coupling & 20s/20s Opname:** Stuurt FCM en WebSocket push notificaties binnen 1.5s (stub-event op $T_0 + 1.0s$). Pre-roll clips bevatten exact 20 seconden vóór $T_0$ en 20 seconden post-roll na beweging.
+   - **Zero-lag Live Drain & Freeze Watchdog (`app/live_hub.py`):** Dedicated achtergrond-drain leest via FFmpeg van lokale go2rtc stream en bewaart het actuele JPEG frame in RAM (`<100ms` latentie). Pixel-motion watchdog controleert de camera-klok over 3s; bij stilstand (`pixel_diff < 0.15`) of op aanvraag (`POST /api/v1/live/restart`) volgt directe zelfherstellende herstart. `ai_detector.py` en `/admin` halen hun frames direct uit deze centrale RAM buffer.
+   - **3-Laags AI Gatekeeper & Voertuigverplaatsing (`VerificationGatekeeper`):** YOLOv8s op volledig 4:3 frame, grondvlak-filtering ($y_2 \ge 0.25h$), interactieve uitsluitingszones, 3-frame trajectcontrole. Voertuigen vereisen $\Delta x_{\text{left}} \ge 0.12$ én $\Delta x_{\text{right}} \ge 0.12$; geparkeerde auto's ($\Delta x < 0.03$) worden direct geweerd. Persoon-prioriteitsregel onderdrukt voertuigmeldingen wanneer een persoon actief is of binnen 20s is gedetecteerd.
+   - **Chronologische Unix-Timestamp Opnames & Anti-Time-Jump (`app/recorder.py`):** `/dev/shm/deurbel_ring` slaat segmenten op als `seg_%s.ts` met gap-detectie (>4.0s). Oude segmenten vóór een gap worden gedropt om tijdsprongen terug te voorkomen. Opnames worden pas in SQLite opgeslagen na validatie (grootte $>100$ KB en duur $\ge 5.0$s).
    - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met sessie-authenticatie, live videomonitor, dynamische variabelen (`pre_roll_seconds`, `post_roll_seconds`, `max_active_motion_seconds`), uitsluitingszones canvas, AI inspectietabel en Android crash logs.
 3. **Android Client App (`android-app`):**
-   - Native Jetpack Compose, Kotlin coroutines, versie 2.4.0 (`versionCode = 15`).
-   - Telecom framework integratie met `ConnectionService` voor volscherm belscherm (`TelecomManager`).
-   - `RGB_565` bitmap decodering en `AudioTrack` mutex-bescherming tegen OOM en threading crashes.
-   - `LiveStreamController` met automatische 150ms HTTP instant snapshot fallback (`/api/v1/live/instant.jpg`) bij proxy/WebSocket vertraging, en naadloze videoweergave in zowel `LiveScreen.kt` als `CallScreen.kt`.
+   - Native Jetpack Compose, Kotlin coroutines, versie 2.5.0 (`versionCode = 16`).
+   - Telecom framework integratie met `ConnectionService` voor volscherm belscherm met 10s deduplicatie en foreground detectie.
+   - 72.dp responsieve belschermactieknoppen met directe instant UI feedback en muting.
+   - Overzichtelijke 4-kaarten indeling in `SettingsScreen.kt`: Profiel & Gekoppelde Apparaten, AI-Detectie & Meldingen (compact), Opslag & Bewaarduur, en Systeem & Diagnose (met directe browserlink naar `/admin`).
+   - `LiveStreamController` met automatische 150ms HTTP instant snapshot fallback (`/api/v1/live/instant.jpg`).
    - Automatische crash logger naar `crash_last.json` en `POST /api/v1/logs/client-crash`.
 
 ---
 
 ## 2. Harde Systeemeisen & Beschermde Componenten
-- **Geen Regressie:** Eerdere functionaliteit van v2.2.0 en v2.3.0 (Telecom belscherm, C-SDK tweeweg-audio, mDNS discovery, Admin UI) blijft 100% gegarandeerd behouden.
+- **Geen Regressie:** Eerdere functionaliteit van v2.2.0, v2.3.0 en v2.4.0 (Telecom belscherm, C-SDK tweeweg-audio, mDNS discovery, Admin UI) blijft 100% gegarandeerd behouden.
 - **Tweeweg-Audio (`backend/app/audio_bridge.py`):** De C-SDK `libhcnetsdk.so` met pre-warmed login sessies en 1000 Hz loopback FFT test is beschermd.
 - **4:3 Aspect Ratio:** Alle weergaven in Android (`LiveScreen.kt`, `CallScreen.kt`, `ClipsScreen.kt`) en Web Admin (`/admin`) zijn strikt 4:3 (`768x576`).
-- **RAM Ring-Buffer:** `/dev/shm/deurbel_ring` draait met `-segment_wrap 25` (50 seconden buffer in RAM) voor robuuste 20-seconden Pre-Roll.
+- **RAM Ring-Buffer:** `/dev/shm/deurbel_ring` draait met chronologische Unix-timestamp bestandsnamen (`seg_%s.ts`) met 45s achtergrondopruiming.
 - **Systeembronnen:** FFmpeg draait altijd met `nice -n 15`. Gradle builds met `--max-workers=2`.
 
 ---

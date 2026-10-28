@@ -1,42 +1,39 @@
-# Foxway Smart Doorbell (v2.4.0)
+# Foxway Smart Doorbell (v2.5.0)
 
-[![Version](https://img.shields.io/badge/version-2.4.0-emerald.svg)](https://github.com/foxway-nl/deurbel)
+[![Version](https://img.shields.io/badge/version-2.5.0-emerald.svg)](https://github.com/foxway-nl/deurbel)
 [![Platform](https://img.shields.io/badge/platform-Android%20%7C%20FastAPI%20%7C%20Docker-blue.svg)](https://github.com/foxway-nl/deurbel)
 [![Aspect Ratio](https://img.shields.io/badge/aspect_ratio-4%3A3_native-orange.svg)](https://github.com/foxway-nl/deurbel)
 
-Productie-oplossing voor de **EZVIZ DB1** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, SQLite WAL database concurrency, 20s pre-roll / 20s post-roll clipopname, robuuste zero-lag live stream met HTTP snapshot fallback, 3-laags AI-verificatie met YOLOv8s, een web-based beheerportaal (`/admin`), en een native Android-applicatie met volscherm Telecom oproepen.
+Productie-oplossing voor de **EZVIZ DB1** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, SQLite WAL database concurrency, freeze-watchdog met camera-klok pixel-motion verificatie, chronologische Unix-timestamp opnames (`seg_%s.ts`) met gap-detectie (anti-time-jump), Arlo-stijl 3-laags AI-verificatie met voertuig bounding box verplaatsingsregel en persoon-prioriteit, een web-based beheerportaal (`/admin`), en een geoptimaliseerde Android-app met 4 overzichtelijke instellingen-kaarten en betrouwbare Telecom oproepen.
 
 ---
 
-## ⚡ Kernfunctionaliteiten in v2.4.0
+## ⚡ Kernfunctionaliteiten in v2.5.0
 
-1. **Hersteld & Robuust Live Beeld (`live_hub.py` & Android):**
-   - Schone, low-latency FFmpeg pipeline naar go2rtc via TCP RTSP.
-   - Live frames worden in RAM bewaard (`latest_jpeg`).
-   - `ai_detector.py` en `/admin` lezen direct uit deze centrale RAM buffer (0 extra RTSP sessies, 0 connectieproblemen).
-   - Android `LiveStreamController` bevat automatische HTTP snapshot polling (150ms) bij proxy vertragingen en naadloze videoweergave in zowel `LiveScreen.kt` als `CallScreen.kt`.
+1. **Anti-Freeze Live Watchdog & Echte Sync Live (`live_hub.py`):**
+   - Automatische pixel-motion verificatie op de camera-klok over 3 seconden. Bij stilstand (`pixel_diff < 0.15`) herstart de pipeline zelfherstellend.
+   - Drukken op "Sync Live" herstart go2rtc en FFmpeg direct en levert pas status terug zodra een geverifieerd bewegend frame binnenkomt.
+   - Directe RTSP fallback bij eventuele go2rtc complicaties.
 
-2. **Gecentraliseerde SQLite WAL Architectuur (`database.py`):**
-   - Oplossing voor `database is locked` via `PRAGMA journal_mode=WAL;`, `PRAGMA synchronous=NORMAL;` en `PRAGMA busy_timeout=60000;`.
-   - Serialisatie van parallelle writes via asyncio event-loop locks en threading re-entrant locks.
+2. **Chronologische Unix-Timestamp Opnames & Anti-Time-Jump (`recorder.py`):**
+   - RAM ring-buffer slaat chronologische bestanden op (`seg_%s.ts`) met automatische achtergrondopruiming.
+   - Gap-detectie (>4.0s) prunet oude segmenten vóór een gap, wat terugspringen in de tijd definitief elimineert.
+   - Single-recording lock en strikte validatie (omvang > 100 KB en duur $\ge 5.0$s) vóór database-opslag, waardoor $00:00$ spook-clips worden uitgesloten.
 
-3. **20s Pre-Roll & 20s Post-Roll Opname (`recorder.py`):**
-   - RAM ring-buffer met 25 segmenten van 2 seconden (50 seconden capaciteit in `/dev/shm/deurbel_ring`).
-   - Pre-roll segmenten worden strikt op timestamp gefilterd binnen $[T_0 - 20s, T_0]$ (exact 10 segmenten = 20s).
-   - Volledig dynamisch configureerbaar via `/admin`: `pre_roll_seconds`, `post_roll_seconds`, `max_active_motion_seconds`.
-   - Thumbnail generatie op $T_0$ direct uit de live RAM cache voorkomt zwarte previews.
+3. **Voertuig-Verplaatsingsregel & Persoon-Prioriteit (`ai_detector.py`):**
+   - Vereist $\Delta x_{\text{left}} \ge 0.12$ én $\Delta x_{\text{right}} \ge 0.12$ voor rijdende voertuigen; geparkeerde voertuigen ($\Delta x < 0.03$) worden direct genegeerd.
+   - Wanneer een persoon in beeld is of recent (<20s) is gezien, krijgt deze absolute prioriteit en worden voertuigtriggers onderdrukt.
+   - Schone snapshot voor app en debug snapshot met bounding boxen voor Web Admin.
 
-4. **Web-Based Beheerportaal (`/admin`):**
-   - Dark-mode beheeromgeving via `http://192.168.2.1:8090/admin` en `https://deurbel.foxway.nl/admin`.
-   - Live 4:3 cameramonitor met frame-age, FPS, CPU/RAM/schijf monitoring.
-   - Realtime configuratie van AI thresholds, pre/post roll en uitsluitingszones zonder herstart.
-   - AI Verificatie Inspector met de laatste 50 goedgekeurde en geblokkeerde detecties inclusief debug snapshots.
-   - Gecentraliseerde weergave van backend logs en Android crash rapporten.
+4. **Telecom & Oproepscherm Verbeteringen (`CallScreen.kt`, `CallActivity.kt`, `DoorbellConnectionService.kt`):**
+   - Oproep-deduplicatie met 10s cooldown en foreground activiteitscheck.
+   - Grote 72.dp opneem/weiger actieknoppen met directe visuele feedback en muting op de UI-thread.
 
-5. **Android App (`android-app`):**
-   - Versie 2.4.0 (code 15).
-   - Volledig 4:3 weergave met RGB_565 decoding en AudioTrack thread-safety.
-   - Telecom framework integratie met ConnectionService voor volscherm belscherm.
+5. **Strakke 4-Kaarten Instellingen (`SettingsScreen.kt`):**
+   - Kaart 1: Profiel & Gekoppelde Apparaten (met realtime online status).
+   - Kaart 2: AI-Detectie & Meldingen (compacte gecombineerde toggles).
+   - Kaart 3: Opslag & Bewaarduur (voortgangsbalk & retentieknoppen).
+   - Kaart 4: Systeem & Diagnose (hardware test, webhook test, directe link naar `/admin`, ontkoppelen).
 
 ---
 

@@ -47,6 +47,8 @@ class DoorbellConnectionService : ConnectionService() {
         private const val ACCOUNT_ID = "foxway_doorbell_telecom"
 
         var currentConnection: DoorbellConnection? = null
+        private var lastCallTime: Long = 0L
+        private var lastCallId: String = ""
 
         fun getPhoneAccountHandle(context: Context): PhoneAccountHandle {
             val componentName = ComponentName(context, DoorbellConnectionService::class.java)
@@ -158,6 +160,18 @@ class DoorbellConnectionService : ConnectionService() {
         }
 
         fun startIncomingCall(context: Context, callId: String, snapshotUrl: String) {
+            val now = System.currentTimeMillis()
+            // Deduplication (TAAK 4): Prevent rapid duplicate incoming call flashes within 10s
+            if (callId.isNotBlank() && callId == lastCallId && (now - lastCallTime) < 10000L) {
+                Log.i(TAG, "startIncomingCall duplicate ignored for callId=$callId (delta=${now - lastCallTime}ms)")
+                return
+            }
+            if (CallActivity.isCallActivityVisible && (now - lastCallTime) < 5000L) {
+                Log.i(TAG, "startIncomingCall ignored: CallActivity already active in foreground")
+                return
+            }
+            lastCallTime = now
+            lastCallId = callId
             Log.i(TAG, "startIncomingCall triggered: callId=$callId")
             // 1. Post high-priority full-screen intent notification immediately
             // Bypasses Android 10-14 background activity launch restrictions and wakes screen

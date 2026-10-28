@@ -181,6 +181,7 @@ class CallActivity : ComponentActivity() {
         isClaimedByMe = true
         DoorbellConnectionService.silenceRingtone()
         DoorbellConnectionService.cancelCallNotification(this)
+        DoorbellConnectionService.notifyAnswered()
 
         try {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
@@ -192,7 +193,6 @@ class CallActivity : ComponentActivity() {
 
         FoxwayApp.instance.applicationScope.launch(Dispatchers.IO) {
             try {
-                DoorbellConnectionService.notifyAnswered()
                 val prefs = FoxwayApp.instance.preferencesManager
                 val api = ApiClientFactory.createApi()
                 val userId = prefs.getUserId()

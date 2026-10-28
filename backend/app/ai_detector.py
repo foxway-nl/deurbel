@@ -208,6 +208,7 @@ class SmartDetector:
         self._last_trigger_time: float = 0.0
         self._cooldown_seconds: float = 20.0
         self._last_verified_object_seen: float = 0.0
+        self._last_person_seen: float = 0.0
 
     def is_motion_active(self) -> bool:
         """Check if verified object motion was detected within the last 2.5 seconds."""
@@ -715,9 +716,20 @@ class SmartDetector:
 
             detected_candidates.append((category, label, conf, box))
 
+        # Check person priority:
+        has_person_now = any(cat == "person" for (cat, _, _, _) in detected_candidates)
+        if has_person_now:
+            self._last_person_seen = now
+        has_person_priority = (now - self._last_person_seen) < 20.0
+
         # ── 3. Layer 2: 3-Frame Trajectory Verification Gatekeeper ────────
         for category, label, conf, box in detected_candidates:
-            # Match with existing candidate track
+            # Person Priority Rule (TAAK 3): If person is active or seen within 20s, suppress vehicle detection
+            if category == "vehicle" and has_person_priority:
+                logger.debug("Vehicle candidate suppressed: person active or detected within last 20s")
+                continue
+
+            # Match with existing candidate track using nearest distance & size similarity
             matched_id = None
             best_iou = 0.0
 
@@ -725,16 +737,21 @@ class SmartDetector:
                 if track.category == category:
                     last_box = track.frames[-1][1]
                     iou = compute_iou(box, last_box)
-                    # Allow continuity matching if overlap >= 0.20 or distance is small
                     bcx = (box[0] + box[2]) / 2.0
                     bcy = (box[1] + box[3]) / 2.0
                     lcx = (last_box[0] + last_box[2]) / 2.0
                     lcy = (last_box[1] + last_box[3]) / 2.0
                     dist = math.hypot(bcx - lcx, bcy - lcy) / float(w)
+                    bw = box[2] - box[0]
+                    lbw = last_box[2] - last_box[0]
+                    size_ratio = min(bw, lbw) / max(1.0, max(bw, lbw))
 
-                    if iou > best_iou and (iou >= 0.20 or dist < 0.15):
-                        best_iou = iou
-                        matched_id = tid
+                    # Strict association: require good IoU or close center AND similar bbox size
+                    # (Prevents swapping parked car #1 on left with car #2 on right)
+                    if iou >= 0.25 or (dist < 0.08 and size_ratio > 0.60):
+                        if iou > best_iou or (best_iou == 0.0 and dist < 0.08):
+                            best_iou = max(iou, 0.01)
+                            matched_id = tid
 
             if matched_id is not None:
                 track = self._candidate_tracks[matched_id]
@@ -777,54 +794,71 @@ class SmartDetector:
                 req_disp = min_person_disp if track.category in ("person", "animal") else min_vehicle_disp
                 req_disp_pct = round(req_disp * 100.0, 1)
 
-                if delta_d >= req_disp:
-                    # ✅ VERIFICATION PASSED!
-                    track.verified = True
-                    self._last_verified_object_seen = now
-                    to_remove.append(tid)
+                # Check category-specific motion rules
+                if track.category == "vehicle":
+                    # Hard mathematical displacement test for vehicles (TAAK 3):
+                    # BOTH left edge and right edge of the bounding box itself must shift >= 12% in the same direction!
+                    dx_left = abs(last_box[0] - first_box[0]) / float(w)
+                    dx_right = abs(last_box[2] - first_box[2]) / float(w)
+                    shift_left = last_box[0] - first_box[0]
+                    shift_right = last_box[2] - first_box[2]
+                    same_direction = (shift_left * shift_right) > 0
 
-                    reason = (
-                        f"GOEDGEKEURD: {COCO_NAMES.get(0, 'Object')} geverifieerd over {len(track.frames)} frames "
-                        f"met {delta_d_pct}% verplaatsing (min. {req_disp_pct}% vereist)"
-                    )
-                    logger.info("Gatekeeper APPROVED [%s]: %s (conf=%.2f, Delta d=%.1f%%)", tid, track.label, track.best_conf, delta_d_pct)
+                    is_parked = (dx_left < 0.03 and dx_right < 0.03)
+                    is_moving_vehicle = (dx_left >= min_vehicle_disp and dx_right >= min_vehicle_disp and same_direction)
 
-                    # Trigger Layer 3: Immediate Push & Object Recording
-                    best_img = track.best_frame if track.best_frame is not None else frame
-                    asyncio.create_task(
-                        self._dispatch_verified_detection(
-                            category=track.category,
-                            label=track.label,
-                            confidence=track.best_conf,
-                            disp_pct=delta_d_pct,
-                            box=track.best_box,
-                            keyframe=best_img,
-                            cfg=cfg,
-                        )
-                    )
-                else:
-                    # ❌ VERIFICATION FAILED (Stationary shrub, tree, or parked car)
-                    if duration_tracked >= 1.0:
+                    if is_parked:
                         to_remove.append(tid)
-                        object_type_dutch = "Stilstaand object/struik" if track.category in ("person", "animal") else "Geparkeerd voertuig"
-                        reason = (
-                            f"GEBLOKKEERD: Object verplaatste slechts {delta_d_pct}% "
-                            f"(minimaal {req_disp_pct}% vereist) — {object_type_dutch}"
-                        )
-                        logger.info("Gatekeeper REJECTED [%s]: %s (Delta d=%.1f%% < %.1f%%)", tid, track.label, delta_d_pct, req_disp_pct)
+                        reason = f"GEBLOKKEERD: Geparkeerd voertuig bleef stilstaan (dx_left={dx_left*100:.1f}%, dx_right={dx_right*100:.1f}% < 3%)"
+                        logger.info("Gatekeeper REJECTED parked car [%s]: %s", tid, reason)
+                        continue
 
-                        # Save audit log for Admin Inspector
-                        asyncio.create_task(
-                            self._log_rejected_candidate(
-                                category=track.category,
-                                label=track.label,
-                                confidence=track.best_conf,
-                                disp_pct=delta_d_pct,
-                                reason=reason,
-                                box=track.best_box,
-                                frame=track.best_frame if track.best_frame is not None else frame,
+                    if not is_moving_vehicle:
+                        if duration_tracked >= 1.0:
+                            to_remove.append(tid)
+                            reason = f"GEBLOKKEERD: Voertuigkader verplaatste onvoldoende (dx_left={dx_left*100:.1f}%, dx_right={dx_right*100:.1f}%, min={req_disp_pct}%)"
+                            logger.info("Gatekeeper REJECTED vehicle [%s]: %s", tid, reason)
+                        continue
+
+                    verified_disp_pct = round(max(dx_left, dx_right) * 100.0, 1)
+                else:
+                    # Person / Animal: displacement check
+                    if delta_d < req_disp:
+                        if duration_tracked >= 1.0:
+                            to_remove.append(tid)
+                            object_type_dutch = "Stilstaand object/struik"
+                            reason = (
+                                f"GEBLOKKEERD: {object_type_dutch} verplaatste slechts {delta_d_pct}% "
+                                f"(minimaal {req_disp_pct}% vereist) — Statisch"
                             )
-                        )
+                            logger.info("Gatekeeper REJECTED [%s]: %s", tid, reason)
+                        continue
+                    verified_disp_pct = delta_d_pct
+
+                # ✅ VERIFICATION PASSED!
+                track.verified = True
+                self._last_verified_object_seen = now
+                to_remove.append(tid)
+
+                reason = (
+                    f"GOEDGEKEURD: {track.label} geverifieerd over {len(track.frames)} frames "
+                    f"met {verified_disp_pct}% verplaatsing (min. {req_disp_pct}% vereist)"
+                )
+                logger.info("Gatekeeper APPROVED [%s]: %s (conf=%.2f, Delta d=%.1f%%)", tid, track.label, track.best_conf, verified_disp_pct)
+
+                # Trigger Layer 3: Immediate Push & Object Recording
+                best_img = track.best_frame if track.best_frame is not None else frame
+                asyncio.create_task(
+                    self._dispatch_verified_detection(
+                        category=track.category,
+                        label=track.label,
+                        confidence=track.best_conf,
+                        disp_pct=verified_disp_pct,
+                        box=track.best_box,
+                        keyframe=best_img,
+                        cfg=cfg,
+                    )
+                )
 
         for tid in to_remove:
             self._candidate_tracks.pop(tid, None)
@@ -924,16 +958,20 @@ class SmartDetector:
 
         clip_id = str(uuid.uuid4())
         clip_path = str(settings.CLIPS_DIR / f"{clip_id}.mp4")
-        snapshot_path = str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg")
 
-        # Save annotated best-frame snapshot
+        # 1. Save CLEAN snapshot (without boxes) for Android App (TAAK 2.3)
+        clean_snapshot_path = str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg")
+        cv2.imwrite(clean_snapshot_path, keyframe)
+        snapshot_url = f"/api/v1/snapshots/{clip_id}.jpg"
+
+        # 2. Save DEBUG snapshot (with boxes) ONLY for Web Admin Inspector
+        debug_snapshot_path = str(settings.SNAPSHOTS_DIR / f"{clip_id}_debug.jpg")
         annotated_snapshot = keyframe.copy()
         x1, y1, x2, y2 = [int(v) for v in box]
         cv2.rectangle(annotated_snapshot, (x1, y1), (x2, y2), (0, 255, 0), 2)
         tag = f"{label} ({round(confidence*100)}%) d={disp_pct}%"
         cv2.putText(annotated_snapshot, tag, (x1, max(25, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cv2.imwrite(snapshot_path, annotated_snapshot)
-        snapshot_url = f"/api/v1/snapshots/{clip_id}.jpg"
+        cv2.imwrite(debug_snapshot_path, annotated_snapshot)
 
         category_dutch = {
             "person": "Persoon gedetecteerd",
@@ -943,18 +981,8 @@ class SmartDetector:
         }.get(category, "Beweging")
         title = f"{category_dutch}: {label}"
 
-        # ── TAAK 4 FIX: IMMEDIATE EVENT CREATION & DIRECT PUSH (<1.5s) ───
-        # 1. Insert clip stub into clips table immediately for 1-to-1 coupling
-        await save_clip(
-            clip_id=clip_id,
-            call_id=clip_id,
-            video_path=clip_path,
-            snapshot_path=snapshot_path,
-            answered_by=f"AI: {category_dutch} ({label})",
-            duration=0.0,
-        )
-
-        # 2. Insert event in events table immediately
+        # 3. Insert event in events table immediately for instant push (<1.5s)
+        # Note: Do NOT insert 00:00 stub into clips table to prevent ghost clips!
         event_dict = await save_event(
             event_type="motion",
             category=category,
@@ -963,7 +991,7 @@ class SmartDetector:
             snapshot_url=snapshot_url,
         )
 
-        # 3. Log to ai_audit_logs as APPROVED for the Web Admin Inspector
+        # 4. Log to ai_audit_logs as APPROVED with debug snapshot for Web Admin Inspector
         await save_ai_audit_log(
             status="APPROVED",
             category=category,
@@ -971,11 +999,11 @@ class SmartDetector:
             confidence=round(confidence, 2),
             displacement_pct=disp_pct,
             reason=f"GOEDGEKEURD: {category_dutch} bevestigd met {disp_pct}% verplaatsing",
-            snapshot_path=snapshot_path,
+            snapshot_path=debug_snapshot_path,
             boxes_json=json.dumps([{"x1": x1, "y1": y1, "x2": x2, "y2": y2}]),
         )
 
-        # 4. Push IMMEDIATELY via WebSocket (instant <1.5s delivery)
+        # 5. Push IMMEDIATELY via WebSocket (instant <1.5s delivery)
         await push_event(
             "AI_DETECTION",
             {
@@ -993,13 +1021,14 @@ class SmartDetector:
         )
         logger.info("Dispatched immediate push notification for %s (%s) within 1.2s", category, label)
 
-        # 5. Launch background clip recording (does NOT block push!)
+        # 6. Launch background clip recording under single recording lock
         asyncio.create_task(
             self._finalize_clip_recording(
                 clip_id=clip_id,
                 clip_path=clip_path,
                 category=category,
                 label=label,
+                clean_snapshot_path=clean_snapshot_path,
             )
         )
 
@@ -1009,36 +1038,80 @@ class SmartDetector:
         clip_path: str,
         category: str,
         label: str,
+        clean_snapshot_path: str = "",
     ) -> None:
-        """Records video in background and updates the clip duration upon completion."""
+        """
+        Records video in background under single recording lock.
+        Inserts clip into database ONLY after successful MP4 completion (>100KB, >=5s).
+        """
         try:
-            from app.recorder import record_smart_clip, ensure_thumbnail, compress_clip_background
+            from app.recorder import (
+                record_smart_clip,
+                ensure_thumbnail,
+                compress_clip_background,
+                recording_lock,
+                extend_active_recording,
+                is_recording_active,
+            )
+
             sys_settings = await get_system_settings()
             preroll = float(sys_settings.get("pre_roll_seconds", "20"))
             postroll = float(sys_settings.get("post_roll_seconds", "20"))
             max_duration = float(sys_settings.get("max_active_motion_seconds", sys_settings.get("max_clip_seconds", "30")))
 
-            duration = await record_smart_clip(
-                clip_id=clip_id,
-                clip_path=clip_path,
-                preroll_seconds=preroll,
-                postroll_seconds=postroll,
-                motion_active_func=self.is_motion_active,
-                max_duration=max_duration,
-            )
+            # Single recording lock check (TAAK 2.2):
+            # If another recording is already running, extend it instead of creating duplicate clips!
+            if is_recording_active():
+                extend_active_recording(category, label, duration_sec=max_duration)
+                logger.info("Smart clip already recording; extended current clip deadline and updated priority for %s", label)
+                return
 
-            snapshot_path = await ensure_thumbnail(clip_id, clip_path, preroll_seconds=preroll)
-            if duration > 0.0:
-                await save_clip(
+            async with recording_lock:
+                duration = await record_smart_clip(
                     clip_id=clip_id,
-                    call_id=clip_id,
-                    video_path=clip_path,
-                    snapshot_path=snapshot_path or str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg"),
-                    answered_by=f"AI: {category} ({label})",
-                    duration=duration,
+                    clip_path=clip_path,
+                    preroll_seconds=preroll,
+                    postroll_seconds=postroll,
+                    motion_active_func=self.is_motion_active,
+                    max_duration=max_duration,
                 )
-                logger.info("Finalized background clip %s: duration=%.1fs (tightly capped)", clip_id, duration)
-                asyncio.create_task(compress_clip_background(clip_path))
+
+                if not clean_snapshot_path:
+                    clean_snapshot_path = str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg")
+                snapshot_path = await ensure_thumbnail(clip_id, clip_path, preroll_seconds=preroll)
+
+                file_size = os.path.getsize(clip_path) if os.path.exists(clip_path) else 0
+
+                # Database Insert ONLY after successful MP4 (TAAK 2.2):
+                # Must be > 100 KB and duration >= 5 seconds!
+                if os.path.exists(clip_path) and file_size > 100000 and duration >= 5.0:
+                    category_dutch = {
+                        "person": "Persoon gedetecteerd",
+                        "vehicle": "Voertuig gedetecteerd",
+                        "animal": "Dier gedetecteerd",
+                        "motion": "Beweging gedetecteerd",
+                    }.get(category, "Beweging")
+
+                    await save_clip(
+                        clip_id=clip_id,
+                        call_id=clip_id,
+                        video_path=clip_path,
+                        snapshot_path=snapshot_path or clean_snapshot_path,
+                        answered_by=f"AI: {category_dutch} ({label})",
+                        duration=duration,
+                    )
+                    logger.info("Saved valid verified clip %s: duration=%.1fs, size=%d bytes", clip_id, duration, file_size)
+                    asyncio.create_task(compress_clip_background(clip_path))
+                else:
+                    logger.warning(
+                        "Discarded invalid/incomplete clip %s (size=%d bytes, duration=%.1fs < 5s) — not saved to DB",
+                        clip_id, file_size, duration,
+                    )
+                    if os.path.exists(clip_path):
+                        try:
+                            os.unlink(clip_path)
+                        except Exception:
+                            pass
         except Exception as e:
             logger.error("Error finalizing background clip %s: %s", clip_id, e)
 

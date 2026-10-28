@@ -375,7 +375,7 @@ async def find_existing_device(
     user_name: str = "",
     device_name: str = "",
 ) -> Optional[dict]:
-    """Find existing device by unique hardware ID or matching user and device name."""
+    """Find existing device by unique hardware ID or matching user AND device model."""
     clean_user = (user_name or "").strip().lower()
     clean_dev_id = (device_id or "").strip()
     clean_dev_name = (device_name or "").strip().lower()
@@ -444,7 +444,14 @@ async def save_device(
     connection_type: str = "",
 ) -> None:
     now_iso = datetime.now(timezone.utc).isoformat()
+    clean_dev_name = (device_name or "").strip().lower()
+    clean_dev_id = (device_id or "").strip()
     async with get_db(write=True) as db:
+        if clean_dev_id:
+            await db.execute("DELETE FROM devices WHERE device_id = ? AND user_id != ?", (clean_dev_id, user_id))
+        if clean_dev_name:
+            await db.execute("DELETE FROM devices WHERE LOWER(TRIM(device_name)) = ? AND user_id != ?", (clean_dev_name, user_id))
+
         await db.execute(
             """
             INSERT INTO devices (user_id, user_name, device_name, fcm_token, jwt_token, paired_at, last_seen, device_id, android_version, connection_type)

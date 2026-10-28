@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
@@ -23,6 +24,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -225,7 +227,7 @@ fun SettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            // ── 1. User Profile Card ─────────────────────────────────
+            // ── KAART 1: Profiel & Gekoppelde Apparaten ──────────────
             Card(
                 colors = CardDefaults.cardColors(containerColor = SurfaceDark),
                 shape = RoundedCornerShape(16.dp),
@@ -233,116 +235,72 @@ fun SettingsScreen(
                     .fillMaxWidth()
                     .border(1.dp, DividerDark, RoundedCornerShape(16.dp))
             ) {
-                Row(
+                Column(
                     modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(54.dp)
-                            .background(EmeraldDark, CircleShape),
-                        contentAlignment = Alignment.Center
+                    // Current User Profile Header
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(54.dp)
+                                .background(EmeraldDark, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = userName.take(1).uppercase().ifBlank { "M" },
+                                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                                color = TextPrimary
+                            )
+                        }
+
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = userName.ifBlank { "Foxway Gebruiker" },
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = "Gekoppeld ID: ${userId.take(12)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(modifier = Modifier.size(8.dp).background(LanGreen, CircleShape))
+                                Text(
+                                    text = "Dit toestel (${android.os.Build.MODEL}) • Online",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = EmeraldLight
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = DividerDark)
+
+                    // Active Users & Connected Family Members List
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = userName.take(1).uppercase().ifBlank { "M" },
-                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                            color = TextPrimary
+                            "Gekoppelde Toestellen & Gezinsleden",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                            color = CyanAccent
                         )
+                        if (isLoadingUsers) {
+                            CircularProgressIndicator(color = EmeraldPrimary, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        }
                     }
 
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            text = userName.ifBlank { "Foxway Gebruiker" },
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                            color = TextPrimary
-                        )
-                        Text(
-                            text = "Gekoppeld ID: ${userId.take(12)}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary
-                        )
-                    }
-                }
-            }
-
-            // ── 2. Realtime Permissie & Systeem Check (Requirement #2) ──
-            Text("Android Systeem & Betrouwbaarheid", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, DividerDark, RoundedCornerShape(16.dp))
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    PermissionCheckItem(
-                        title = "Meldingen (POST_NOTIFICATIONS)",
-                        subtitle = "Noodzakelijk om oproepen te ontvangen",
-                        isGranted = permState.hasNotificationPermission,
-                        onFix = { PermissionChecker.openNotificationSettings(context) }
-                    )
-                    HorizontalDivider(color = DividerDark)
-
-                    PermissionCheckItem(
-                        title = "Microfoon (RECORD_AUDIO)",
-                        subtitle = "Noodzakelijk voor terugpraten naar buiten",
-                        isGranted = permState.hasRecordAudioPermission,
-                        onFix = { PermissionChecker.openAppDetails(context) }
-                    )
-                    HorizontalDivider(color = DividerDark)
-
-                    PermissionCheckItem(
-                        title = "Batterijbeheer: Niet beperkt",
-                        subtitle = "Voorkomt dat Android de deurbel-achtergrondservice stopt",
-                        isGranted = permState.isBatteryOptimizationIgnored,
-                        onFix = { PermissionChecker.openBatteryOptimizationSettings(context) }
-                    )
-                    HorizontalDivider(color = DividerDark)
-
-                    PermissionCheckItem(
-                        title = "Bovenop weergeven (Appear on top)",
-                        subtitle = "Breekt direct open bij een inkomende oproep",
-                        isGranted = permState.canDrawOverlays,
-                        onFix = { PermissionChecker.openOverlaySettings(context) }
-                    )
-                    HorizontalDivider(color = DividerDark)
-
-                    PermissionCheckItem(
-                        title = "Volledig scherm meldingen (Android 14+)",
-                        subtitle = "Laat de deurbel direct rinkelen als het scherm uit staat",
-                        isGranted = permState.canUseFullScreenIntent,
-                        onFix = { PermissionChecker.openFullScreenIntentSettings(context) }
-                    )
-                }
-            }
-
-            // ── 3. Actieve Gezinsleden / Apparaten (Requirement #6) ──
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("Actieve Gezinsleden / Apparaten", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                if (isLoadingUsers) {
-                    CircularProgressIndicator(color = EmeraldPrimary, modifier = Modifier.size(18.dp))
-                }
-            }
-
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, DividerDark, RoundedCornerShape(16.dp))
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
                     if (activeUsers.isEmpty()) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -421,8 +379,7 @@ fun SettingsScreen(
                 }
             }
 
-            // ── 3a. Opname- & Detectie-instellingen (Task 5) ────────
-            Text("Opname- & Detectie-instellingen", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+            // ── KAART 2: AI-Detectie & Meldingen ─────────────────────
             Card(
                 colors = CardDefaults.cardColors(containerColor = SurfaceDark),
                 shape = RoundedCornerShape(16.dp),
@@ -434,15 +391,15 @@ fun SettingsScreen(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    // Master AI Switch
+                    // Header / Master AI Switch
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                            Text("Slimme AI Detectie (Arlo-stijl)", fontWeight = FontWeight.Bold, color = TextPrimary)
-                            Text("Detecteert objecten op basis van lichte tweetraps CPU-analyse", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                            Text("Slimme AI Detectie", fontWeight = FontWeight.Bold, color = TextPrimary)
+                            Text("Arlo-stijl objectherkenning & classificatie", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
                         }
                         Switch(
                             checked = detectionSettings.detectionEnabled,
@@ -453,99 +410,55 @@ fun SettingsScreen(
 
                     HorizontalDivider(color = DividerDark)
 
-                    Text("Kies welke categorieën worden opgenomen:", style = MaterialTheme.typography.labelMedium, color = CyanAccent)
-
-                    // 1. Mensen
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            modifier = Modifier.weight(1f).padding(end = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.Person, contentDescription = null, tint = EmeraldPrimary, modifier = Modifier.size(20.dp))
-                            Text("Mensen opnemen", color = TextPrimary)
-                        }
-                        Switch(
-                            checked = detectionSettings.recordPerson,
-                            onCheckedChange = { saveDetection(detectionSettings.copy(recordPerson = it)) },
-                            enabled = detectionSettings.detectionEnabled,
-                            colors = modernSwitchColors
-                        )
-                    }
-
-                    // 2. Voertuigen
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            modifier = Modifier.weight(1f).padding(end = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.DirectionsCar, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(20.dp))
-                            Text("Voertuigen opnemen (auto, fiets, vracht)", color = TextPrimary)
-                        }
-                        Switch(
-                            checked = detectionSettings.recordVehicle,
-                            onCheckedChange = { saveDetection(detectionSettings.copy(recordVehicle = it)) },
-                            enabled = detectionSettings.detectionEnabled,
-                            colors = modernSwitchColors
-                        )
-                    }
-
-                    // 3. Dieren
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            modifier = Modifier.weight(1f).padding(end = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.Pets, contentDescription = null, tint = Color(0xFFF59E0B), modifier = Modifier.size(20.dp))
-                            Text("Dieren opnemen (hond, kat, vogel)", color = TextPrimary)
-                        }
-                        Switch(
-                            checked = detectionSettings.recordAnimal,
-                            onCheckedChange = { saveDetection(detectionSettings.copy(recordAnimal = it)) },
-                            enabled = detectionSettings.detectionEnabled,
-                            colors = modernSwitchColors
-                        )
-                    }
-
-                    // 4. Overige beweging
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            modifier = Modifier.weight(1f).padding(end = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.MotionPhotosOn, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(20.dp))
-                            Text("Overige beweging opnemen", color = TextPrimary)
-                        }
-                        Switch(
-                            checked = detectionSettings.recordMotion,
-                            onCheckedChange = { saveDetection(detectionSettings.copy(recordMotion = it)) },
-                            enabled = detectionSettings.detectionEnabled,
-                            colors = modernSwitchColors
-                        )
-                    }
+                    // 1. Mensen (Opnemen & Melding)
+                    CompactDetectionRow(
+                        icon = Icons.Default.Person,
+                        iconTint = EmeraldPrimary,
+                        title = "Mensen",
+                        description = "Persoon voor de deur",
+                        recordChecked = detectionSettings.recordPerson,
+                        onRecordChange = { saveDetection(detectionSettings.copy(recordPerson = it)) },
+                        notifyChecked = detectionSettings.notifyPerson,
+                        onNotifyChange = { saveDetection(detectionSettings.copy(notifyPerson = it)) },
+                        enabled = detectionSettings.detectionEnabled,
+                        switchColors = modernSwitchColors
+                    )
 
                     HorizontalDivider(color = DividerDark)
 
-                    // Stille Uren / Nachtmodus
+                    // 2. Voertuigen (Opnemen & Melding)
+                    CompactDetectionRow(
+                        icon = Icons.Default.DirectionsCar,
+                        iconTint = CyanAccent,
+                        title = "Voertuigen",
+                        description = "Rijdende auto's, bezorgbussen",
+                        recordChecked = detectionSettings.recordVehicle,
+                        onRecordChange = { saveDetection(detectionSettings.copy(recordVehicle = it)) },
+                        notifyChecked = detectionSettings.notifyVehicle,
+                        onNotifyChange = { saveDetection(detectionSettings.copy(notifyVehicle = it)) },
+                        enabled = detectionSettings.detectionEnabled,
+                        switchColors = modernSwitchColors
+                    )
+
+                    HorizontalDivider(color = DividerDark)
+
+                    // 3. Dieren (Opnemen & Melding)
+                    CompactDetectionRow(
+                        icon = Icons.Default.Pets,
+                        iconTint = Color(0xFFF59E0B),
+                        title = "Dieren",
+                        description = "Hond, kat, vogel",
+                        recordChecked = detectionSettings.recordAnimal,
+                        onRecordChange = { saveDetection(detectionSettings.copy(recordAnimal = it)) },
+                        notifyChecked = detectionSettings.notifyAnimal,
+                        onNotifyChange = { saveDetection(detectionSettings.copy(notifyAnimal = it)) },
+                        enabled = detectionSettings.detectionEnabled,
+                        switchColors = modernSwitchColors
+                    )
+
+                    HorizontalDivider(color = DividerDark)
+
+                    // 4. Stille Uren / Nachtmodus
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -556,7 +469,7 @@ fun SettingsScreen(
                                 Icon(imageVector = Icons.Default.Bedtime, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(18.dp))
                                 Text("Stille Uren / Nachtmodus", fontWeight = FontWeight.SemiBold, color = TextPrimary)
                             }
-                            Text("Muteert luide meldingen tussen ${detectionSettings.quietHoursStart} en ${detectionSettings.quietHoursEnd}, opnames blijven actief.", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                            Text("Muteert pushmeldingen tussen ${detectionSettings.quietHoursStart} en ${detectionSettings.quietHoursEnd} (opnames blijven actief)", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
                         }
                         Switch(
                             checked = detectionSettings.quietHoursEnabled,
@@ -567,131 +480,7 @@ fun SettingsScreen(
                 }
             }
 
-            // ── 3a2. Meldingen bij Beweging & AI Detectie ──────────────────────
-            Text("Meldingen bij Beweging & AI Detectie", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, DividerDark, RoundedCornerShape(16.dp))
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    Text("Stel in voor welke gedetecteerde gebeurtenissen je een pushmelding op je telefoon ontvangt:", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-
-                    // 1. Mensen melding
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            modifier = Modifier.weight(1f).padding(end = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.Person, contentDescription = null, tint = EmeraldPrimary, modifier = Modifier.size(20.dp))
-                            Column {
-                                Text("Melding bij Persoon", color = TextPrimary, fontWeight = FontWeight.Medium)
-                                Text("Directe pushmelding als er iemand bij de voordeur loopt", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-                            }
-                        }
-                        Switch(
-                            checked = detectionSettings.notifyPerson,
-                            onCheckedChange = { saveDetection(detectionSettings.copy(notifyPerson = it)) },
-                            enabled = detectionSettings.detectionEnabled && detectionSettings.recordPerson,
-                            colors = modernSwitchColors
-                        )
-                    }
-
-                    HorizontalDivider(color = DividerDark)
-
-                    // 2. Voertuigen melding
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            modifier = Modifier.weight(1f).padding(end = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.DirectionsCar, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(20.dp))
-                            Column {
-                                Text("Melding bij Voertuig", color = TextPrimary, fontWeight = FontWeight.Medium)
-                                Text("Pushmelding bij auto's, bezorgbussen of fietsers", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-                            }
-                        }
-                        Switch(
-                            checked = detectionSettings.notifyVehicle,
-                            onCheckedChange = { saveDetection(detectionSettings.copy(notifyVehicle = it)) },
-                            enabled = detectionSettings.detectionEnabled && detectionSettings.recordVehicle,
-                            colors = modernSwitchColors
-                        )
-                    }
-
-                    HorizontalDivider(color = DividerDark)
-
-                    // 3. Dieren melding
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            modifier = Modifier.weight(1f).padding(end = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.Pets, contentDescription = null, tint = Color(0xFFF59E0B), modifier = Modifier.size(20.dp))
-                            Column {
-                                Text("Melding bij Dier", color = TextPrimary, fontWeight = FontWeight.Medium)
-                                Text("Pushmelding bij katten, honden of vogels", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-                            }
-                        }
-                        Switch(
-                            checked = detectionSettings.notifyAnimal,
-                            onCheckedChange = { saveDetection(detectionSettings.copy(notifyAnimal = it)) },
-                            enabled = detectionSettings.detectionEnabled && detectionSettings.recordAnimal,
-                            colors = modernSwitchColors
-                        )
-                    }
-
-                    HorizontalDivider(color = DividerDark)
-
-                    // 4. Overige beweging melding
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            modifier = Modifier.weight(1f).padding(end = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.MotionPhotosOn, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(20.dp))
-                            Column {
-                                Text("Melding bij Overige Beweging", color = TextPrimary, fontWeight = FontWeight.Medium)
-                                Text("Pushmelding bij pixelbeweging zonder objectherkenning", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-                            }
-                        }
-                        Switch(
-                            checked = detectionSettings.notifyMotion,
-                            onCheckedChange = { saveDetection(detectionSettings.copy(notifyMotion = it)) },
-                            enabled = detectionSettings.detectionEnabled && detectionSettings.recordMotion,
-                            colors = modernSwitchColors
-                        )
-                    }
-                }
-            }
-
-            // ── 3b. Bewaarduur & Opslagcapaciteit (Task 6) ────────────
-            Text("Bewaarduur & Opslagcapaciteit", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+            // ── KAART 3: Opslag & Bewaarduur ─────────────────────────
             Card(
                 colors = CardDefaults.cardColors(containerColor = SurfaceDark),
                 shape = RoundedCornerShape(16.dp),
@@ -710,7 +499,7 @@ fun SettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column {
-                            Text("Huidig opslaggebruik", fontWeight = FontWeight.Bold, color = TextPrimary)
+                            Text("Opslaggebruik", fontWeight = FontWeight.Bold, color = TextPrimary)
                             Text(
                                 text = "${storageStats.usedMb} MB van ${storageStats.maxStorageGb} GB (${storageStats.usagePercent}%)",
                                 style = MaterialTheme.typography.bodySmall,
@@ -846,14 +635,13 @@ fun SettingsScreen(
                         } else {
                             Icon(imageVector = Icons.Default.DeleteSweep, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("🧹 Wis alle niet-geclassificeerde / oude bewegingsopnames", fontWeight = FontWeight.SemiBold)
+                            Text("🧹 Wis oude bewegingsopnames", fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
             }
 
-            // ── 4. Systeem- & Geluidstest (Requirement #7) ───────────
-            Text("Systeem- & Geluidstest", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+            // ── KAART 4: Systeem & Diagnose ──────────────────────────
             Card(
                 colors = CardDefaults.cardColors(containerColor = SurfaceDark),
                 shape = RoundedCornerShape(16.dp),
@@ -863,13 +651,92 @@ fun SettingsScreen(
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    Text(
-                        text = "Controleer of de deurbel-camera, de microfoon buiten en de buiten-luidspreker goed functioneren.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary
-                    )
+                    Text("Systeem & Diagnose", fontWeight = FontWeight.Bold, color = TextPrimary)
+
+                    // 1. Android Permissies & Betrouwbaarheid status
+                    var showPermissionsDetail by remember { mutableStateOf(false) }
+                    val allPermsOk = permState.allGranted
+                    Surface(
+                        color = SurfaceVariantDark,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth().clickable { showPermissionsDetail = !showPermissionsDetail }
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier.size(10.dp).background(
+                                            if (allPermsOk) LanGreen else Color(0xFFF59E0B),
+                                            CircleShape
+                                        )
+                                    )
+                                    Text(
+                                        text = if (allPermsOk) "Android Permissies: Optimaal (5/5)" else "Android Permissies: Aandacht vereist",
+                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        color = TextPrimary
+                                    )
+                                }
+                                Icon(
+                                    imageVector = if (showPermissionsDetail) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = null,
+                                    tint = TextSecondary
+                                )
+                            }
+
+                            if (showPermissionsDetail) {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    PermissionCheckItem(
+                                        title = "Meldingen (POST_NOTIFICATIONS)",
+                                        subtitle = "Noodzakelijk voor oproepen",
+                                        isGranted = permState.hasNotificationPermission,
+                                        onFix = { PermissionChecker.openNotificationSettings(context) }
+                                    )
+                                    HorizontalDivider(color = DividerDark)
+                                    PermissionCheckItem(
+                                        title = "Microfoon (RECORD_AUDIO)",
+                                        subtitle = "Voor twee-weg audio praten",
+                                        isGranted = permState.hasRecordAudioPermission,
+                                        onFix = { PermissionChecker.openAppDetails(context) }
+                                    )
+                                    HorizontalDivider(color = DividerDark)
+                                    PermissionCheckItem(
+                                        title = "Batterijbeheer: Niet beperkt",
+                                        subtitle = "Houdt achtergrondservice actief",
+                                        isGranted = permState.isBatteryOptimizationIgnored,
+                                        onFix = { PermissionChecker.openBatteryOptimizationSettings(context) }
+                                    )
+                                    HorizontalDivider(color = DividerDark)
+                                    PermissionCheckItem(
+                                        title = "Bovenop weergeven (Appear on top)",
+                                        subtitle = "Opent oproepscherm direct",
+                                        isGranted = permState.canDrawOverlays,
+                                        onFix = { PermissionChecker.openOverlaySettings(context) }
+                                    )
+                                    HorizontalDivider(color = DividerDark)
+                                    PermissionCheckItem(
+                                        title = "Volledig scherm meldingen",
+                                        subtitle = "Rinkelen bij vergrendeld scherm",
+                                        isGranted = permState.canUseFullScreenIntent,
+                                        onFix = { PermissionChecker.openFullScreenIntentSettings(context) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = DividerDark)
+
+                    // Knop 1: Start Deurbel Hardware Test
                     Button(
                         onClick = { showHardwareTestDialog = true },
                         shape = RoundedCornerShape(12.dp),
@@ -880,193 +747,8 @@ fun SettingsScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Start Deurbel Hardware Test", color = BackgroundDark, fontWeight = FontWeight.Bold)
                     }
-                }
-            }
 
-            // ── 5. Lokaal 30-Dagen Logboek (Requirement #8) ──────────
-            Text("Systeem Logboek", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, DividerDark, RoundedCornerShape(16.dp))
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Text(
-                        text = "Lokale gebeurtenissen van de afgelopen 30 dagen: oproepen, wie heeft opgenomen, netwerkwissels en WebRTC-status.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary
-                    )
-                    OutlinedButton(
-                        onClick = { showLogsDialog = true },
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth().height(48.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, DividerDark)
-                    ) {
-                        Icon(imageVector = Icons.Default.Article, contentDescription = null, tint = CyanAccent)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Logboek bekijken (30 dagen)", color = CyanAccent)
-                    }
-                }
-            }
-
-            // ── 6. Verbinding & Endpoints ────────────────────────────
-            Text("Netwerk & Verbinding", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, DividerDark, RoundedCornerShape(16.dp))
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    EndpointRow(label = "LAN API", value = endpointConfig.lanApiUrl)
-                    HorizontalDivider(color = DividerDark)
-                    EndpointRow(label = "WAN API (Foxway Cloud)", value = endpointConfig.wanApiUrl)
-                    HorizontalDivider(color = DividerDark)
-                    EndpointRow(label = "WebRTC Proxy", value = "/api/v1/webrtc?src=deurbel (WHEP)")
-
-                    Button(
-                        onClick = {
-                            coroutineScope.launch {
-                                try {
-                                    isTesting = true
-                                    val api = ApiClientFactory.createApi()
-                                    val resp = api.getStatus()
-                                    if (resp.isSuccessful) {
-                                        val effectiveUrl = connectionManager.getEffectiveBaseUrl()
-                                        connectionStatus = "Verbonden (${if (!isWanMode) "LAN" else "5G"}) — Status: ${resp.body()?.state}"
-                                        appLogger.network("Handmatige netwerktest succesvol: $effectiveUrl")
-                                    } else {
-                                        connectionStatus = "Fout: HTTP ${resp.code()}"
-                                    }
-                                } catch (e: Exception) {
-                                    connectionStatus = "Niet bereikbaar: ${e.localizedMessage}"
-                                    appLogger.error("Netwerktest mislukt", e.message)
-                                } finally {
-                                    isTesting = false
-                                }
-                            }
-                        },
-                        enabled = !isTesting,
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariantDark),
-                        modifier = Modifier.fillMaxWidth().height(44.dp)
-                    ) {
-                        if (isTesting) {
-                            CircularProgressIndicator(color = EmeraldPrimary, modifier = Modifier.size(18.dp))
-                        } else {
-                            Icon(imageVector = Icons.Default.NetworkCheck, contentDescription = null, tint = TextPrimary, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Verbinding Testen", color = TextPrimary)
-                        }
-                    }
-
-                    Text(text = connectionStatus, style = MaterialTheme.typography.bodySmall, color = CyanAccent)
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // ── 6b. Deurbel Drukknop & Shelly Plus Uni Webhook ────────
-            Text("Deurbel Drukknop & Shelly Plus Uni Webhook", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, DividerDark, RoundedCornerShape(16.dp))
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Box(modifier = Modifier.size(10.dp).background(LanGreen, CircleShape))
-                        Text("Aanbel-script actief (Luistert naar 728 Hz chime signature)", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold), color = TextPrimary)
-                    }
-                    Text(
-                        text = "Shelly Plus Uni Webhook URL (LAN):",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = CyanAccent
-                    )
-                    val lanBase = endpointConfig.lanApiUrl.ifBlank { "http://192.168.2.1:8090" }.trimEnd('/')
-                    val lanWebhookUrl = "$lanBase/api/v1/webhook/shelly-ring"
-                    Surface(
-                        color = SurfaceVariantDark,
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = lanWebhookUrl,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextPrimary,
-                                modifier = Modifier.weight(1f)
-                            )
-                            IconButton(
-                                onClick = {
-                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                    clipboard.setPrimaryClip(ClipData.newPlainText("Shelly Webhook LAN", lanWebhookUrl))
-                                    Toast.makeText(context, "LAN Webhook URL gekopieerd!", Toast.LENGTH_SHORT).show()
-                                },
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Icon(imageVector = Icons.Default.ContentCopy, contentDescription = "Kopieer", tint = CyanAccent, modifier = Modifier.size(16.dp))
-                            }
-                        }
-                    }
-
-                    val wanBase = endpointConfig.wanApiUrl.ifBlank { "https://deurbel.foxway.nl" }.trimEnd('/')
-                    val wanWebhookUrl = "$wanBase/api/v1/webhook/shelly-ring"
-                    Text(
-                        text = "Shelly Plus Uni Webhook URL (WAN / Foxway Cloud):",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = CyanAccent
-                    )
-                    Surface(
-                        color = SurfaceVariantDark,
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = wanWebhookUrl,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextPrimary,
-                                modifier = Modifier.weight(1f)
-                            )
-                            IconButton(
-                                onClick = {
-                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                    clipboard.setPrimaryClip(ClipData.newPlainText("Shelly Webhook WAN", wanWebhookUrl))
-                                    Toast.makeText(context, "WAN Webhook URL gekopieerd!", Toast.LENGTH_SHORT).show()
-                                },
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Icon(imageVector = Icons.Default.ContentCopy, contentDescription = "Kopieer", tint = CyanAccent, modifier = Modifier.size(16.dp))
-                            }
-                        }
-                    }
-
+                    // Knop 2: Test Aanbel Trigger (Simuleer Drukknop) (zonder dubbele flash!)
                     Button(
                         onClick = {
                             coroutineScope.launch {
@@ -1076,13 +758,7 @@ fun SettingsScreen(
                                     val api = ApiClientFactory.createApi()
                                     val resp = api.triggerShellyWebhook(force = true)
                                     if (resp.isSuccessful) {
-                                        shellyTriggerResult = "✅ Drukknop-oproep succesvol gesimuleerd!"
-                                        // Open belscherm direct op de telefoon (5G en Wi-Fi)
-                                        nl.foxway.deurbel.telecom.DoorbellConnectionService.startIncomingCall(
-                                            context,
-                                            "test_ring_${System.currentTimeMillis()}",
-                                            ""
-                                        )
+                                        shellyTriggerResult = "✅ Drukknop-oproep verzonden naar backend!"
                                     } else {
                                         shellyTriggerResult = "⚠️ Reactie: HTTP ${resp.code()}"
                                     }
@@ -1095,50 +771,73 @@ fun SettingsScreen(
                         },
                         enabled = !isTriggeringShelly,
                         shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
-                        modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 44.dp)
+                        colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariantDark),
+                        modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 48.dp)
                     ) {
                         if (isTriggeringShelly) {
-                            CircularProgressIndicator(color = BackgroundDark, modifier = Modifier.size(18.dp))
+                            CircularProgressIndicator(color = EmeraldPrimary, modifier = Modifier.size(18.dp))
                         } else {
-                            Icon(imageVector = Icons.Default.NotificationsActive, contentDescription = null, tint = BackgroundDark, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Test Aanbel Trigger (Simuleer Drukknop)", color = BackgroundDark, fontWeight = FontWeight.Bold)
+                            Icon(imageVector = Icons.Default.NotificationsActive, contentDescription = null, tint = TextPrimary, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Test Aanbel Trigger (Simuleer Drukknop)", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                         }
                     }
 
                     shellyTriggerResult?.let {
                         Text(text = it, style = MaterialTheme.typography.bodySmall, color = CyanAccent)
                     }
-                }
-            }
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // ── 7. Ontkoppelen ───────────────────────────────────────
-            OutlinedButton(
-                onClick = {
-                    coroutineScope.launch {
-                        prefs.clearAll()
-                        appLogger.info("Toestel ontkoppeld door gebruiker")
-                        onUnpair()
+                    // Knop 3: Open Web Beheerpaneel (/admin)
+                    OutlinedButton(
+                        onClick = {
+                            val adminUrl = if (isWanMode) "https://deurbel.foxway.nl/admin" else "${currentApiBaseUrl.trimEnd('/')}/admin"
+                            val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(adminUrl)).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            }
+                            try {
+                                context.startActivity(browserIntent)
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Kan browser niet openen: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanAccent),
+                        border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.AdminPanelSettings, contentDescription = null, tint = CyanAccent)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Open Web Beheerpaneel (/admin)", color = CyanAccent, fontWeight = FontWeight.SemiBold)
                     }
-                },
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = CoralDecline),
-                border = BorderStroke(1.dp, CoralDecline),
-                modifier = Modifier.fillMaxWidth().height(48.dp)
-            ) {
-                Icon(imageVector = Icons.Default.LinkOff, contentDescription = null, tint = CoralDecline)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Apparaat Ontkoppelen", color = CoralDecline, fontWeight = FontWeight.SemiBold)
+
+                    HorizontalDivider(color = DividerDark)
+
+                    // Knop 4: Apparaat Ontkoppelen
+                    OutlinedButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                prefs.clearAll()
+                                appLogger.info("Toestel ontkoppeld door gebruiker")
+                                onUnpair()
+                            }
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = CoralDecline),
+                        border = BorderStroke(1.dp, CoralDecline),
+                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.LinkOff, contentDescription = null, tint = CoralDecline)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Apparaat Ontkoppelen", color = CoralDecline, fontWeight = FontWeight.SemiBold)
+                    }
+                }
             }
 
             // App Versie & Updates Footer
             val appVersionText = remember {
                 try {
                     val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-                    val vName = pInfo.versionName ?: "1.8.0"
+                    val vName = pInfo.versionName ?: "2.5.0"
                     val vCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
                         pInfo.longVersionCode
                     } else {
@@ -1147,7 +846,7 @@ fun SettingsScreen(
                     }
                     "Foxway Deurbel v$vName (Build $vCode)"
                 } catch (_: Exception) {
-                    "Foxway Deurbel v1.6.0 (Build 8)"
+                    "Foxway Deurbel v2.5.0 (Build 16)"
                 }
             }
 
@@ -1722,6 +1421,69 @@ private fun EndpointRow(label: String, value: String) {
     Column {
         Text(text = label, style = MaterialTheme.typography.labelSmall, color = TextSecondary)
         Text(text = value, style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+    }
+}
+
+@Composable
+private fun CompactDetectionRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    iconTint: androidx.compose.ui.graphics.Color,
+    title: String,
+    description: String,
+    recordChecked: Boolean,
+    onRecordChange: (Boolean) -> Unit,
+    notifyChecked: Boolean,
+    onNotifyChange: (Boolean) -> Unit,
+    enabled: Boolean,
+    switchColors: SwitchColors
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(imageVector = icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(20.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                Text(description, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text("Opnemen:", style = MaterialTheme.typography.labelMedium, color = TextSecondary)
+                Switch(
+                    checked = recordChecked,
+                    onCheckedChange = onRecordChange,
+                    enabled = enabled,
+                    colors = switchColors,
+                    modifier = Modifier.scale(0.85f)
+                )
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text("Melding:", style = MaterialTheme.typography.labelMedium, color = TextSecondary)
+                Switch(
+                    checked = notifyChecked,
+                    onCheckedChange = onNotifyChange,
+                    enabled = enabled && recordChecked,
+                    colors = switchColors,
+                    modifier = Modifier.scale(0.85f)
+                )
+            }
+        }
     }
 }
 

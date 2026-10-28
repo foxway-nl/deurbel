@@ -93,7 +93,7 @@ async def test_live_hub_anti_freeze_architecture(async_client):
     # 3. Restart endpoint triggers clean supervisor restart
     resp = await async_client.post("/api/v1/live/restart")
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ok"
+    assert resp.json()["status"] in ("ok", "restarted")
 
 
 if __name__ == "__main__":

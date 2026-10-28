@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell Architectuur (v2.4.0)
+# Foxway Smart Doorbell Architectuur (v2.5.0)
 
-Dit document beschrijft de technische opzet en datastromen van versie 2.4.0.
+Dit document beschrijft de technische opzet en datastromen van versie 2.5.0.
 
 ---
 
@@ -17,21 +17,21 @@ flowchart TD
     subgraph Server ["Foxway Server (192.168.2.1)"]
         RTSP["go2rtc (Poort 8554/1984)"]
         SDK["Hikvision C-SDK (Poort 8000)"]
-        RingBuffer["RAM Ring-Buffer (/dev/shm/deurbel_ring - 25 wrap)"]
+        RingBuffer["RAM Ring-Buffer (/dev/shm/deurbel_ring - Unix TS seg_%s.ts)"]
         
         subgraph Backend ["FastAPI Backend (Docker :8090)"]
-            LiveDrain["Zero-Lag Drain Worker (RAM latest_jpeg)"]
-            Gatekeeper["3-Laags AI Gatekeeper (YOLOv8s)"]
+            LiveDrain["Zero-Lag Drain Worker (Pixel-Motion Watchdog)"]
+            Gatekeeper["3-Laags AI Gatekeeper (Vehicle Displacement & Person Priority)"]
             AdminUI["Web Admin Dashboard (/admin)"]
             SQLite[("SQLite DB WAL Mode (database.py)")]
         end
     end
 
-    subgraph Client ["Android Toestel (v2.4.0)"]
-        Telecom["Telecom Framework (Belscherm)"]
-        LiveView["LiveScreen / CallScreen (4:3 RGB_565)"]
+    subgraph Client ["Android Toestel (v2.5.0)"]
+        Telecom["Telecom Framework (10s Deduplicated CallScreen)"]
+        LiveView["LiveScreen / CallScreen (4:3 RGB_565, 72dp knoppen)"]
         HTTPFallback["150ms HTTP Snapshot Fallback"]
-        CrashHandler["Crash Logger (crash_last.json)"]
+        SettingsUI["4-Kaarten SettingsScreen (Profiel, AI, Opslag, Systeem)"]
     end
 
     CamSensor -->|RTSP| RTSP
@@ -45,9 +45,10 @@ flowchart TD
     CamMic <-->|SDK Audio| SDK
     SDK <-->|PCM Audio Bridge| LiveView
     
-    RingBuffer -->|20s Pre-roll| Gatekeeper
-    Gatekeeper -->|Event & Stub| SQLite
+    RingBuffer -->|20s Pre-roll & Gap Check| Gatekeeper
+    Gatekeeper -->|Event & Validated Clip| SQLite
     Gatekeeper -->|Push <1.5s| Telecom
+```
     
     CrashHandler -.->|POST crash| AdminUI
 ```
