@@ -305,20 +305,20 @@ async def init_db() -> None:
         except Exception:
             pass
 
-        # Seed default system_settings (v2.4.0 standards: 20s pre-roll, 20s post-roll, 30s max motion)
+        # Seed default system_settings (v2.6.0 standards: 20s pre-roll, 20s post-roll, 8s cooldown, 2 frames verify)
         now_iso = datetime.now(timezone.utc).isoformat()
         default_settings = [
             ("person_conf_threshold", "0.52", "Minimale betrouwbaarheid voor personen (0.1 - 1.0)"),
-            ("vehicle_conf_threshold", "0.55", "Minimale betrouwbaarheid voor voertuigen (0.1 - 1.0)"),
-            ("animal_conf_threshold", "0.52", "Minimale betrouwbaarheid voor dieren (0.1 - 1.0)"),
-            ("min_person_displacement_pct", "6.0", "Minimale verplaatsing persoon (% schermbreedte)"),
-            ("min_vehicle_displacement_pct", "12.0", "Minimale verplaatsing voertuig (% schermbreedte)"),
-            ("verify_frames_required", "3", "Aantal opeenvolgende frames voor traject-verificatie"),
+            ("vehicle_conf_threshold", "0.50", "Minimale betrouwbaarheid voor voertuigen (0.1 - 1.0)"),
+            ("animal_conf_threshold", "0.50", "Minimale betrouwbaarheid voor dieren (0.1 - 1.0)"),
+            ("min_person_displacement_pct", "3.0", "Minimale verplaatsing persoon (% schermbreedte)"),
+            ("min_vehicle_displacement_pct", "5.0", "Minimale verplaatsing voertuig (% schermbreedte)"),
+            ("verify_frames_required", "2", "Aantal opeenvolgende frames voor traject-verificatie"),
             ("pre_roll_seconds", "20", "Pre-roll seconden uit RAM buffer vóór gebeurtenis"),
             ("post_roll_seconds", "20", "Post-roll seconden ná verdwijnen van object"),
             ("max_active_motion_seconds", "30", "Maximale actieve bewegingsduur tijdens opname (sec)"),
             ("max_clip_seconds", "70", "Totale maximale clipduur (sec)"),
-            ("event_cooldown_seconds", "20", "Afkoelperiode tussen opeenvolgende meldingen (sec)"),
+            ("event_cooldown_seconds", "8", "Afkoelperiode tussen opeenvolgende meldingen (sec)"),
             ("ring_ding_hz", "728", "Frequentie Ding toonbel (Hz)"),
             ("ring_dong_hz", "580", "Frequentie Dong toonbel (Hz)"),
             ("ring_sharpness", "4.5", "Scherpte / resonantiefactor toonbel"),
@@ -334,10 +334,13 @@ async def init_db() -> None:
             except Exception:
                 pass
 
-        # Migration: update pre_roll_seconds and post_roll_seconds if still old defaults
+        # Migration to v2.6.0: update defaults
         try:
             await db.execute("UPDATE system_settings SET value = '20' WHERE key = 'pre_roll_seconds' AND value = '6'")
             await db.execute("UPDATE system_settings SET value = '20' WHERE key = 'post_roll_seconds' AND value = '5'")
+            await db.execute("UPDATE system_settings SET value = '2' WHERE key = 'verify_frames_required'")
+            await db.execute("UPDATE system_settings SET value = '5.0' WHERE key = 'min_vehicle_displacement_pct'")
+            await db.execute("UPDATE system_settings SET value = '8' WHERE key = 'event_cooldown_seconds'")
             await db.execute(
                 "INSERT OR IGNORE INTO system_settings (key, value, description, updated_at) VALUES ('max_active_motion_seconds', '30', 'Maximale actieve bewegingsduur tijdens opname (sec)', ?)",
                 (now_iso,),

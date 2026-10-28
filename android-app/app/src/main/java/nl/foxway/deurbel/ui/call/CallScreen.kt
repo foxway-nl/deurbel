@@ -1,6 +1,10 @@
 package nl.foxway.deurbel.ui.call
 
 import android.graphics.Bitmap
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.compose.animation.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -25,7 +29,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
+import nl.foxway.deurbel.network.ConnectionManager
 import nl.foxway.deurbel.network.LiveStreamController
 
 /**
@@ -54,6 +60,17 @@ fun CallScreen(
 ) {
     val context = LocalContext.current
     val liveStream = remember { LiveStreamController.getInstance(context) }
+    val connectionManager = remember { ConnectionManager.getInstance(context) }
+    val activeBaseUrl by connectionManager.activeBaseUrl.collectAsState()
+    val isWanMode by connectionManager.isWanMode.collectAsState()
+    val playerUrl = remember(activeBaseUrl, isWanMode) {
+        if (!isWanMode) {
+            "http://192.168.2.1:1984/stream.html?src=deurbel&mode=webrtc,mse"
+        } else {
+            val base = activeBaseUrl.ifEmpty { "https://deurbel.foxway.nl" }
+            "$base/api/v1/live/player"
+        }
+    }
     val frame by liveStream.currentBitmap.collectAsState()
     val isConnected by liveStream.isConnected.collectAsState()
 
@@ -97,33 +114,26 @@ fun CallScreen(
                 },
                 contentAlignment = Alignment.Center
             ) {
-                if (frame != null) {
-                    Image(
-                        bitmap = frame!!.asImageBitmap(),
-                        contentDescription = "Live beeld voordeur",
-                        contentScale = if (isFitMode) ContentScale.Fit else ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else if (snapshotUrl.isNotBlank()) {
-                    AsyncImage(
-                        model = snapshotUrl,
-                        contentDescription = "Snapshot voordeur",
-                        contentScale = if (isFitMode) ContentScale.Fit else ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color(0xFF111827)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator(
-                            color = Color(0xFF10B981),
-                            modifier = Modifier.size(36.dp)
-                        )
-                    }
-                }
+                AndroidView(
+                    factory = { ctx ->
+                        WebView(ctx).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                            setBackgroundColor(android.graphics.Color.BLACK)
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.mediaPlaybackRequiresUserGesture = false
+                            settings.useWideViewPort = true
+                            settings.loadWithOverviewMode = true
+                            setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                            webViewClient = object : WebViewClient() {}
+                            loadUrl(playerUrl)
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
             }
         }
 

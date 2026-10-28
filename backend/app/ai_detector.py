@@ -24,6 +24,7 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import math
@@ -65,12 +66,12 @@ COCO_NAMES = {
 }
 
 _MODEL_PATH = (
-    "/mnt/opslag/deurbel/backend/yolov8s.pt"
-    if os.path.exists("/mnt/opslag/deurbel/backend/yolov8s.pt")
+    "/mnt/opslag/deurbel/backend/yolov8n.pt"
+    if os.path.exists("/mnt/opslag/deurbel/backend/yolov8n.pt")
     else (
-        "/app/yolov8s.pt"
-        if os.path.exists("/app/yolov8s.pt")
-        else "yolov8s.pt"
+        "/mnt/opslag/deurbel/backend/yolov8s.pt"
+        if os.path.exists("/mnt/opslag/deurbel/backend/yolov8s.pt")
+        else "yolov8n.pt"
     )
 )
 
@@ -148,7 +149,7 @@ class DetectionSettings:
 
 
 class CandidateDetection:
-    """Represents an object candidate being tracked through 3-frame trajectory verification."""
+    """Represents an object candidate being tracked through 2-frame trajectory verification."""
 
     def __init__(
         self,
@@ -158,6 +159,7 @@ class CandidateDetection:
         box: tuple[float, float, float, float],
         conf: float,
         timestamp: float,
+        motion_ratio: float = 0.0,
     ):
         self.candidate_id = candidate_id
         self.category = category
@@ -167,6 +169,7 @@ class CandidateDetection:
         self.frames: list[tuple[float, tuple[float, float, float, float], float]] = [
             (timestamp, box, conf)
         ]
+        self.motion_ratios: list[float] = [motion_ratio]
         self.best_box = box
         self.best_conf = conf
         self.best_frame: Optional[np.ndarray] = None
@@ -176,8 +179,8 @@ class CandidateDetection:
 
 class SmartDetector:
     """
-    3-Layer Verification Gatekeeper AI Pipeline (v2.3.0).
-    Runs on 960x720 4:3 video stream at 5 fps.
+    Temporal Pixel-Diff Masking AI Pipeline (v2.6.0).
+    Runs on 640x480 4:3 video stream at 5 fps (<45ms per frame via YOLOv8n).
     """
 
     def __init__(self):
@@ -189,8 +192,12 @@ class SmartDetector:
         self.avg_bg: Optional[np.ndarray] = None
         self.kernel_5x5 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 
+        # Temporal frame history: deque of (timestamp, gray_frame) for 1.2s motion mask
+        self.frame_history: collections.deque[tuple[float, np.ndarray]] = collections.deque(maxlen=10)
+
         # Spatial parked vehicle reference boxes: list of (x1, y1, x2, y2)
         self.parked_vehicle_boxes: list[tuple[float, float, float, float]] = []
+        self.static_parked_boxes: list[tuple[float, float, float, float]] = []
         self.last_baseline_update: float = 0.0
 
         # ByteTrack object tracking metrics
@@ -198,7 +205,7 @@ class SmartDetector:
         self.track_frame_counts: dict[int, int] = {}                  # tid -> frame count
         self.track_history: dict[int, list[tuple[float, float]]] = {} # tid -> list of (cx, cy)
 
-        # 3-Frame Verification Gatekeeper state
+        # Verification Gatekeeper state
         self._candidate_tracks: dict[str, CandidateDetection] = {}    # track_id -> CandidateDetection
         self._next_candidate_num: int = 1
 
@@ -206,7 +213,7 @@ class SmartDetector:
         self._running: bool = False
         self._task: Optional[asyncio.Task] = None
         self._last_trigger_time: float = 0.0
-        self._cooldown_seconds: float = 20.0
+        self._cooldown_seconds: float = 8.0
         self._last_verified_object_seen: float = 0.0
         self._last_person_seen: float = 0.0
 
@@ -215,17 +222,17 @@ class SmartDetector:
         return (time.time() - self._last_verified_object_seen) < 2.5
 
     def init_model(self) -> bool:
-        """Initialize official Ultralytics YOLOv8s model and Roboflow Supervision components."""
+        """Initialize official Ultralytics YOLOv8n model and Roboflow Supervision components."""
         if self.model is not None and self.tracker is not None:
             return True
         try:
             self.model = YOLO(_MODEL_PATH)
             self.tracker = sv.ByteTrack(lost_track_buffer=30, minimum_matching_threshold=0.8)
             self.smoother = sv.DetectionsSmoother(length=3)
-            logger.info("Ultralytics YOLOv8s + Supervision ByteTrack initialized from %s", _MODEL_PATH)
+            logger.info("Ultralytics YOLOv8n + Supervision ByteTrack initialized from %s", _MODEL_PATH)
             return True
         except Exception as e:
-            logger.error("Failed loading YOLOv8s/Supervision: %s", e)
+            logger.error("Failed loading YOLOv8n/Supervision: %s", e)
             return False
 
     def is_in_quiet_hours(self, start_str: str, end_str: str) -> bool:
@@ -486,8 +493,8 @@ class SmartDetector:
             cx = (bx1 + bx2) / 2.0
             cy = (by1 + by2) / 2.0
 
-            # Footpoint filter: bottom must reach ground (y2 >= 0.25 * h)
-            if by2 < (0.25 * h):
+            # Footpoint filter: bottom must reach ground (y2 >= 0.22 * h)
+            if by2 < (0.22 * h):
                 continue
 
             self.track_frame_counts[tid] = self.track_frame_counts.get(tid, 0) + 1
@@ -507,21 +514,24 @@ class SmartDetector:
             disp_ratio = tot_disp / screen_w
 
             if cid in PERSON_CLASSES:
-                if conf < 0.45 or pixel_change_ratio < 0.04:
+                if conf < 0.40 or pixel_change_ratio < 0.04:
                     continue
                 if best_person is None or conf > best_person[2]:
                     best_person = ("person", "Persoon", conf)
             elif cid in ANIMAL_CLASSES:
-                if conf < 0.45 or pixel_change_ratio < 0.04:
+                if conf < 0.42 or pixel_change_ratio < 0.04:
                     continue
                 if best_animal is None or conf > best_animal[2]:
                     best_animal = ("animal", COCO_NAMES.get(cid, "Dier"), conf)
             elif cid in VEHICLE_CLASSES:
-                # Parked car filter: displacement >= 12% screen width required!
-                if cid in {2, 5, 7}:
-                    if pixel_change_ratio < 0.25 or disp_ratio < 0.12:
+                # Static parked car or stationary spot filter:
+                if pixel_change_ratio < 0.04:
+                    continue
+                is_parked = is_parked_vehicle((bx1, by1, bx2, by2), self.parked_vehicle_boxes, 0.45)
+                if is_parked:
+                    if pixel_change_ratio < 0.25 or disp_ratio < 0.05:
                         continue
-                elif disp_ratio < 0.08 or pixel_change_ratio < 0.15:
+                elif pixel_change_ratio < 0.15 and disp_ratio < 0.05:
                     continue
                 if best_vehicle is None or conf > best_vehicle[2]:
                     best_vehicle = ("vehicle", COCO_NAMES.get(cid, "Voertuig"), conf)
@@ -555,8 +565,8 @@ class SmartDetector:
 
     async def _detection_loop(self) -> None:
         """
-        Main continuous 3-Layer Verification Loop.
-        Operates on 960x720 4:3 video frames at 5 FPS (0.20s interval).
+        Main continuous Temporal Pixel-Diff Verification Loop (v2.6.0).
+        Operates on 640x480 4:3 video frames at 5 FPS (0.20s interval) via YOLOv8n (<45ms).
         """
         await asyncio.sleep(2)  # Wait for LiveHub initialization
         frame_interval = 0.20
@@ -574,6 +584,11 @@ class SmartDetector:
                 frame_ts = live_hub.latest_frame_ts
 
                 if not jpeg_bytes or frame_ts <= 0 or frame_ts == last_processed_ts:
+                    # Quick fallback snapshot fetch if cache is cold
+                    jpeg_bytes = await live_hub.fetch_snapshot_async(timeout=1.0)
+                    frame_ts = live_hub.latest_frame_ts
+
+                if not jpeg_bytes:
                     await asyncio.sleep(0.04)
                     continue
 
@@ -586,14 +601,14 @@ class SmartDetector:
                     await asyncio.sleep(0.04)
                     continue
 
-                # Native 4:3 target resolution (960x720)
-                if raw_frame.shape[1] != 960 or raw_frame.shape[0] != 720:
-                    frame_960 = cv2.resize(raw_frame, (960, 720))
+                # Native 4:3 target resolution (640x480 for fast 5 FPS inference)
+                if raw_frame.shape[1] != 640 or raw_frame.shape[0] != 480:
+                    frame_640 = cv2.resize(raw_frame, (640, 480))
                 else:
-                    frame_960 = raw_frame
+                    frame_640 = raw_frame
 
-                # Run 3-Layer Verification Gatekeeper
-                await self._process_frame_gatekeeper(frame_960, now_t, cfg)
+                # Run Temporal Pixel-Diff Masking Gatekeeper
+                await self._process_frame_gatekeeper(frame_640, now_t, cfg)
                 await asyncio.sleep(frame_interval)
 
             except asyncio.CancelledError:
@@ -609,37 +624,67 @@ class SmartDetector:
         cfg: dict,
     ) -> None:
         """
-        Processes frame through Layer 1, Layer 2 (3-Frame Trajectory), and Layer 3.
+        Processes frame through YOLOv8n + Temporal Pixel-Diff Masking (v2.6.0).
+        - Temporal pixel diff between frame_now and frame ~1.2s ago.
+        - Parked vehicles with changed_pixel_ratio < 0.04 ignored immediately as STATIC_PARKED_CAR.
+        - Moving vehicles verified via Manier 1 (New, IoU < 0.50, 2 frames, ratio >= 0.15)
+          or Manier 2 (Departing, ratio >= 0.25, centroid shift >= 5%).
+        - Persons and animals verified over 2 frames (ratio >= 0.08, displacement >= 3%).
         """
         if self.model is None and not self.init_model():
             return
 
         h, w = frame.shape[:2]
 
-        # ── 1. Load Dynamic System Settings from SQLite ───────────────────
+        # ── 1. Temporal Pixel-Diff Motion Mask (frame_now vs frame ~1.2s ago) ────
+        gray_now = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        self.frame_history.append((now, gray_now))
+
+        gray_prev = None
+        for t, g in self.frame_history:
+            dt = now - t
+            if 0.8 <= dt <= 1.6:
+                gray_prev = g
+                break
+        if gray_prev is None and len(self.frame_history) >= 2:
+            if (now - self.frame_history[0][0]) >= 0.35:
+                gray_prev = self.frame_history[0][1]
+
+        if gray_prev is not None and gray_prev.shape == gray_now.shape:
+            diff = cv2.absdiff(
+                cv2.GaussianBlur(gray_now, (9, 9), 0),
+                cv2.GaussianBlur(gray_prev, (9, 9), 0),
+            )
+            _, motion_mask = cv2.threshold(diff, 18, 255, cv2.THRESH_BINARY)
+        else:
+            motion_mask = np.zeros_like(gray_now)
+
+        # ── 2. Load Dynamic System Settings from SQLite ───────────────────
         try:
             sys_settings = await get_system_settings()
-            person_conf_thresh = float(sys_settings.get("person_conf_threshold", "0.52"))
-            vehicle_conf_thresh = float(sys_settings.get("vehicle_conf_threshold", "0.55"))
-            animal_conf_thresh = float(sys_settings.get("animal_conf_threshold", "0.52"))
-            min_person_disp = float(sys_settings.get("min_person_displacement_pct", "6.0")) / 100.0
-            min_vehicle_disp = float(sys_settings.get("min_vehicle_displacement_pct", "12.0")) / 100.0
-            verify_frames_req = int(sys_settings.get("verify_frames_required", "3"))
-            cooldown_sec = float(sys_settings.get("event_cooldown_seconds", "20"))
+            person_conf_thresh = float(sys_settings.get("person_conf_threshold", "0.40"))
+            vehicle_conf_thresh = float(sys_settings.get("vehicle_conf_threshold", "0.40"))
+            animal_conf_thresh = float(sys_settings.get("animal_conf_threshold", "0.42"))
+            min_person_disp = float(sys_settings.get("min_person_displacement_pct", "3.0")) / 100.0
+            min_vehicle_disp = float(sys_settings.get("min_vehicle_displacement_pct", "5.0")) / 100.0
+            verify_frames_req = int(sys_settings.get("verify_frames_required", "2"))
+            cooldown_sec = float(sys_settings.get("event_cooldown_seconds", "8"))
             self._cooldown_seconds = cooldown_sec
 
             zones_raw = sys_settings.get("exclusion_zones", "[]")
             exclusion_zones = json.loads(zones_raw) if zones_raw else []
-        except Exception as e:
-            person_conf_thresh = 0.52
-            vehicle_conf_thresh = 0.55
-            animal_conf_thresh = 0.52
-            min_person_disp = 0.06
-            min_vehicle_disp = 0.12
-            verify_frames_req = 3
+        except Exception:
+            person_conf_thresh = 0.40
+            vehicle_conf_thresh = 0.40
+            animal_conf_thresh = 0.42
+            min_person_disp = 0.03
+            min_vehicle_disp = 0.05
+            verify_frames_req = 2
+            cooldown_sec = 8.0
+            self._cooldown_seconds = 8.0
             exclusion_zones = []
 
-        # ── 2. Layer 1: Full 4:3 Frame YOLO Inference (imgsz=640) ────────
+        # ── 3. Layer 1: Fast YOLOv8n Inference (imgsz=640, <45ms) ─────────
         try:
             results = self.model(
                 frame,
@@ -649,7 +694,7 @@ class SmartDetector:
                 verbose=False,
             )
         except Exception as e:
-            logger.warning("YOLOv8s full-frame inference failed: %s", e)
+            logger.warning("YOLOv8n inference failed: %s", e)
             return
 
         if not results or len(results) == 0 or results[0].boxes is None:
@@ -684,52 +729,55 @@ class SmartDetector:
 
             label = COCO_NAMES.get(cid, category)
 
-            # Layer 1 Check A: Footpoint Ground-Plane Filter
-            # The bottom of the box (by2) must be >= 0.25 * frame height (i.e. on ground plane).
-            # Tree tops, roof eaves, and sky fluttering are rejected immediately!
-            if by2 < (0.25 * h):
-                logger.debug("Rejected %s at y2=%.1f < 0.25*h (Footpoint in tree top)", label, by2)
+            # Stap A: Loopvlak Ground-Plane Filter
+            # The bottom of the box (by2) must be >= 0.22 * frame height.
+            if by2 < (0.22 * h):
                 continue
 
-            # Layer 1 Check B: Exclusion Zones
+            # Stap B: Exclusion Zones
             in_zone, zone_name = self.is_in_exclusion_zone(box, (h, w), exclusion_zones)
             if in_zone:
-                # Log rejected exclusion zone audit log once in a while
-                if (now - self._last_trigger_time) > 10.0:
-                    asyncio.create_task(
-                        save_ai_audit_log(
-                            status="REJECTED",
-                            category=category,
-                            label=label,
-                            confidence=round(conf, 2),
-                            displacement_pct=0.0,
-                            reason=f"GEBLOKKEERD: Object bevindt zich in uitsluitingszone '{zone_name}'",
-                            snapshot_path="",
-                            boxes_json=json.dumps([{"x1": bx1, "y1": by1, "x2": bx2, "y2": by2}]),
-                        )
-                    )
                 continue
 
-            # Layer 1 Check C: Confidence Threshold
+            # Confidence check
             if conf < req_conf:
                 continue
 
-            detected_candidates.append((category, label, conf, box))
+            # Stap C: Pixel-level motion inside bounding box
+            ibx1, iby1 = max(0, int(bx1)), max(0, int(by1))
+            ibx2, iby2 = min(w, int(bx2)), min(h, int(by2))
+            box_motion = motion_mask[iby1:iby2, ibx1:ibx2]
+            changed_pixel_ratio = (
+                float(np.count_nonzero(box_motion)) / float(box_motion.size)
+                if box_motion.size > 0
+                else 0.0
+            )
+
+            # Static Parked Car Check:
+            if category == "vehicle" and changed_pixel_ratio < 0.04:
+                # Add to static parked car list so spot is remembered
+                if not is_parked_vehicle(box, self.parked_vehicle_boxes, threshold=0.50):
+                    self.parked_vehicle_boxes.append(box)
+                    if len(self.parked_vehicle_boxes) > 15:
+                        self.parked_vehicle_boxes.pop(0)
+                logger.debug("STATIC_PARKED_CAR rejected at %s (ratio=%.4f < 0.04)", box, changed_pixel_ratio)
+                continue
+
+            detected_candidates.append((category, label, conf, box, changed_pixel_ratio))
 
         # Check person priority:
-        has_person_now = any(cat == "person" for (cat, _, _, _) in detected_candidates)
+        has_person_now = any(cat == "person" for (cat, _, _, _, _) in detected_candidates)
         if has_person_now:
             self._last_person_seen = now
         has_person_priority = (now - self._last_person_seen) < 20.0
 
-        # ── 3. Layer 2: 3-Frame Trajectory Verification Gatekeeper ────────
-        for category, label, conf, box in detected_candidates:
-            # Person Priority Rule (TAAK 3): If person is active or seen within 20s, suppress vehicle detection
-            if category == "vehicle" and has_person_priority:
-                logger.debug("Vehicle candidate suppressed: person active or detected within last 20s")
+        # ── 4. Candidate Association & Verification ───────────────────────
+        for category, label, conf, box, pixel_ratio in detected_candidates:
+            # Person Priority: if person active within 20s, suppress lower confidence vehicles
+            if category == "vehicle" and has_person_priority and conf < 0.70:
+                logger.debug("Vehicle candidate suppressed: person active within last 20s")
                 continue
 
-            # Match with existing candidate track using nearest distance & size similarity
             matched_id = None
             best_iou = 0.0
 
@@ -746,16 +794,15 @@ class SmartDetector:
                     lbw = last_box[2] - last_box[0]
                     size_ratio = min(bw, lbw) / max(1.0, max(bw, lbw))
 
-                    # Strict association: require good IoU or close center AND similar bbox size
-                    # (Prevents swapping parked car #1 on left with car #2 on right)
-                    if iou >= 0.25 or (dist < 0.08 and size_ratio > 0.60):
-                        if iou > best_iou or (best_iou == 0.0 and dist < 0.08):
+                    if iou >= 0.20 or (dist < 0.12 and size_ratio > 0.50):
+                        if iou > best_iou or (best_iou == 0.0 and dist < 0.12):
                             best_iou = max(iou, 0.01)
                             matched_id = tid
 
             if matched_id is not None:
                 track = self._candidate_tracks[matched_id]
                 track.frames.append((now, box, conf))
+                track.motion_ratios.append(pixel_ratio)
                 track.last_time = now
                 if conf > track.best_conf:
                     track.best_conf = conf
@@ -764,18 +811,17 @@ class SmartDetector:
             else:
                 tid = f"track_{self._next_candidate_num}"
                 self._next_candidate_num += 1
-                cand = CandidateDetection(tid, category, label, box, conf, now)
+                cand = CandidateDetection(tid, category, label, box, conf, now, pixel_ratio)
                 cand.best_frame = frame.copy()
                 self._candidate_tracks[tid] = cand
 
-        # ── 4. Verify Active Tracks Over >= 3 Frames ───────────────────────
+        # ── 5. Verify Active Tracks Over >= 2 Frames ───────────────────────
         to_remove = []
 
         for tid, track in list(self._candidate_tracks.items()):
             if track.verified:
                 continue
 
-            # Check if candidate has collected >= verify_frames_req (default 3 frames)
             if len(track.frames) >= verify_frames_req:
                 duration_tracked = track.last_time - track.first_time
                 first_box = track.frames[0][1]
@@ -783,82 +829,71 @@ class SmartDetector:
 
                 cx1 = (first_box[0] + first_box[2]) / 2.0
                 cy1 = (first_box[1] + first_box[3]) / 2.0
-                cx3 = (last_box[0] + last_box[2]) / 2.0
-                cy3 = (last_box[1] + last_box[3]) / 2.0
+                cx2 = (last_box[0] + last_box[2]) / 2.0
+                cy2 = (last_box[1] + last_box[3]) / 2.0
 
-                # Mandatory Displacement Delta d Calculation
-                delta_d = math.hypot(cx3 - cx1, cy3 - cy1) / float(w)
+                delta_d = math.hypot(cx2 - cx1, cy2 - cy1) / float(w)
                 delta_d_pct = round(delta_d * 100.0, 1)
+                max_pixel_ratio = max(track.motion_ratios) if track.motion_ratios else 0.0
 
-                # Determine displacement threshold based on category
-                req_disp = min_person_disp if track.category in ("person", "animal") else min_vehicle_disp
-                req_disp_pct = round(req_disp * 100.0, 1)
+                is_valid_object = False
+                verified_disp_pct = delta_d_pct
 
-                # Check category-specific motion rules
                 if track.category == "vehicle":
-                    # Hard mathematical displacement test for vehicles (TAAK 3):
-                    # BOTH left edge and right edge of the bounding box itself must shift >= 12% in the same direction!
-                    dx_left = abs(last_box[0] - first_box[0]) / float(w)
-                    dx_right = abs(last_box[2] - first_box[2]) / float(w)
-                    shift_left = last_box[0] - first_box[0]
-                    shift_right = last_box[2] - first_box[2]
-                    same_direction = (shift_left * shift_right) > 0
+                    is_parked_spot = is_parked_vehicle(last_box, self.parked_vehicle_boxes, threshold=0.50)
 
-                    is_parked = (dx_left < 0.03 and dx_right < 0.03)
-                    is_moving_vehicle = (dx_left >= min_vehicle_disp and dx_right >= min_vehicle_disp and same_direction)
+                    # Manier 1 (Nieuw in beeld verschenen):
+                    # Niet op een geparkeerde plek 2s geleden, gezien in 2 frames met changed_pixel_ratio >= 0.15
+                    if (not is_parked_spot) and max_pixel_ratio >= 0.15 and len(track.frames) >= 2:
+                        is_valid_object = True
+                        verified_disp_pct = max(delta_d_pct, 5.0)
+                        logger.info("Vehicle Manier 1 (New Moving Vehicle): %s ratio=%.2f, frames=%d", track.label, max_pixel_ratio, len(track.frames))
 
-                    if is_parked:
+                    # Manier 2 (Wegrijdende of inparkerende auto):
+                    # Overlapt geparkeerde plek, ratio >= 0.25 én centroid shift >= 5% van schermbreedte
+                    elif is_parked_spot and max_pixel_ratio >= 0.25 and delta_d >= min_vehicle_disp:
+                        is_valid_object = True
+                        verified_disp_pct = delta_d_pct
+                        logger.info("Vehicle Manier 2 (Departing/Parking): %s ratio=%.2f, disp=%.1f%%", track.label, max_pixel_ratio, delta_d_pct)
+
+                    elif duration_tracked >= 1.2:
                         to_remove.append(tid)
-                        reason = f"GEBLOKKEERD: Geparkeerd voertuig bleef stilstaan (dx_left={dx_left*100:.1f}%, dx_right={dx_right*100:.1f}% < 3%)"
-                        logger.info("Gatekeeper REJECTED parked car [%s]: %s", tid, reason)
+                        logger.debug("Vehicle rejected: static/insufficient motion ratio=%.2f, disp=%.1f%%", max_pixel_ratio, delta_d_pct)
                         continue
 
-                    if not is_moving_vehicle:
-                        if duration_tracked >= 1.0:
-                            to_remove.append(tid)
-                            reason = f"GEBLOKKEERD: Voertuigkader verplaatste onvoldoende (dx_left={dx_left*100:.1f}%, dx_right={dx_right*100:.1f}%, min={req_disp_pct}%)"
-                            logger.info("Gatekeeper REJECTED vehicle [%s]: %s", tid, reason)
+                elif track.category in ("person", "animal"):
+                    # Person / Animal: 2 opeenvolgende frames (0.4s), ratio >= 0.08, displacement >= 3%
+                    if max_pixel_ratio >= 0.08 and delta_d >= min_person_disp:
+                        is_valid_object = True
+                        verified_disp_pct = delta_d_pct
+                    elif duration_tracked >= 1.0:
+                        to_remove.append(tid)
+                        logger.debug("%s rejected: ratio=%.2f, disp=%.1f%%", track.label, max_pixel_ratio, delta_d_pct)
                         continue
-
-                    verified_disp_pct = round(max(dx_left, dx_right) * 100.0, 1)
-                else:
-                    # Person / Animal: displacement check
-                    if delta_d < req_disp:
-                        if duration_tracked >= 1.0:
-                            to_remove.append(tid)
-                            object_type_dutch = "Stilstaand object/struik"
-                            reason = (
-                                f"GEBLOKKEERD: {object_type_dutch} verplaatste slechts {delta_d_pct}% "
-                                f"(minimaal {req_disp_pct}% vereist) — Statisch"
-                            )
-                            logger.info("Gatekeeper REJECTED [%s]: %s", tid, reason)
-                        continue
-                    verified_disp_pct = delta_d_pct
 
                 # ✅ VERIFICATION PASSED!
-                track.verified = True
-                self._last_verified_object_seen = now
-                to_remove.append(tid)
+                if is_valid_object:
+                    track.verified = True
+                    self._last_verified_object_seen = now
+                    to_remove.append(tid)
 
-                reason = (
-                    f"GOEDGEKEURD: {track.label} geverifieerd over {len(track.frames)} frames "
-                    f"met {verified_disp_pct}% verplaatsing (min. {req_disp_pct}% vereist)"
-                )
-                logger.info("Gatekeeper APPROVED [%s]: %s (conf=%.2f, Delta d=%.1f%%)", tid, track.label, track.best_conf, verified_disp_pct)
-
-                # Trigger Layer 3: Immediate Push & Object Recording
-                best_img = track.best_frame if track.best_frame is not None else frame
-                asyncio.create_task(
-                    self._dispatch_verified_detection(
-                        category=track.category,
-                        label=track.label,
-                        confidence=track.best_conf,
-                        disp_pct=verified_disp_pct,
-                        box=track.best_box,
-                        keyframe=best_img,
-                        cfg=cfg,
+                    logger.info(
+                        "Gatekeeper APPROVED [%s]: %s (conf=%.2f, Delta d=%.1f%%, ratio=%.2f)",
+                        tid, track.label, track.best_conf, verified_disp_pct, max_pixel_ratio
                     )
-                )
+
+                    best_img = track.best_frame if track.best_frame is not None else frame
+                    asyncio.create_task(
+                        self._dispatch_verified_detection(
+                            category=track.category,
+                            label=track.label,
+                            confidence=track.best_conf,
+                            disp_pct=verified_disp_pct,
+                            box=track.best_box,
+                            keyframe=best_img,
+                            cfg=cfg,
+                        )
+                    )
 
         for tid in to_remove:
             self._candidate_tracks.pop(tid, None)

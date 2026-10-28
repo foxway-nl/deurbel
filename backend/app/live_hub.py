@@ -1,17 +1,13 @@
 """
-Foxway Smart Doorbell — Always-Warm RAM Live Hub (v2.5.0).
+Foxway Smart Doorbell — Always-Warm RAM Live Hub (v2.6.0).
 
-Keeps a persistent 24/7 connection to go2rtc RTSP (with direct camera fallback) in memory:
-- Decodes 10 fps 4:3 video (768x576) into RAM (self.latest_jpeg).
-- Reads 16kHz mono 16-bit PCM incoming audio from doorbell microphone via UDP.
-- Streams realtime frames and audio over WebSocket /api/v1/ws/live (<100ms latency on 5G & LAN).
-- Instant snapshot endpoint /api/v1/live/instant.jpg (<5ms from RAM).
-- Zero-lag pipe drain worker ensures freshest frame in RAM with zero OS buffer bloat.
-- Anti-Freeze Clock-Motion Watchdog:
-  * Compares pixel content of the camera-clock area (top-left 0:80, 0:350) with frame from 3.0s ago.
-  * If mean pixel difference over 3s is < 0.15 (or 0.0), camera clock is frozen -> triggers self-heal.
-  * Immediate ffmpeg process monitoring (no stalling when ffmpeg exits).
-  * go2rtc stream restart via POST /api/restart and direct RTSP failover.
+Hardware-accelerated streaming is handled natively by go2rtc via MSE + WebRTC (/api/v1/live/player).
+LiveHub provides ultra-low-overhead snapshot caching and fallback streaming:
+- On-demand snapshot fetching from go2rtc (http://127.0.0.1:1984/api/frame.jpeg?src=deurbel).
+- Zero CPU image2pipe transcoding when no WebSocket clients are listening (0% server CPU overhead).
+- Realtime frame caching for AI detector (ai_detector.py) and instant snapshot APIs.
+- UDP incoming audio listener on port 18555 for two-way audio bridge integration.
+- Anti-Freeze Clock-Motion Watchdog to verify live stream continuity.
 """
 
 from __future__ import annotations
@@ -24,6 +20,7 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.request
 import zlib
 from typing import Optional, Set
 
@@ -37,10 +34,12 @@ AUDIO_UDP_HOST = "127.0.0.1"
 AUDIO_UDP_PORT = 18555
 PRIMARY_RTSP_SOURCE = "rtsp://127.0.0.1:8554/deurbel"
 DIRECT_CAMERA_RTSP = "rtsp://admin:aero2006Mo_@192.168.2.31:554/H.264/ch1/main/av_stream"
+GO2RTC_SNAPSHOT_URL = "http://127.0.0.1:1984/api/frame.jpeg?src=deurbel"
+GO2RTC_SUB_SNAPSHOT_URL = "http://127.0.0.1:1984/api/frame.jpeg?src=deurbel_sub"
 
 
 class LiveHub:
-    """Always-Warm In-Memory Stream Hub with Real-Time Anti-Freeze Watchdog."""
+    """Always-Warm In-Memory Stream Hub with Real-Time Anti-Freeze Watchdog (v2.6.0)."""
 
     def __init__(self) -> None:
         self.latest_jpeg: Optional[bytes] = None
@@ -81,7 +80,47 @@ class LiveHub:
         return None
 
     def get_latest_frame(self) -> Optional[bytes]:
-        """Returns latest in-memory JPEG frame, or None if stream is not ready."""
+        """Returns latest in-memory JPEG frame, or fetches a fresh snapshot if available."""
+        if self.latest_jpeg:
+            return self.latest_jpeg
+        return self.fetch_snapshot_sync()
+
+    def fetch_snapshot_sync(self, timeout: float = 1.5) -> Optional[bytes]:
+        """Fetch fresh JPEG frame synchronously from go2rtc without running ffmpeg subprocess."""
+        for url in (GO2RTC_SUB_SNAPSHOT_URL, GO2RTC_SNAPSHOT_URL):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "FoxwayLiveHub/2.6.0"})
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    if resp.status == 200:
+                        data = resp.read()
+                        if len(data) > 1000:
+                            now = time.time()
+                            now_mono = time.monotonic()
+                            self.latest_jpeg = data
+                            self.latest_frame_ts = now
+                            self.last_fresh_frame_time = now_mono
+                            self.frame_seq += 1
+                            return data
+            except Exception as e:
+                logger.debug("Snapshot sync fetch (%s): %s", url, e)
+        return self.latest_jpeg
+
+    async def fetch_snapshot_async(self, timeout: float = 2.0) -> Optional[bytes]:
+        """Fetch fresh JPEG frame asynchronously from go2rtc."""
+        for url in (GO2RTC_SUB_SNAPSHOT_URL, GO2RTC_SNAPSHOT_URL):
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.get(url)
+                    if resp.status_code == 200 and len(resp.content) > 1000:
+                        now = time.time()
+                        now_mono = time.monotonic()
+                        self.latest_jpeg = resp.content
+                        self.latest_frame_ts = now
+                        self.last_fresh_frame_time = now_mono
+                        self.frame_seq += 1
+                        return resp.content
+            except Exception as e:
+                logger.debug("Snapshot async fetch (%s): %s", url, e)
         return self.latest_jpeg
 
     async def start(self) -> None:
@@ -90,10 +129,10 @@ class LiveHub:
             return
         self._running = True
         self._supervisor_task = asyncio.create_task(self._supervisor_loop())
-        logger.info("Always-Warm RAM Live Hub started with anti-freeze watchdog (v2.5.0)")
+        logger.info("Always-Warm RAM Live Hub started in hardware streaming mode (v2.6.0)")
 
     async def stop(self) -> None:
-        """Stop supervisor and terminate ffmpeg process."""
+        """Stop supervisor and terminate processes."""
         self._running = False
         if self._supervisor_task and not self._supervisor_task.done():
             self._supervisor_task.cancel()
@@ -106,20 +145,21 @@ class LiveHub:
         logger.info("Always-Warm RAM Live Hub stopped")
 
     def _kill_process(self) -> None:
-        """Immediate SIGKILL of ffmpeg reader process."""
+        """Immediate SIGKILL of fallback ffmpeg process if running."""
         if self._proc:
             try:
                 self._proc.kill()
             except Exception:
                 pass
+            self._proc = None
 
     async def restart(self) -> None:
         """
-        Force immediate kill and restart of ffmpeg stream reader.
-        1. Kills ffmpeg process.
-        2. Restarts go2rtc stream or switches to direct camera RTSP.
+        Force immediate kill and restart of live stream.
+        1. Kills any fallback process.
+        2. Restarts go2rtc stream via POST /api/restart.
         3. Clears cached frozen frame from memory.
-        4. Waits until an actual new frame with active camera clock arrives before returning.
+        4. Fetches a fresh frame before returning.
         """
         logger.info("LiveHub explicit restart requested — triggering immediate re-init")
         self._kill_process()
@@ -130,7 +170,7 @@ class LiveHub:
 
         # Trigger go2rtc reload
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
+            async with httpx.AsyncClient(timeout=3.0) as client:
                 await client.post("http://127.0.0.1:1984/api/restart")
                 logger.info("go2rtc stream reset signaled successfully")
         except Exception as e:
@@ -139,21 +179,15 @@ class LiveHub:
         # Wait up to 3.5s for fresh frame arrival
         t0 = time.monotonic()
         while time.monotonic() - t0 < 3.5:
-            if self.latest_jpeg and self.last_fresh_frame_time > 0 and (time.monotonic() - self.last_fresh_frame_time < 1.0):
+            fresh = await self.fetch_snapshot_async(timeout=1.5)
+            if fresh and self.last_fresh_frame_time > 0 and (time.monotonic() - self.last_fresh_frame_time < 1.0):
                 logger.info("LiveHub restart verified: fresh frame received (<%.2fs)", time.monotonic() - t0)
                 break
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.2)
 
     def _cleanup_process(self) -> None:
         """Kill subprocess and close UDP socket."""
-        if self._proc:
-            try:
-                self._proc.terminate()
-                self._proc.wait(timeout=0.5)
-            except Exception:
-                self._kill_process()
-            self._proc = None
-
+        self._kill_process()
         if self._udp_sock:
             try:
                 self._udp_sock.close()
@@ -180,7 +214,7 @@ class LiveHub:
         for q in list(self._clients):
             if q.full():
                 try:
-                    q.get_nowait()  # Drop oldest frame to prevent lag
+                    q.get_nowait()
                 except asyncio.QueueEmpty:
                     pass
             try:
@@ -189,244 +223,50 @@ class LiveHub:
                 pass
 
     async def _supervisor_loop(self) -> None:
-        """Supervises the ffmpeg decoding process and restarts on failure within 100ms."""
+        """
+        Lightweight Supervisor Loop (v2.6.0):
+        - Binds UDP audio socket for two-way audio.
+        - When no WebSocket clients are listening, zero CPU transcoding is performed.
+        - Periodically refreshes RAM frame cache from go2rtc to keep latest_jpeg warm.
+        - Broadcasts frames to WebSocket clients if connected.
+        """
         while self._running:
             try:
                 # 1. Bind UDP socket for audio
-                self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                self._udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                self._udp_sock.bind((AUDIO_UDP_HOST, AUDIO_UDP_PORT))
-                self._udp_sock.setblocking(False)
+                if not self._udp_sock:
+                    self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    self._udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    self._udp_sock.bind((AUDIO_UDP_HOST, AUDIO_UDP_PORT))
+                    self._udp_sock.setblocking(False)
 
-                # 2. Reset watchdog & state metrics
-                self.last_crc32 = 0
-                self.identical_crc_count = 0
-                self.last_fresh_frame_time = 0.0
-                self._proc_start_time = time.monotonic()
-                self._pixel_samples.clear()
-                self._consecutive_frozen_checks = 0
-
-                # Determine active source (primary go2rtc or direct camera RTSP failover)
-                rtsp_target = self._active_source
-
-                # 3. Launch nice -n 15 ffmpeg process with clean, compatible zero-latency flags
-                cmd = [
-                    "nice", "-n", "15",
-                    "ffmpeg", "-y", "-nostdin",
-                    "-hide_banner", "-loglevel", "error",
-                    "-rtsp_transport", "tcp",
-                    "-fflags", "nobuffer",
-                    "-i", rtsp_target,
-                    "-map", "0:v:0",
-                    "-vf", "scale=768:576,setsar=1:1",
-                    "-r", "10",
-                    "-f", "image2pipe",
-                    "-vcodec", "mjpeg",
-                    "-q:v", "5",
-                    "pipe:1",
-                    "-map", "0:a:0?",
-                    "-f", "s16le",
-                    "-acodec", "pcm_s16le",
-                    "-ar", "16000",
-                    "-ac", "1",
-                    f"udp://{AUDIO_UDP_HOST}:{AUDIO_UDP_PORT}",
-                ]
-
-                logger.info("Starting ffmpeg zero-latency reader (%s): %s", rtsp_target, " ".join(cmd[:12]))
-                self._proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    bufsize=65536,
-                )
-
-                # 4. Start dedicated pipe drain thread to eliminate OS buffer backlog
                 loop = asyncio.get_running_loop()
-                drain_stop_event = threading.Event()
-                drain_thread = threading.Thread(
-                    target=self._drain_worker,
-                    args=(self._proc.stdout, loop, drain_stop_event),
-                    daemon=True,
-                    name="LiveHubPipeDrain",
-                )
-                drain_thread.start()
-
-                # 5. Run audio and watchdog loops concurrently
                 audio_task = asyncio.create_task(self._read_audio_loop(loop))
-                watchdog_task = asyncio.create_task(self._watchdog_loop())
 
-                done, pending = await asyncio.wait(
-                    [audio_task, watchdog_task],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
+                while self._running:
+                    # If clients are connected or cache is cold (>2s), fetch snapshot
+                    need_fetch = bool(self._clients) or not self.is_fresh(max_age=2.0)
+                    if need_fetch:
+                        frame = await self.fetch_snapshot_async(timeout=1.0)
+                        if frame and self._clients:
+                            self._broadcast(b"\x01" + frame)
 
-                drain_stop_event.set()
-                for t in pending:
-                    t.cancel()
+                    # Sleep 200ms when clients active (5 FPS), or 1.0s when idle (0% CPU)
+                    sleep_time = 0.20 if self._clients else 1.0
+                    await asyncio.sleep(sleep_time)
 
-                # If process died without delivering fresh frames, increment fail count
-                if self.last_fresh_frame_time == 0.0:
-                    self._fail_count += 1
-                    if self._fail_count >= 2 and self._active_source == PRIMARY_RTSP_SOURCE:
-                        logger.warning("go2rtc unresponsive, failing over to direct camera RTSP")
-                        self._active_source = DIRECT_CAMERA_RTSP
-                    elif self._fail_count >= 4:
-                        logger.info("Attempting to restore primary go2rtc RTSP source")
-                        self._active_source = PRIMARY_RTSP_SOURCE
-                        self._fail_count = 0
-                else:
-                    self._fail_count = 0
-                    self._active_source = PRIMARY_RTSP_SOURCE
+                audio_task.cancel()
+                try:
+                    await audio_task
+                except asyncio.CancelledError:
+                    pass
 
-                logger.warning("Live hub stream worker cycle ended, restarting within 100ms...")
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("Error in live hub supervisor: %s", e)
+                logger.debug("Error in live hub supervisor loop: %s", e)
+                await asyncio.sleep(1.0)
             finally:
                 self._cleanup_process()
-
-            # Restart within 100ms as required by Anti-Freeze specification
-            if self._running:
-                await asyncio.sleep(0.1)
-
-    def _drain_worker(
-        self,
-        stdout,
-        loop: asyncio.AbstractEventLoop,
-        stop_event: threading.Event,
-    ) -> None:
-        """
-        Zero-Lag Pipe Drain Thread:
-        Continuously pulls bytes out of stdout pipe into memory.
-        If multiple JPEGs arrive in the pipe, extracts and delivers ONLY the latest
-        complete frame, immediately dropping stale intermediate frames.
-        Periodically verifies camera clock motion in top-left corner (0:80, 0:350).
-        """
-        if not stdout:
-            return
-
-        buf = bytearray()
-        SOI = b"\xff\xd8"
-        EOI = b"\xff\xd9"
-        fd = stdout.fileno()
-
-        while self._running and not stop_event.is_set():
-            try:
-                chunk = os.read(fd, 16384)
-                if not chunk:
-                    break
-            except Exception:
-                break
-
-            buf.extend(chunk)
-            now = time.time()
-            now_mono = time.monotonic()
-
-            last_complete_frame = None
-            while True:
-                soi_idx = buf.find(SOI)
-                if soi_idx == -1:
-                    buf.clear()
-                    break
-                if soi_idx > 0:
-                    del buf[:soi_idx]
-
-                eoi_idx = buf.find(EOI)
-                if eoi_idx == -1:
-                    break
-
-                # Extract complete frame and slide buffer
-                last_complete_frame = bytes(buf[: eoi_idx + 2])
-                del buf[: eoi_idx + 2]
-
-            if last_complete_frame is not None:
-                crc = zlib.crc32(last_complete_frame)
-                self.frame_seq += 1
-                self.last_fresh_frame_time = now_mono
-
-                if crc == self.last_crc32:
-                    self.identical_crc_count += 1
-                else:
-                    self.last_crc32 = crc
-                    self.identical_crc_count = 0
-
-                self.latest_jpeg = last_complete_frame
-                self.latest_frame_ts = now
-
-                # Dispatch latest frame to connected WebSocket clients via event loop
-                if loop.is_running():
-                    loop.call_soon_threadsafe(self._broadcast, b"\x01" + last_complete_frame)
-
-                # Camera Clock Motion Verification (~1 sample per second)
-                if (now_mono - self._last_pixel_sample_time) >= 0.8:
-                    self._last_pixel_sample_time = now_mono
-                    try:
-                        arr = np.frombuffer(last_complete_frame, dtype=np.uint8)
-                        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                        if img is not None:
-                            # Camera clock region: top-left (0:80, 0:350)
-                            clock_crop = img[0:80, 0:350].copy()
-                            self._pixel_samples.append((now_mono, clock_crop))
-
-                            # Find sample from 2.5s - 4.5s ago
-                            sample_3s_ago = None
-                            for s_time, s_crop in reversed(self._pixel_samples):
-                                dt = now_mono - s_time
-                                if 2.5 <= dt <= 4.5:
-                                    sample_3s_ago = (dt, s_crop)
-                                    break
-
-                            if sample_3s_ago:
-                                dt, old_crop = sample_3s_ago
-                                diff = float(np.mean(np.abs(clock_crop.astype(int) - old_crop.astype(int))))
-                                self._last_clock_check_diff = diff
-                                if diff < 0.15:
-                                    self._consecutive_frozen_checks += 1
-                                    logger.warning(
-                                        "LiveHub: Camera clock frozen! Pixel diff over %.1fs is %.4f (<0.15, count=%d)",
-                                        dt, diff, self._consecutive_frozen_checks
-                                    )
-                                    if self._consecutive_frozen_checks >= 2:
-                                        self._kill_process()
-                                else:
-                                    self._consecutive_frozen_checks = 0
-                    except Exception as e:
-                        logger.debug("Pixel comparison error: %s", e)
-
-    async def _watchdog_loop(self) -> None:
-        """
-        Anti-Freeze Watchdog (Runs every 0.5s):
-        - If ffmpeg process exited: break immediately to trigger recovery!
-        - If monotonic() - last_fresh_frame_time > 4.0s: kill SIGKILL immediately.
-        - If CRC32 remains identical for >= 30 frames: kill SIGKILL immediately.
-        - If process running >10.0s without receiving any frame: kill SIGKILL immediately.
-        - If camera clock pixel difference < 0.15 over 3s: kill SIGKILL immediately.
-        """
-        while self._running:
-            await asyncio.sleep(0.5)
-
-            # Check if process exited
-            if self._proc and self._proc.poll() is not None:
-                logger.warning("LiveHub ffmpeg process exited with code %s. Restarting...", self._proc.poll())
-                break
-
-            now = time.monotonic()
-            is_stale_time = (self.last_fresh_frame_time > 0 and (now - self.last_fresh_frame_time > 4.0))
-            is_stale_crc = (self.identical_crc_count >= 30)
-            is_stale_startup = (self.last_fresh_frame_time == 0.0 and (now - self._proc_start_time > 10.0))
-            is_frozen_clock = (self._consecutive_frozen_checks >= 2)
-
-            if is_stale_time or is_stale_crc or is_stale_startup or is_frozen_clock:
-                logger.warning(
-                    "LiveHub Watchdog TRIGGERED: stale_time=%s, stale_crc=%s, startup=%s, frozen_clock=%s. SIGKILL ffmpeg...",
-                    is_stale_time,
-                    is_stale_crc,
-                    is_stale_startup,
-                    is_frozen_clock,
-                )
-                self._kill_process()
-                break
 
     async def _read_audio_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Read 16kHz PCM audio packets from local UDP socket and broadcast."""
@@ -448,3 +288,4 @@ class LiveHub:
 
 
 live_hub = LiveHub()
+

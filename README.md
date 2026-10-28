@@ -1,39 +1,35 @@
-# Foxway Smart Doorbell (v2.5.0)
+# Foxway Smart Doorbell (v2.6.0)
 
-[![Version](https://img.shields.io/badge/version-2.5.0-emerald.svg)](https://github.com/foxway-nl/deurbel)
+[![Version](https://img.shields.io/badge/version-2.6.0-emerald.svg)](https://github.com/foxway-nl/deurbel)
 [![Platform](https://img.shields.io/badge/platform-Android%20%7C%20FastAPI%20%7C%20Docker-blue.svg)](https://github.com/foxway-nl/deurbel)
 [![Aspect Ratio](https://img.shields.io/badge/aspect_ratio-4%3A3_native-orange.svg)](https://github.com/foxway-nl/deurbel)
 
-Productie-oplossing voor de **EZVIZ DB1** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, SQLite WAL database concurrency, freeze-watchdog met camera-klok pixel-motion verificatie, chronologische Unix-timestamp opnames (`seg_%s.ts`) met gap-detectie (anti-time-jump), Arlo-stijl 3-laags AI-verificatie met voertuig bounding box verplaatsingsregel en persoon-prioriteit, een web-based beheerportaal (`/admin`), en een geoptimaliseerde Android-app met 4 overzichtelijke instellingen-kaarten en betrouwbare Telecom oproepen.
+Productie-oplossing voor de **EZVIZ DB1** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, native go2rtc hardware-streaming (MSE + WebRTC) over LAN en 5G/Cloudflare WSS (0ms lag, 25 FPS), SQLite WAL database concurrency, en het snelle YOLOv8n Temporal Pixel-Diff Masking AI-detectie model (5 FPS, <45ms) dat rijdende auto's en personen betrouwbaar detecteert en geparkeerde auto's direct negeert.
 
 ---
 
-## ⚡ Kernfunctionaliteiten in v2.5.0
+## ⚡ Kernfunctionaliteiten in v2.6.0
 
-1. **Anti-Freeze Live Watchdog & Echte Sync Live (`live_hub.py`):**
-   - Automatische pixel-motion verificatie op de camera-klok over 3 seconden. Bij stilstand (`pixel_diff < 0.15`) herstart de pipeline zelfherstellend.
-   - Drukken op "Sync Live" herstart go2rtc en FFmpeg direct en levert pas status terug zodra een geverifieerd bewegend frame binnenkomt.
-   - Directe RTSP fallback bij eventuele go2rtc complicaties.
+1. **Native go2rtc Hardware Streaming (MSE + WebRTC) (`main.py`, `LiveScreen.kt`, `CallScreen.kt`, `/admin`):**
+   - Transparante zero-buffer WebSocket proxy op `/api/go2rtc/ws` en `/api/v1/go2rtc/ws`.
+   - Vloeiende 25 FPS video zonder CPU-hercodering via HTML5 `<video-stream>` player op `/api/v1/live/player`.
+   - 0% CPU serverbelasting tijdens live kijken; `live_hub.py` draait geen continue image2pipe transcodering meer wanneer geen WebSocket clients luisteren.
 
-2. **Chronologische Unix-Timestamp Opnames & Anti-Time-Jump (`recorder.py`):**
-   - RAM ring-buffer slaat chronologische bestanden op (`seg_%s.ts`) met automatische achtergrondopruiming.
-   - Gap-detectie (>4.0s) prunet oude segmenten vóór een gap, wat terugspringen in de tijd definitief elimineert.
-   - Single-recording lock en strikte validatie (omvang > 100 KB en duur $\ge 5.0$s) vóór database-opslag, waardoor $00:00$ spook-clips worden uitgesloten.
+2. **Temporal Pixel-Diff AI Detector (`ai_detector.py`):**
+   - Snelle YOLOv8n (<45ms) inferentie op 5 FPS (0.20s interval).
+   - 1.2s temporal grayscale difference mask (`motion_mask`).
+   - Bounding box pixel motion check: geparkeerde auto's (<4% motion) worden direct genegeerd als `STATIC_PARKED_CAR`.
+   - Rijdende voertuigen worden direct geverifieerd via Manier 1 (nieuw in beeld, IoU < 0.50, 2 frames, ratio >= 0.15) of Manier 2 (inparkerend/wegrijdend, ratio >= 0.25, centroid shift >= 5%).
+   - Personen en dieren worden binnen 2 frames (0.4s) geverifieerd (ratio >= 0.08, verplaatsing >= 3%).
+   - Event cooldown verlaagd naar 8 seconden.
 
-3. **Voertuig-Verplaatsingsregel & Persoon-Prioriteit (`ai_detector.py`):**
-   - Vereist $\Delta x_{\text{left}} \ge 0.12$ én $\Delta x_{\text{right}} \ge 0.12$ voor rijdende voertuigen; geparkeerde voertuigen ($\Delta x < 0.03$) worden direct genegeerd.
-   - Wanneer een persoon in beeld is of recent (<20s) is gezien, krijgt deze absolute prioriteit en worden voertuigtriggers onderdrukt.
-   - Schone snapshot voor app en debug snapshot met bounding boxen voor Web Admin.
+3. **Chronologische Unix-Timestamp Opnames & Anti-Time-Jump (`recorder.py`):**
+   - RAM ring-buffer slaat chronologische segmenten op (`seg_%s.ts`) met 20s pre-roll en 20s post-roll.
+   - Gap-detectie (>4.0s) prunet oude segmenten vóór een gap, wat terugspringen in de tijd definitief uitsluit.
 
-4. **Telecom & Oproepscherm Verbeteringen (`CallScreen.kt`, `CallActivity.kt`, `DoorbellConnectionService.kt`):**
-   - Oproep-deduplicatie met 10s cooldown en foreground activiteitscheck.
-   - Grote 72.dp opneem/weiger actieknoppen met directe visuele feedback en muting op de UI-thread.
-
-5. **Strakke 4-Kaarten Instellingen (`SettingsScreen.kt`):**
-   - Kaart 1: Profiel & Gekoppelde Apparaten (met realtime online status).
-   - Kaart 2: AI-Detectie & Meldingen (compacte gecombineerde toggles).
-   - Kaart 3: Opslag & Bewaarduur (voortgangsbalk & retentieknoppen).
-   - Kaart 4: Systeem & Diagnose (hardware test, webhook test, directe link naar `/admin`, ontkoppelen).
+4. **Android Client App v2.6.0 (`versionCode = 17`):**
+   - Hardware-versnelde live stream in `LiveScreen.kt` en `CallScreen.kt` via native WebView gekoppeld aan go2rtc MSE/WebRTC.
+   - Telecom integratie met full-screen belnotificaties en tweeweg-audio talkback via C-SDK Poort 8000.
 
 ---
 

@@ -40,7 +40,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from jose import jwt
 from pydantic import BaseModel, Field
 
@@ -731,18 +731,19 @@ async def put_camera_settings_endpoint(body: CameraSettingsUpdate):
 
 
 @app.get("/api/v1/app/version")
+@app.get("/api/v1/version")
 async def app_version_endpoint():
     """In-app version check & 1-click self-updater information."""
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "2.5.0",
-        "version_code": 16,
-        "build_time": "2026-10-28T22:45:00Z",
+        "version": "2.6.0",
+        "version_code": 17,
+        "build_time": "2026-10-28T23:35:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v2.5.0: Anti-freeze camera clock watchdog, epoch ts segments, person priority vehicle filter, telecom deduplication, clean 4-card settings",
+        "changelog": "v2.6.0: Native go2rtc MSE/WebRTC hardware streaming, temporal pixel-diff AI vehicle detection, 8s cooldown, and 0ms lag player",
     }
 
 
@@ -1249,6 +1250,136 @@ async def stream_mp4_proxy(src: str = Query("deurbel"), mode: str = Query("auto"
         raise HTTPException(502, f"Failed connecting to go2rtc stream: {e}")
 
 
+@app.websocket("/api/go2rtc/ws")
+@app.websocket("/api/v1/go2rtc/ws")
+async def proxy_go2rtc_ws(websocket: WebSocket, src: str = Query("deurbel")):
+    """
+    Transparent, zero-buffer WebSocket proxy to go2rtc (ws://127.0.0.1:1984/api/ws?src=...).
+    Forwards text and binary frames bidirectionally for native WebRTC and MSE streaming.
+    Functions seamlessly across LAN and over 5G/Cloudflare WSS without UDP requirements!
+    """
+    await websocket.accept()
+    query_str = str(websocket.query_params)
+    target_url = f"ws://127.0.0.1:1984/api/ws?{query_str}" if query_str else f"ws://127.0.0.1:1984/api/ws?src={src}"
+    try:
+        async with websockets.connect(target_url, max_size=10_000_000) as upstream:
+            async def client_to_upstream():
+                try:
+                    while True:
+                        msg = await websocket.receive()
+                        if "text" in msg and msg["text"] is not None:
+                            await upstream.send(msg["text"])
+                        elif "bytes" in msg and msg["bytes"] is not None:
+                            await upstream.send(msg["bytes"])
+                        elif msg.get("type") == "websocket.disconnect":
+                            break
+                except Exception:
+                    pass
+
+            async def upstream_to_client():
+                try:
+                    while True:
+                        data = await upstream.recv()
+                        if isinstance(data, str):
+                            await websocket.send_text(data)
+                        elif isinstance(data, bytes):
+                            await websocket.send_bytes(data)
+                except Exception:
+                    pass
+
+            await asyncio.gather(client_to_upstream(), upstream_to_client(), return_exceptions=True)
+    except Exception as e:
+        logger.debug("go2rtc ws proxy error: %s", e)
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+@app.get("/api/go2rtc/{asset_name:path}")
+async def proxy_go2rtc_asset(asset_name: str):
+    """Proxy static assets (video-stream.js, video-rtc.js) from go2rtc."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"http://127.0.0.1:1984/{asset_name}")
+            media_type = resp.headers.get("content-type", "application/javascript")
+            if asset_name.endswith(".js"):
+                media_type = "application/javascript"
+            return Response(
+                content=resp.content,
+                status_code=resp.status_code,
+                media_type=media_type
+            )
+    except Exception as e:
+        raise HTTPException(502, f"Failed fetching go2rtc asset: {e}")
+
+
+@app.get("/api/v1/live/player", response_class=HTMLResponse)
+@app.get("/live/player", response_class=HTMLResponse)
+async def get_live_player(src: str = Query("deurbel")):
+    """
+    Minimal fullscreen 4:3 HTML5 player for native go2rtc hardware streaming (MSE + WebRTC).
+    Zero-latency, 25 FPS hardware video playback without CPU re-encoding.
+    """
+    html = f"""<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Foxway Live Stream</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    html, body {{
+      width: 100%;
+      height: 100%;
+      background: #000000;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }}
+    .video-container {{
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }}
+    video-stream {{
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: #000000;
+    }}
+    video-stream video {{
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #000000;
+    }}
+    .info {{
+      display: none !important;
+    }}
+  </style>
+</head>
+<body>
+  <div class="video-container">
+    <video-stream id="player" src="" mode="mse,webrtc,mp4" playsinline autoplay muted></video-stream>
+  </div>
+  <script type="module" src="/api/go2rtc/video-stream.js"></script>
+  <script type="module">
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${{proto}}//${{location.host}}/api/go2rtc/ws?src={src}`;
+    const player = document.getElementById('player');
+    player.src = wsUrl;
+  </script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
 @app.get("/api/v1/frame.jpeg", tags=["Live Video & Streaming"])
 async def frame_jpeg_proxy(src: str = Query("deurbel")):
     """Proxy instant live JPEG frame from go2rtc."""
@@ -1273,14 +1404,25 @@ async def live_stream_restart():
 
 
 @app.get("/api/v1/live/instant.jpg", tags=["Live Video & Streaming"])
-async def get_instant_ram_snapshot():
+async def get_instant_ram_snapshot(src: str = Query("deurbel")):
     """
-    Ultra-fast instant 4:3 JPEG snapshot directly from RAM (<5ms).
-    Returns fresh frame or latest in-memory JPEG frame with zero-cache headers.
+    Instant 4:3 JPEG snapshot directly from go2rtc / RAM cache (<15ms).
+    Returns fresh frame with zero-cache headers without CPU transcoding overhead.
     """
-    frame = live_hub.get_fresh_jpeg(max_age=5.0) or live_hub.get_latest_frame()
+    frame = live_hub.get_fresh_jpeg(max_age=2.0)
     if not frame:
-        raise HTTPException(status_code=503, detail="Live stream initializing or refreshing")
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(f"http://127.0.0.1:1984/api/frame.jpeg?src={src}")
+                if resp.status_code == 200 and len(resp.content) > 1000:
+                    frame = resp.content
+                    live_hub.latest_jpeg = frame
+                    live_hub.last_fresh_frame_time = time.monotonic()
+                    live_hub.latest_frame_ts = time.time()
+        except Exception:
+            frame = live_hub.get_latest_frame()
+    if not frame:
+        raise HTTPException(status_code=503, detail="Live stream initializing")
     return Response(
         content=frame,
         media_type="image/jpeg",

@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell System Specification (v2.5.0)
+# Foxway Smart Doorbell System Specification (v2.6.0)
 
-**Versie:** `v2.5.0` (`versionCode = 16`)  
+**Versie:** `v2.6.0` (`versionCode = 17`)  
 **Datum:** 28 Oktober 2026  
 **Productie-omgeving:** `foxway` (`192.168.2.1`), WAN: `https://deurbel.foxway.nl`  
 **Camera:** EZVIZ DB1 (`192.168.2.31`), native **4:3 aspect ratio** (`768x576` / `960x720`)
@@ -14,18 +14,15 @@ Het Foxway Deurbelsysteem is een end-to-end, privacy-vriendelijk en ultra-low-la
    - Tweeweg-audio gestuurd via `libhcnetsdk.so` C-SDK (`app/audio_bridge.py`) over TCP poort 8000.
 2. **FastAPI & Python Media Server (`backend` in Docker):**
    - Draait op poort 8090 met `network_mode: host`.
-   - **Gecentraliseerde SQLite WAL Database (`app/database.py`):** WAL mode met `PRAGMA synchronous=NORMAL;`, `PRAGMA busy_timeout=60000;`, timeout=60.0s en async write lock serialisatie voorkomt `database is locked` definitief.
-   - **Zero-lag Live Drain & Freeze Watchdog (`app/live_hub.py`):** Dedicated achtergrond-drain leest via FFmpeg van lokale go2rtc stream en bewaart het actuele JPEG frame in RAM (`<100ms` latentie). Pixel-motion watchdog controleert de camera-klok over 3s; bij stilstand (`pixel_diff < 0.15`) of op aanvraag (`POST /api/v1/live/restart`) volgt directe zelfherstellende herstart. `ai_detector.py` en `/admin` halen hun frames direct uit deze centrale RAM buffer.
-   - **3-Laags AI Gatekeeper & Voertuigverplaatsing (`VerificationGatekeeper`):** YOLOv8s op volledig 4:3 frame, grondvlak-filtering ($y_2 \ge 0.25h$), interactieve uitsluitingszones, 3-frame trajectcontrole. Voertuigen vereisen $\Delta x_{\text{left}} \ge 0.12$ én $\Delta x_{\text{right}} \ge 0.12$; geparkeerde auto's ($\Delta x < 0.03$) worden direct geweerd. Persoon-prioriteitsregel onderdrukt voertuigmeldingen wanneer een persoon actief is of binnen 20s is gedetecteerd.
-   - **Chronologische Unix-Timestamp Opnames & Anti-Time-Jump (`app/recorder.py`):** `/dev/shm/deurbel_ring` slaat segmenten op als `seg_%s.ts` met gap-detectie (>4.0s). Oude segmenten vóór een gap worden gedropt om tijdsprongen terug te voorkomen. Opnames worden pas in SQLite opgeslagen na validatie (grootte $>100$ KB en duur $\ge 5.0$s).
-   - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met sessie-authenticatie, live videomonitor, dynamische variabelen (`pre_roll_seconds`, `post_roll_seconds`, `max_active_motion_seconds`), uitsluitingszones canvas, AI inspectietabel en Android crash logs.
+   - **Native Hardware Streaming (go2rtc MSE + WebRTC):** Live streaming verloopt via go2rtc MSE + WebRTC (`/api/v1/live/player`, proxy `/api/go2rtc/ws`). 0% CPU serverbelasting tijdens live kijken, vlekkeloze weergave op 25 FPS zonder haperende secondenteller.
+   - **Gecentraliseerde SQLite WAL Database (`app/database.py`):** WAL mode met `PRAGMA synchronous=NORMAL;`, `PRAGMA busy_timeout=60000;`, timeout=60.0s en async write lock serialisatie.
+   - **Temporal Pixel-Diff AI Detector (`app/ai_detector.py`):** YOLOv8n (<45ms) op 5 FPS met 1.2s temporal grayscale difference mask. Bounding box pixel-diff check: geparkeerde auto's (<4% motion) worden direct als `STATIC_PARKED_CAR` genegeerd. Rijdende auto's worden geverifieerd via Manier 1 (nieuw in beeld, IoU < 0.50, 2 frames, ratio >= 0.15) of Manier 2 (inparkerend/wegrijdend, ratio >= 0.25, centroid shift >= 5%). Personen/dieren vereisen 2 opeenvolgende frames (0.4s) met ratio >= 0.08 en verplaatsing >= 3%. Cooldown is standaard 8s.
+   - **Chronologische Unix-Timestamp Opnames & Anti-Time-Jump (`app/recorder.py`):** `/dev/shm/deurbel_ring` slaat segmenten op als `seg_%s.ts` met gap-detectie (>4.0s). 20s pre-roll en 20s post-roll.
+   - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met 25 FPS live preview player, dynamische variabelen, uitsluitingszones canvas en AI inspectie.
 3. **Android Client App (`android-app`):**
-   - Native Jetpack Compose, Kotlin coroutines, versie 2.5.0 (`versionCode = 16`).
-   - Telecom framework integratie met `ConnectionService` voor volscherm belscherm met 10s deduplicatie en foreground detectie.
-   - 72.dp responsieve belschermactieknoppen met directe instant UI feedback en muting.
-   - Overzichtelijke 4-kaarten indeling in `SettingsScreen.kt`: Profiel & Gekoppelde Apparaten, AI-Detectie & Meldingen (compact), Opslag & Bewaarduur, en Systeem & Diagnose (met directe browserlink naar `/admin`).
-   - `LiveStreamController` met automatische 150ms HTTP instant snapshot fallback (`/api/v1/live/instant.jpg`).
-   - Automatische crash logger naar `crash_last.json` en `POST /api/v1/logs/client-crash`.
+   - Native Jetpack Compose, Kotlin coroutines, versie 2.6.0 (`versionCode = 17`).
+   - Hardware-versnelde live streaming via `AndroidView` met native go2rtc speler (MSE + WebRTC).
+   - Telecom framework integratie met `ConnectionService` voor volscherm belscherm met 10s deduplicatie.
 
 ---
 

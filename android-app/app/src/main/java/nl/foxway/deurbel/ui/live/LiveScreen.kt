@@ -1,6 +1,10 @@
 package nl.foxway.deurbel.ui.live
 
 import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
@@ -32,6 +36,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -69,6 +74,16 @@ fun LiveScreen() {
     val activeBaseUrl by connectionManager.activeBaseUrl.collectAsState()
     val isWanMode by connectionManager.isWanMode.collectAsState()
     val connectionType by resolver.connectionType.collectAsState()
+    val isLanConnection = !isWanMode && connectionType == EndpointResolver.ConnectionType.LAN
+    val playerUrl = remember(activeBaseUrl, isLanConnection) {
+        if (isLanConnection) {
+            "http://192.168.2.1:1984/stream.html?src=deurbel&mode=webrtc,mse"
+        } else {
+            val base = activeBaseUrl.ifEmpty { "https://deurbel.foxway.nl" }
+            "$base/api/v1/live/player"
+        }
+    }
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
     val liveStream = remember { LiveStreamController.getInstance(context) }
     val frame by liveStream.currentBitmap.collectAsState()
@@ -261,6 +276,7 @@ fun LiveScreen() {
                             onDragEnd = {
                                 if (totalDragY > 120f) {
                                     liveStream.restartStream(forceServerRestart = true)
+                                    webViewRef?.reload()
                                     Toast.makeText(context, "Beeld vernieuwd (Pull-to-Refresh)", Toast.LENGTH_SHORT).show()
                                 }
                                 totalDragY = 0f
@@ -269,27 +285,30 @@ fun LiveScreen() {
                     },
                 contentAlignment = Alignment.Center
             ) {
-                if (frame != null) {
-                    Image(
-                        bitmap = frame!!.asImageBitmap(),
-                        contentDescription = "Live beeld voordeur",
-                        contentScale = if (isFitMode) ContentScale.Fit else ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color(0xFF0F172A)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator(
-                            color = EmeraldPrimary,
-                            modifier = Modifier.size(36.dp),
-                            strokeWidth = 3.dp
-                        )
-                    }
-                }
+                AndroidView(
+                    factory = { ctx ->
+                        WebView(ctx).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                            setBackgroundColor(android.graphics.Color.BLACK)
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.mediaPlaybackRequiresUserGesture = false
+                            settings.useWideViewPort = true
+                            settings.loadWithOverviewMode = true
+                            setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                            webViewClient = object : WebViewClient() {}
+                            loadUrl(playerUrl)
+                            webViewRef = this
+                        }
+                    },
+                    update = { view ->
+                        webViewRef = view
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
             }
 
             // Floating Zoom Badge
@@ -416,6 +435,7 @@ fun LiveScreen() {
                     border = androidx.compose.foundation.BorderStroke(1.dp, CyanAccent.copy(alpha = 0.5f)),
                     modifier = Modifier.clickable {
                         liveStream.restartStream(forceServerRestart = true)
+                        webViewRef?.reload()
                         Toast.makeText(context, "Live stream gesynchroniseerd", Toast.LENGTH_SHORT).show()
                     }
                 ) {

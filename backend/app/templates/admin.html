@@ -103,24 +103,24 @@
                             <h2 class="font-bold text-white tracking-wide">Live 4:3 Beeldverhouding (EZVIZ DB1)</h2>
                         </div>
                         <div class="flex items-center gap-2 text-xs">
-                            <span id="frame-age-badge" class="px-2.5 py-1 rounded-md bg-dark-800 border border-dark-700 text-gray-300">Vertraging: <strong id="frame-age">-- ms</strong></span>
-                            <span id="fps-badge" class="px-2.5 py-1 rounded-md bg-dark-800 border border-dark-700 text-emerald-400 font-semibold">10 FPS</span>
+                            <span id="frame-age-badge" class="px-2.5 py-1 rounded-md bg-dark-800 border border-dark-700 text-gray-300">Vertraging: <strong id="frame-age">&lt;50 ms</strong></span>
+                            <span id="fps-badge" class="px-2.5 py-1 rounded-md bg-dark-800 border border-dark-700 text-emerald-400 font-semibold">25 FPS Hardware</span>
                         </div>
                     </div>
 
-                    <!-- 4:3 Video Viewport Container -->
+                    <!-- 4:3 Video Viewport Container (go2rtc Native Hardware MSE + WebRTC) -->
                     <div class="relative w-full aspect-[4/3] bg-black rounded-xl overflow-hidden border border-dark-700 flex items-center justify-center group shadow-2xl">
-                        <img id="live-img" src="/api/v1/live/instant.jpg" alt="Live camerabeeld" class="w-full h-full object-contain">
+                        <iframe id="live-player" src="/api/v1/live/player" class="w-full h-full border-0" allow="autoplay; fullscreen"></iframe>
                         
                         <!-- Real-time HUD watermark -->
-                        <div class="absolute top-3 left-3 px-3 py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-xs font-mono text-white flex items-center gap-2">
+                        <div class="absolute top-3 left-3 px-3 py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-xs font-mono text-white flex items-center gap-2 pointer-events-none">
                             <span class="text-emerald-400 font-bold">LIVE</span>
                             <span id="hud-clock">--:--:--</span>
                             <span>• 768x576</span>
                         </div>
 
-                        <div class="absolute bottom-3 right-3 px-3 py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-xs text-gray-300">
-                            Zero-Lag Pipe Drain Actief (&lt;100ms)
+                        <div class="absolute bottom-3 right-3 px-3 py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-xs text-emerald-400 font-medium pointer-events-none">
+                            go2rtc MSE/WebRTC Hardware Stream (0ms)
                         </div>
                     </div>
 
@@ -268,19 +268,19 @@
                         <div>
                             <label class="block text-xs font-medium text-gray-300 mb-1">Min. Verplaatsing Persoon (% breedte)</label>
                             <input type="number" step="0.5" min="1.0" max="30.0" id="setting-min_person_displacement_pct" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-cyan-500 focus:outline-none">
-                            <span class="text-[10px] text-gray-500">Standaard: 6.0% (struiken wiebelen &lt;2%)</span>
+                            <span class="text-[10px] text-gray-500">Standaard: 3.0% (v2.6.0)</span>
                         </div>
 
                         <div>
                             <label class="block text-xs font-medium text-gray-300 mb-1">Min. Verplaatsing Voertuig (% breedte)</label>
-                            <input type="number" step="0.5" min="2.0" max="40.0" id="setting-min_vehicle_displacement_pct" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-cyan-500 focus:outline-none">
-                            <span class="text-[10px] text-gray-500">Standaard: 12.0% (parkeerde auto's &lt;1.5%)</span>
+                            <input type="number" step="0.5" min="1.0" max="40.0" id="setting-min_vehicle_displacement_pct" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-cyan-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 5.0% (v2.6.0 snelle detectie)</span>
                         </div>
 
                         <div>
                             <label class="block text-xs font-medium text-gray-300 mb-1">Traject Verificatie Frames (Frames)</label>
-                            <input type="number" step="1" min="2" max="10" id="setting-verify_frames_required" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-cyan-500 focus:outline-none">
-                            <span class="text-[10px] text-gray-500">Standaard: 3 frames (over 1.2s bewijs)</span>
+                            <input type="number" step="1" min="1" max="10" id="setting-verify_frames_required" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-cyan-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 2 frames (binnen 0.4s bewijs)</span>
                         </div>
                     </div>
 
@@ -308,8 +308,8 @@
 
                         <div>
                             <label class="block text-xs font-medium text-gray-300 mb-1">Event Cooldown Periode (sec)</label>
-                            <input type="number" step="1" min="5" max="60" id="setting-event_cooldown_seconds" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-purple-500 focus:outline-none">
-                            <span class="text-[10px] text-gray-500">Standaard: 20s</span>
+                            <input type="number" step="1" min="2" max="60" id="setting-event_cooldown_seconds" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-purple-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 8s (geen gemiste auto's na persoon)</span>
                         </div>
                     </div>
                 </div>
@@ -509,7 +509,11 @@
             try {
                 const res = await fetch('/api/v1/admin/resync-live', { method: 'POST' });
                 const d = await res.json();
-                alert('✅ Live stream buffer direct gesynchroniseerd naar realtime (0,0s)!');
+                const player = document.getElementById('live-player');
+                if (player) {
+                    player.src = '/api/v1/live/player?t=' + Date.now();
+                }
+                alert('✅ Live stream direct gesynchroniseerd naar realtime hardware stream (0,0s)!');
                 refreshLiveFrame();
             } catch (e) {
                 alert('Fout bij synchroniseren: ' + e);

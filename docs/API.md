@@ -1,10 +1,27 @@
-# Foxway Smart Doorbell API Documentatie (v2.5.0)
+# Foxway Smart Doorbell API Documentatie (v2.6.0)
 
 De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8090`, WAN: `https://deurbel.foxway.nl`).
 
 ---
 
-## 1. Web Admin Endpoints (`/admin`)
+## 1. go2rtc Native Hardware Streaming Endpoints (`v2.6.0`)
+
+### `GET /api/v1/live/player` (en `/live/player`)
+- **Beschrijving:** Minimal fullscreen 4:3 HTML5 speler (MSE + WebRTC) die direct verbindt met de WebSocket proxy.
+- **Query Parameters:** `src` (standaard `deurbel`).
+- **Reactie:** `text/html` met native `<video-stream>` web component.
+
+### `GET /api/go2rtc/ws` (en `/api/v1/go2rtc/ws`)
+- **Type:** WebSocket
+- **Beschrijving:** Zero-buffer bidirectionele proxy naar `ws://127.0.0.1:1984/api/ws?src=deurbel`.
+- **Geschikt voor:** MSE streaming over 5G/Cloudflare WSS (TCP 443) zonder UDP vereiste, en WebRTC op LAN.
+
+### `GET /api/go2rtc/{asset_name:path}`
+- **Beschrijving:** Proxy voor go2rtc statische web-assets (`video-stream.js`, `video-rtc.js`).
+
+---
+
+## 2. Web Admin Endpoints (`/admin`)
 
 ### `GET /admin/login`
 - **Beschrijving:** Toont het dark-mode inlogscherm.

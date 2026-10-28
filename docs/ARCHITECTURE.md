@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell Architectuur (v2.5.0)
+# Foxway Smart Doorbell Architectuur (v2.6.0)
 
-Dit document beschrijft de technische opzet en datastromen van versie 2.5.0.
+Dit document beschrijft de technische opzet en datastromen van versie 2.6.0.
 
 ---
 
@@ -20,34 +20,32 @@ flowchart TD
         RingBuffer["RAM Ring-Buffer (/dev/shm/deurbel_ring - Unix TS seg_%s.ts)"]
         
         subgraph Backend ["FastAPI Backend (Docker :8090)"]
-            LiveDrain["Zero-Lag Drain Worker (Pixel-Motion Watchdog)"]
-            Gatekeeper["3-Laags AI Gatekeeper (Vehicle Displacement & Person Priority)"]
-            AdminUI["Web Admin Dashboard (/admin)"]
+            WSProxy["WebSocket Proxy (/api/go2rtc/ws) & Player (/api/v1/live/player)"]
+            TemporalAI["Temporal Pixel-Diff AI (YOLOv8n 5 FPS, 1.2s diff mask)"]
+            AdminUI["Web Admin Dashboard (/admin - 25 FPS Preview)"]
             SQLite[("SQLite DB WAL Mode (database.py)")]
         end
     end
 
-    subgraph Client ["Android Toestel (v2.5.0)"]
+    subgraph Client ["Android Toestel (v2.6.0)"]
         Telecom["Telecom Framework (10s Deduplicated CallScreen)"]
-        LiveView["LiveScreen / CallScreen (4:3 RGB_565, 72dp knoppen)"]
-        HTTPFallback["150ms HTTP Snapshot Fallback"]
+        LiveView["LiveScreen / CallScreen (Hardware MSE + WebRTC Player, 72dp knoppen)"]
         SettingsUI["4-Kaarten SettingsScreen (Profiel, AI, Opslag, Systeem)"]
     end
 
     CamSensor -->|RTSP| RTSP
     RTSP -->|FFmpeg| RingBuffer
-    RTSP -->|FFmpeg pipe| LiveDrain
-    LiveDrain -->|Binary WS :8090| LiveView
-    LiveDrain -->|Instant JPG| HTTPFallback
-    LiveDrain -.->|RAM Frame| Gatekeeper
-    LiveDrain -.->|RAM Frame| AdminUI
+    RTSP <-->|WebSocket Stream| WSProxy
+    WSProxy -->|Native 25 FPS MSE/WebRTC| LiveView
+    WSProxy -->|Embedded Player| AdminUI
+    RTSP -.->|Instant Substream Frames| TemporalAI
     
     CamMic <-->|SDK Audio| SDK
     SDK <-->|PCM Audio Bridge| LiveView
     
-    RingBuffer -->|20s Pre-roll & Gap Check| Gatekeeper
-    Gatekeeper -->|Event & Validated Clip| SQLite
-    Gatekeeper -->|Push <1.5s| Telecom
+    RingBuffer -->|20s Pre-roll & Gap Check| TemporalAI
+    TemporalAI -->|Event & Validated Clip| SQLite
+    TemporalAI -->|Push <1.5s| Telecom
 ```
     
     CrashHandler -.->|POST crash| AdminUI
