@@ -1,47 +1,175 @@
 package nl.foxway.deurbel
 
+import android.app.Activity
 import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
+import android.os.Bundle
+import android.util.Log
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import nl.foxway.deurbel.data.PreferencesManager
+import org.json.JSONObject
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
- * Foxway Deurbel Application class.
+ * Foxway Deurbel Application class v2.3.0.
  *
- * Initialises notification channels and global singletons at app start.
+ * Initialises notification channels, telecom phone account, and robust crash logging.
  */
 class FoxwayApp : Application() {
 
     lateinit var preferencesManager: PreferencesManager
         private set
 
+    private var currentScreenName: String = "AppStart"
+
+    val crashCoroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        Log.e(TAG, "Uncaught Coroutine Exception: ${throwable.message}", throwable)
+        recordAndUploadCrash(throwable, "CoroutineExceptionHandler ($currentScreenName)")
+    }
+
     val applicationScope = kotlinx.coroutines.CoroutineScope(
-        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO + crashCoroutineExceptionHandler
     )
 
     override fun onCreate() {
         super.onCreate()
         instance = this
         preferencesManager = PreferencesManager(this)
+
+        setupCrashHandler()
+        registerScreenTracker()
         createNotificationChannels()
         nl.foxway.deurbel.telecom.DoorbellConnectionService.registerPhoneAccount(this)
+
         applicationScope.launch {
+            checkAndUploadPendingCrash()
             try {
                 if (preferencesManager.isPaired.first()) {
                     nl.foxway.deurbel.network.WebSocketForegroundService.start(this@FoxwayApp)
                 }
             } catch (e: Exception) {
-                android.util.Log.w("FoxwayApp", "Could not auto-start background service: ${e.message}")
+                Log.w(TAG, "Could not auto-start background service: ${e.message}")
             }
         }
     }
 
+    private fun registerScreenTracker() {
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityStarted(activity: Activity) {}
+            override fun onActivityResumed(activity: Activity) {
+                currentScreenName = activity.javaClass.simpleName
+            }
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivityStopped(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
+        })
+    }
+
+    private fun setupCrashHandler() {
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                Log.e(TAG, "FATAL CRASH on thread ${thread.name}: ${throwable.message}", throwable)
+                recordAndUploadCrash(throwable, "UncaughtException: ${thread.name} ($currentScreenName)")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in crash handler: ${e.message}", e)
+            } finally {
+                defaultHandler?.uncaughtException(thread, throwable)
+            }
+        }
+    }
+
+    private fun recordAndUploadCrash(throwable: Throwable, screenContext: String) {
+        val crashFile = File(filesDir, CRASH_FILE_NAME)
+        val stacktrace = Log.getStackTraceString(throwable)
+        val payload = JSONObject().apply {
+            put("device_model", "${Build.MANUFACTURER} ${Build.MODEL}")
+            put("os_version", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+            put("error_message", throwable.message ?: throwable.javaClass.name)
+            put("stacktrace", stacktrace)
+            put("screen_state", screenContext)
+            put("app_version", "2.3.0")
+            put("timestamp", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US).format(Date()))
+        }
+
+        // 1. Write synchronously to local file
+        try {
+            crashFile.writeText(payload.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed writing crash to local file: ${e.message}")
+        }
+
+        // 2. Best-effort synchronous POST to server (max 2 seconds)
+        try {
+            val thread = Thread {
+                postCrashToServer(payload.toString())
+            }
+            thread.start()
+            thread.join(2000)
+        } catch (_: Exception) {}
+    }
+
+    private fun checkAndUploadPendingCrash() {
+        try {
+            val crashFile = File(filesDir, CRASH_FILE_NAME)
+            if (crashFile.exists()) {
+                val jsonStr = crashFile.readText()
+                if (jsonStr.isNotBlank()) {
+                    val success = postCrashToServer(jsonStr)
+                    if (success) {
+                        crashFile.delete()
+                        Log.i(TAG, "Pending crash log uploaded and removed")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed checking pending crash: ${e.message}")
+        }
+    }
+
+    private fun postCrashToServer(jsonBody: String): Boolean {
+        val targets = listOf(
+            "http://192.168.2.1:8090/api/v1/logs/client-crash",
+            "https://deurbel.foxway.nl/api/v1/logs/client-crash"
+        )
+        for (urlStr in targets) {
+            try {
+                val url = URL(urlStr)
+                val conn = url.openConnection() as HttpURLConnection
+                conn.connectTimeout = 2500
+                conn.readTimeout = 2500
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.doOutput = true
+                conn.outputStream.use { os ->
+                    os.write(jsonBody.toByteArray(Charsets.UTF_8))
+                }
+                val code = conn.responseCode
+                conn.disconnect()
+                if (code in 200..299) {
+                    return true
+                }
+            } catch (_: Exception) {
+                // Try next endpoint
+            }
+        }
+        return false
+    }
+
     /**
-     * Create notification channels required for incoming call alerts and
-     * the persistent WebSocket foreground service.
+     * Create notification channels required for incoming call alerts, motion detections,
+     * and the persistent WebSocket foreground service.
      */
     private fun createNotificationChannels() {
         val manager = getSystemService(NotificationManager::class.java) ?: return
@@ -84,7 +212,7 @@ class FoxwayApp : Application() {
         }
         manager.createNotificationChannel(infoChannel)
 
-        // High-importance motion & AI detection channel (Task 6)
+        // High-importance motion & AI detection channel
         val motionChannel = NotificationChannel(
             CHANNEL_MOTION,
             "Beweging & AI Detectie",
@@ -98,6 +226,9 @@ class FoxwayApp : Application() {
     }
 
     companion object {
+        private const val TAG = "FoxwayApp"
+        private const val CRASH_FILE_NAME = "crash_last.json"
+
         const val CHANNEL_RING = "foxway_doorbell_ring"
         const val CHANNEL_MOTION = "foxway_doorbell_motion"
         const val CHANNEL_SERVICE = "foxway_doorbell_service"

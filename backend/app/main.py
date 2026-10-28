@@ -57,6 +57,7 @@ from app.ring_detector import ring_detector
 from app.live_hub import live_hub
 from app.config import settings
 from app.mdns_service import mdns_service
+from app.admin import router as admin_router
 from app.models import (
     ClaimRequest,
     ClaimResponse,
@@ -357,11 +358,13 @@ openapi_tags = [
 
 app = FastAPI(
     title="Foxway Smart Doorbell API",
-    version="1.0.0",
+    version="2.3.0",
     description="Signaling, state management, media proxy, and clip API for the Foxway Doorbell system.",
     openapi_tags=openapi_tags,
     lifespan=lifespan,
 )
+
+app.include_router(admin_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -733,13 +736,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "2.2.0",
-        "version_code": 13,
-        "build_time": "2026-10-28T09:30:00Z",
+        "version": "2.3.0",
+        "version_code": 14,
+        "build_time": "2026-10-28T15:00:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v2.2.0: Stop notification explosion on login (1-to-1 clip coupling) & open-source supervision + Frigate motion-crop AI",
+        "changelog": "v2.3.0: 3-Laags VerificationGatekeeper, <1.5s directe push, zero-lag live stream, /admin webpaneel, en Android crash-logger",
     }
 
 

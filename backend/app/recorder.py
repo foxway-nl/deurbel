@@ -885,6 +885,57 @@ def get_manual_recording_status() -> dict:
     }
 
 
+async def cleanup_today_false_clips() -> dict:
+    """
+    Purge today's false wind/leaf clips (durations >= 55s created by the old motion crop).
+    Leaves user starred clips untouched.
+    """
+    import aiosqlite
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    deleted_count = 0
+    freed_bytes = 0
+
+    async with aiosqlite.connect(settings.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT clip_id, video_path, snapshot_path 
+            FROM clips 
+            WHERE starred = 0 
+              AND duration >= 55.0 
+              AND created_at >= ?
+              AND (answered_by LIKE 'AI:%' OR answered_by LIKE '%Persoon%' OR answered_by LIKE '%Voertuig%')
+            """,
+            (today_str,),
+        )
+        rows = await cur.fetchall()
+        for r in rows:
+            cid = r["clip_id"]
+            vpath = r["video_path"] or str(settings.CLIPS_DIR / f"{cid}.mp4")
+            spath = r["snapshot_path"] or str(settings.SNAPSHOTS_DIR / f"{cid}.jpg")
+
+            for p in [vpath, spath, str(settings.CLIPS_DIR / f"{cid}.mp4"), str(settings.SNAPSHOTS_DIR / f"{cid}.jpg")]:
+                if os.path.exists(p):
+                    try:
+                        freed_bytes += os.path.getsize(p)
+                        os.remove(p)
+                    except Exception:
+                        pass
+
+            await db.execute("DELETE FROM clips WHERE clip_id = ?", (cid,))
+            await db.execute("DELETE FROM events WHERE clip_id = ?", (cid,))
+            deleted_count += 1
+
+        await db.commit()
+
+    logger.info("Cleaned up %d false wind clips from today (freed %.1f MB)", deleted_count, freed_bytes / (1024 * 1024))
+    return {
+        "status": "ok",
+        "deleted_count": deleted_count,
+        "freed_mb": round(freed_bytes / (1024 * 1024), 2),
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────
 #  Storage Usage & Dual-Tier Retention Cleanup
 # ──────────────────────────────────────────────────────────────────────

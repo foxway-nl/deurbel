@@ -20,14 +20,14 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.CRC32
 
 /**
- * Always-Warm Live Stream Controller with Real-Time Freeze Detection & Auto-Heal.
+ * Always-Warm Live Stream Controller with Real-Time Freeze Detection & Auto-Heal (v2.3.0).
  *
  * Connects to `/api/v1/ws/live` on LAN or WAN/5G over standard port 8090/443:
- *  - First frame arrives in <100ms directly from server RAM (zero wait for keyframes).
- *  - Decodes 15 fps 4:3 JPEG video frames into [currentBitmap].
+ *  - First frame arrives in <100ms directly from server RAM.
+ *  - Decodes 4:3 JPEG video frames into [currentBitmap] using RGB_565 (50% RAM savings, OOM protected).
+ *  - AudioTrack operations protected by mutex/lock and state validation.
  *  - Tracks [lastNewFrameMs] and [isFrozen] state for live status indicators.
  *  - Triggers automatic background reconnect + /api/v1/live/restart when frozen >2.0s.
- *  - Plays incoming 16kHz PCM audio via low-latency [AudioTrack].
  */
 class LiveStreamController private constructor(private val context: Context) {
 
@@ -69,6 +69,7 @@ class LiveStreamController private constructor(private val context: Context) {
     private var client: OkHttpClient? = null
     private var webSocket: WebSocket? = null
     private var audioTrack: AudioTrack? = null
+    private val audioLock = Any()
     private val isRunning = AtomicBoolean(false)
     private var reconnectJob: Job? = null
     private var freezeWatchdogJob: Job? = null
@@ -90,50 +91,54 @@ class LiveStreamController private constructor(private val context: Context) {
     }
 
     private fun initAudioTrack() {
-        try {
-            forceSpeakerphone()
+        synchronized(audioLock) {
+            try {
+                forceSpeakerphone()
 
-            val minBufferSize = AudioTrack.getMinBufferSize(
-                AUDIO_SAMPLE_RATE,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            )
-            val bufferSize = maxOf(minBufferSize, 4096)
-
-            val audioAttributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .setLegacyStreamType(AudioManager.STREAM_MUSIC)
-                .build()
-
-            val audioFormat = AudioFormat.Builder()
-                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .setSampleRate(AUDIO_SAMPLE_RATE)
-                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                .build()
-
-            audioTrack = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                AudioTrack.Builder()
-                    .setAudioAttributes(audioAttributes)
-                    .setAudioFormat(audioFormat)
-                    .setBufferSizeInBytes(bufferSize)
-                    .setTransferMode(AudioTrack.MODE_STREAM)
-                    .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-                    .build()
-            } else {
-                @Suppress("DEPRECATION")
-                AudioTrack(
-                    AudioManager.STREAM_MUSIC,
+                val minBufferSize = AudioTrack.getMinBufferSize(
                     AUDIO_SAMPLE_RATE,
                     AudioFormat.CHANNEL_OUT_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    bufferSize,
-                    AudioTrack.MODE_STREAM
+                    AudioFormat.ENCODING_PCM_16BIT
                 )
+                val bufferSize = maxOf(minBufferSize, 4096)
+
+                val audioAttributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .setLegacyStreamType(AudioManager.STREAM_MUSIC)
+                    .build()
+
+                val audioFormat = AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(AUDIO_SAMPLE_RATE)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .build()
+
+                audioTrack = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    AudioTrack.Builder()
+                        .setAudioAttributes(audioAttributes)
+                        .setAudioFormat(audioFormat)
+                        .setBufferSizeInBytes(bufferSize)
+                        .setTransferMode(AudioTrack.MODE_STREAM)
+                        .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                        .build()
+                } else {
+                    @Suppress("DEPRECATION")
+                    AudioTrack(
+                        AudioManager.STREAM_MUSIC,
+                        AUDIO_SAMPLE_RATE,
+                        AudioFormat.CHANNEL_OUT_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT,
+                        bufferSize,
+                        AudioTrack.MODE_STREAM
+                    )
+                }
+                if (audioTrack?.state == AudioTrack.STATE_INITIALIZED) {
+                    audioTrack?.play()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not initialize AudioTrack: ${e.message}")
             }
-            audioTrack?.play()
-        } catch (e: Exception) {
-            Log.w(TAG, "Could not initialize AudioTrack: ${e.message}")
         }
     }
 
@@ -159,11 +164,15 @@ class LiveStreamController private constructor(private val context: Context) {
 
     fun start() {
         if (isRunning.getAndSet(true)) {
-            // Already running
             return
         }
         Log.i(TAG, "Starting LiveStreamController")
         forceSpeakerphone()
+        synchronized(audioLock) {
+            if (audioTrack == null || audioTrack?.state != AudioTrack.STATE_INITIALIZED) {
+                initAudioTrack()
+            }
+        }
         connectWebSocket()
     }
 
@@ -176,6 +185,18 @@ class LiveStreamController private constructor(private val context: Context) {
         } catch (_: Exception) {}
         webSocket = null
         _isConnected.value = false
+
+        synchronized(audioLock) {
+            try {
+                if (audioTrack?.state == AudioTrack.STATE_INITIALIZED) {
+                    audioTrack?.stop()
+                }
+                audioTrack?.release()
+            } catch (t: Throwable) {
+                Log.w(TAG, "Error stopping AudioTrack: ${t.message}")
+            }
+            audioTrack = null
+        }
     }
 
     fun setAudioMuted(muted: Boolean) {
@@ -262,21 +283,29 @@ class LiveStreamController private constructor(private val context: Context) {
                         }
 
                         try {
-                            val bitmap = BitmapFactory.decodeByteArray(data, 1, frameLen)
+                            val options = BitmapFactory.Options().apply {
+                                inPreferredConfig = Bitmap.Config.RGB_565
+                            }
+                            val bitmap = BitmapFactory.decodeByteArray(data, 1, frameLen, options)
                             if (bitmap != null) {
                                 _currentBitmap.value = bitmap
                             }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Failed decoding live JPEG frame: ${e.message}")
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "Failed decoding live JPEG frame: ${t.message}")
                         }
                     }
                     0x02.toByte() -> {
                         // Audio Frame: 16kHz 16-bit mono PCM
-                        if (!_isAudioMuted.value && audioTrack != null) {
-                            try {
-                                audioTrack?.write(data, 1, data.size - 1)
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Error writing to AudioTrack: ${e.message}")
+                        if (!_isAudioMuted.value) {
+                            synchronized(audioLock) {
+                                val track = audioTrack
+                                if (track != null && track.state == AudioTrack.STATE_INITIALIZED) {
+                                    try {
+                                        track.write(data, 1, data.size - 1)
+                                    } catch (t: Throwable) {
+                                        Log.w(TAG, "Error writing to AudioTrack: ${t.message}")
+                                    }
+                                }
                             }
                         }
                     }

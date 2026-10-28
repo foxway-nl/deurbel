@@ -175,6 +175,37 @@ CREATE TABLE IF NOT EXISTS events (
     snapshot_url  TEXT DEFAULT '',
     created_at    TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS system_settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_audit_logs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp        TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    category         TEXT NOT NULL,
+    label            TEXT NOT NULL,
+    confidence       REAL NOT NULL,
+    displacement_pct REAL NOT NULL,
+    reason           TEXT NOT NULL,
+    snapshot_path    TEXT DEFAULT '',
+    boxes_json       TEXT DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS crash_logs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp     TEXT NOT NULL,
+    device_name   TEXT DEFAULT '',
+    device_id     TEXT DEFAULT '',
+    app_version   TEXT DEFAULT '',
+    error_message TEXT NOT NULL,
+    stacktrace    TEXT NOT NULL,
+    screen_state  TEXT DEFAULT ''
+);
 """
 
 
@@ -220,6 +251,34 @@ async def init_db() -> None:
             )
         except Exception:
             pass
+
+        # Seed default system_settings
+        default_settings = [
+            ("person_conf_threshold", "0.52", "Minimale betrouwbaarheid voor personen (0.1 - 1.0)"),
+            ("vehicle_conf_threshold", "0.55", "Minimale betrouwbaarheid voor voertuigen (0.1 - 1.0)"),
+            ("animal_conf_threshold", "0.52", "Minimale betrouwbaarheid voor dieren (0.1 - 1.0)"),
+            ("min_person_displacement_pct", "6.0", "Minimale verplaatsing persoon (% schermbreedte)"),
+            ("min_vehicle_displacement_pct", "12.0", "Minimale verplaatsing voertuig (% schermbreedte)"),
+            ("verify_frames_required", "3", "Aantal opeenvolgende frames voor traject-verificatie"),
+            ("pre_roll_seconds", "6", "Pre-roll seconden uit RAM buffer"),
+            ("post_roll_seconds", "5", "Post-roll seconden na object verdwijnt"),
+            ("max_clip_seconds", "25", "Maximale opnameduur bij AI detectie (sec)"),
+            ("event_cooldown_seconds", "20", "Afkoelperiode tussen opeenvolgende meldingen (sec)"),
+            ("ring_ding_hz", "728", "Frequentie Ding toonbel (Hz)"),
+            ("ring_dong_hz", "580", "Frequentie Dong toonbel (Hz)"),
+            ("ring_sharpness", "4.5", "Scherpte / resonantiefactor toonbel"),
+            ("exclusion_zones", "[]", "JSON lijst van gemaskeerde zones [x1, y1, x2, y2]"),
+            ("admin_password", "foxway2024", "Beheerderswachtwoord voor /admin"),
+        ]
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for k, v, desc in default_settings:
+            try:
+                await db.execute(
+                    "INSERT OR IGNORE INTO system_settings (key, value, description, updated_at) VALUES (?, ?, ?, ?)",
+                    (k, v, desc, now_iso),
+                )
+            except Exception:
+                pass
 
         # Cleanup orphan events without a valid clip_id in clips table and deduplicate to strict 1-to-1 coupling
         try:
@@ -592,26 +651,31 @@ async def save_event(
 
 async def get_events_since(since_id: int = 0, limit: int = 50, order: str = "asc") -> list[dict]:
     """
-    Retrieve new events with strict 1-to-1 clip coupling.
+    Retrieve new events with strict clip coupling or recent active event window.
     If order == 'desc' or (since_id == 0 and limit == 1), returns the latest events.
-    Filters out any orphan events that do not have a valid clip in the clips table.
+    Permits events coupled to clips table OR events created in the last 180 seconds
+    (so immediate push notifications are visible on phone before 25s video finishes recording).
     """
     async with aiosqlite.connect(_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        filter_clause = """
+            (e.clip_id IN (SELECT clip_id FROM clips) 
+             OR (julianday('now') - julianday(e.created_at)) < 0.003)
+        """
         if order.lower() == "desc" or (since_id == 0 and limit == 1):
             cursor = await db.execute(
-                """
+                f"""
                 SELECT e.* FROM events e
-                WHERE e.clip_id IN (SELECT clip_id FROM clips)
+                WHERE {filter_clause}
                 ORDER BY e.id DESC LIMIT ?
                 """,
                 (max(1, min(limit, 200)),),
             )
         else:
             cursor = await db.execute(
-                """
+                f"""
                 SELECT e.* FROM events e
-                WHERE e.id > ? AND e.clip_id IN (SELECT clip_id FROM clips)
+                WHERE e.id > ? AND {filter_clause}
                 ORDER BY e.id ASC LIMIT ?
                 """,
                 (since_id, max(1, min(limit, 200))),
@@ -633,5 +697,138 @@ async def set_dynamic_wan_url(url: str) -> None:
     """Persist dynamic WAN URL to app_settings."""
     if url and url.startswith(("http://", "https://")):
         await set_setting("server_wan_url", url.rstrip("/"))
+
+
+# ── System Settings (Task 1 & Task 3) ────────────────────────────────
+
+async def get_system_settings() -> dict[str, str]:
+    """Return all system settings as a dictionary."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cursor = await db.execute("SELECT key, value FROM system_settings")
+        rows = await cursor.fetchall()
+        return {r[0]: r[1] for r in rows}
+
+
+async def get_system_setting(key: str, default: str = "") -> str:
+    """Get a single system setting value by key."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cursor = await db.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
+        row = await cursor.fetchone()
+        return row[0] if row else default
+
+
+async def set_system_setting(key: str, value: str, description: str = "") -> None:
+    """Update or insert a system setting."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(_DB_PATH) as db:
+        if description:
+            await db.execute(
+                """
+                INSERT INTO system_settings (key, value, description, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, description = excluded.description, updated_at = excluded.updated_at
+                """,
+                (key, value, description, now_iso),
+            )
+        else:
+            await db.execute(
+                """
+                INSERT INTO system_settings (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (key, value, now_iso),
+            )
+        await db.commit()
+
+
+async def update_system_settings(updates: dict[str, str]) -> None:
+    """Batch update multiple system settings."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(_DB_PATH) as db:
+        for k, v in updates.items():
+            await db.execute(
+                """
+                INSERT INTO system_settings (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (k, str(v), now_iso),
+            )
+        await db.commit()
+
+
+# ── AI Audit Logs (Task 1 & Task 3) ──────────────────────────────────
+
+async def save_ai_audit_log(
+    status: str,
+    category: str,
+    label: str,
+    confidence: float,
+    displacement_pct: float,
+    reason: str,
+    snapshot_path: str = "",
+    boxes_json: str = "[]",
+) -> int:
+    """Record an AI evaluation attempt (both APPROVED and REJECTED) for auditing."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO ai_audit_logs (timestamp, status, category, label, confidence, displacement_pct, reason, snapshot_path, boxes_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (now_iso, status, category, label, confidence, displacement_pct, reason, snapshot_path, boxes_json),
+        )
+        await db.commit()
+        return cursor.lastrowid or 0
+
+
+async def get_recent_ai_audit_logs(limit: int = 50) -> list[dict]:
+    """Return the most recent AI verification audit logs."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM ai_audit_logs ORDER BY id DESC LIMIT ?",
+            (max(1, min(limit, 200)),),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+# ── Client Crash Logs (Task 1 & Task 2) ──────────────────────────────
+
+async def save_crash_log(
+    device_name: str,
+    device_id: str,
+    app_version: str,
+    error_message: str,
+    stacktrace: str,
+    screen_state: str = "",
+) -> int:
+    """Save an Android client crash stacktrace."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO crash_logs (timestamp, device_name, device_id, app_version, error_message, stacktrace, screen_state)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (now_iso, device_name, device_id, app_version, error_message, stacktrace, screen_state),
+        )
+        await db.commit()
+        return cursor.lastrowid or 0
+
+
+async def get_recent_crash_logs(limit: int = 50) -> list[dict]:
+    """Retrieve recent client crash logs."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM crash_logs ORDER BY id DESC LIMIT ?",
+            (max(1, min(limit, 200)),),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
 
 

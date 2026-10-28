@@ -409,22 +409,31 @@ fun LiveScreen() {
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Always-visible Round Refresh Button (🔄)
+                // Prominent Sync Live Beeld Button (🔄)
                 Surface(
                     color = SurfaceGlass,
-                    shape = CircleShape,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, DividerDark),
+                    shape = RoundedCornerShape(20.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, CyanAccent.copy(alpha = 0.5f)),
                     modifier = Modifier.clickable {
                         liveStream.restartStream(forceServerRestart = true)
-                        Toast.makeText(context, "Live stream vernieuwen…", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "Live stream gesynchroniseerd", Toast.LENGTH_SHORT).show()
                     }
                 ) {
-                    Box(modifier = Modifier.padding(8.dp)) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
-                            contentDescription = "Ververs live stream",
+                            contentDescription = "Sync Live Beeld",
                             tint = CyanAccent,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "🔄 Sync Live",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = TextPrimary
                         )
                     }
                 }

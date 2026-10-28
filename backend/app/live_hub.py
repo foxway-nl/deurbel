@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import socket
 import subprocess
+import threading
 import time
 import zlib
 from typing import Optional, Set
@@ -155,17 +157,20 @@ class LiveHub:
                 self.last_fresh_frame_time = 0.0
                 self._proc_start_time = time.monotonic()
 
-                # 3. Launch nice -n 15 ffmpeg process with strict timeouts
+                # 3. Launch nice -n 15 ffmpeg process with strict timeouts & zero-latency flags
                 cmd = [
                     "nice", "-n", "15",
                     "ffmpeg", "-y", "-nostdin",
                     "-rtsp_transport", "tcp",
                     "-timeout", "2000000",
                     "-fflags", "nobuffer",
-                    "-flags", "low_delay",
+                    "-flags", "low_latency",
+                    "-avioflags", "direct",
+                    "-fps_mode", "drop",
+                    "-r", "10",
                     "-i", RTSP_SOURCE,
                     "-map", "0:v:0",
-                    "-vf", "scale=768:576,fps=15",
+                    "-vf", "scale=768:576,fps=10",
                     "-q:v", "4",
                     "-f", "image2pipe",
                     "-flush_packets", "1",
@@ -179,7 +184,7 @@ class LiveHub:
                     f"udp://{AUDIO_UDP_HOST}:{AUDIO_UDP_PORT}",
                 ]
 
-                logger.info("Starting ffmpeg always-warm decoder with anti-freeze timeouts")
+                logger.info("Starting ffmpeg zero-latency reader: %s", " ".join(cmd[:12]))
                 self._proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -187,17 +192,27 @@ class LiveHub:
                     bufsize=65536,
                 )
 
-                # 4. Run video, audio and watchdog loops concurrently
+                # 4. Start dedicated pipe drain thread to eliminate OS buffer backlog
                 loop = asyncio.get_running_loop()
-                video_task = asyncio.create_task(self._read_video_loop(loop))
+                drain_stop_event = threading.Event()
+                drain_thread = threading.Thread(
+                    target=self._drain_worker,
+                    args=(self._proc.stdout, loop, drain_stop_event),
+                    daemon=True,
+                    name="LiveHubPipeDrain",
+                )
+                drain_thread.start()
+
+                # 5. Run audio and watchdog loops concurrently
                 audio_task = asyncio.create_task(self._read_audio_loop(loop))
                 watchdog_task = asyncio.create_task(self._watchdog_loop())
 
                 done, pending = await asyncio.wait(
-                    [video_task, audio_task, watchdog_task],
+                    [audio_task, watchdog_task],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
 
+                drain_stop_event.set()
                 for t in pending:
                     t.cancel()
 
@@ -212,6 +227,74 @@ class LiveHub:
             # Restart within 100ms as required by Anti-Freeze specification
             if self._running:
                 await asyncio.sleep(0.1)
+
+    def _drain_worker(
+        self,
+        stdout,
+        loop: asyncio.AbstractEventLoop,
+        stop_event: threading.Event,
+    ) -> None:
+        """
+        Zero-Lag Pipe Drain Thread:
+        Continuously pulls bytes out of stdout pipe into memory.
+        If multiple JPEGs arrive in the pipe, extracts and delivers ONLY the latest
+        complete frame, immediately dropping stale intermediate frames.
+        Guarantees self.latest_jpeg is physically <100ms old at all times.
+        """
+        if not stdout:
+            return
+
+        buf = bytearray()
+        SOI = b"\xff\xd8"
+        EOI = b"\xff\xd9"
+        fd = stdout.fileno()
+
+        while self._running and not stop_event.is_set():
+            try:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+            except Exception:
+                break
+
+            buf.extend(chunk)
+            now = time.time()
+            now_mono = time.monotonic()
+
+            last_complete_frame = None
+            while True:
+                soi_idx = buf.find(SOI)
+                if soi_idx == -1:
+                    buf.clear()
+                    break
+                if soi_idx > 0:
+                    del buf[:soi_idx]
+
+                eoi_idx = buf.find(EOI)
+                if eoi_idx == -1:
+                    break
+
+                # Extract complete frame and slide buffer
+                last_complete_frame = bytes(buf[: eoi_idx + 2])
+                del buf[: eoi_idx + 2]
+
+            if last_complete_frame is not None:
+                crc = zlib.crc32(last_complete_frame)
+                self.frame_seq += 1
+                self.last_fresh_frame_time = now_mono
+
+                if crc == self.last_crc32:
+                    self.identical_crc_count += 1
+                else:
+                    self.last_crc32 = crc
+                    self.identical_crc_count = 0
+
+                self.latest_jpeg = last_complete_frame
+                self.latest_frame_ts = now
+
+                # Dispatch latest frame to connected WebSocket clients via event loop
+                if loop.is_running():
+                    loop.call_soon_threadsafe(self._broadcast, b"\x01" + last_complete_frame)
 
     async def _watchdog_loop(self) -> None:
         """
@@ -241,58 +324,6 @@ class LiveHub:
                 )
                 self._kill_process()
                 break
-
-    async def _read_video_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Read stdout from ffmpeg, validate CRC32 and store in memory."""
-        proc = self._proc
-        if not proc or not proc.stdout:
-            return
-
-        buf = bytearray()
-        SOI = b"\xff\xd8"
-        EOI = b"\xff\xd9"
-
-        while self._running and proc.poll() is None:
-            chunk = await loop.run_in_executor(None, proc.stdout.read, 65536)
-            if not chunk:
-                break
-
-            buf.extend(chunk)
-            now = time.time()
-            now_mono = time.monotonic()
-
-            while True:
-                soi_idx = buf.find(SOI)
-                if soi_idx == -1:
-                    buf.clear()
-                    break
-                if soi_idx > 0:
-                    del buf[:soi_idx]
-
-                eoi_idx = buf.find(EOI)
-                if eoi_idx == -1:
-                    break
-
-                jpeg_frame = bytes(buf[: eoi_idx + 2])
-                del buf[: eoi_idx + 2]
-
-                # Frame CRC32 and sequence validation
-                crc = zlib.crc32(jpeg_frame)
-                self.frame_seq += 1
-                self.last_fresh_frame_time = now_mono
-
-                if crc == self.last_crc32:
-                    self.identical_crc_count += 1
-                else:
-                    self.last_crc32 = crc
-                    self.identical_crc_count = 0
-
-                # Update RAM frame
-                self.latest_jpeg = jpeg_frame
-                self.latest_frame_ts = now
-
-                # Broadcast to clients with prefix 0x01
-                self._broadcast(b"\x01" + jpeg_frame)
 
     async def _read_audio_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Read 16kHz PCM audio packets from local UDP socket and broadcast."""

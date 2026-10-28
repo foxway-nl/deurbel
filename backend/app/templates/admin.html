@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="nl" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Foxway Deurbel — Beheersysteem v2.3.0</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        dark: {
+                            950: '#060911',
+                            900: '#0B0F19',
+                            800: '#111827',
+                            700: '#1F2937',
+                            600: '#374151',
+                            500: '#4B5563'
+                        },
+                        emerald: { 500: '#10B981', 600: '#059669' },
+                        cyan: { 500: '#06B6D4', 600: '#0891B2' }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        .zone-box { border: 2px dashed #EF4444; background: rgba(239, 68, 68, 0.25); position: absolute; pointer-events: auto; }
+        .tab-btn.active { border-color: #10B981; color: #10B981; background: rgba(16, 185, 129, 0.08); }
+    </style>
+</head>
+<body class="bg-dark-950 text-gray-100 min-h-screen font-sans flex flex-col">
+    <!-- Top Navigation Header -->
+    <header class="border-b border-dark-800 bg-dark-900/80 backdrop-blur-md sticky top-0 z-40 px-6 py-3.5 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-xl shadow-inner">
+                🔔
+            </div>
+            <div>
+                <div class="flex items-center gap-2">
+                    <h1 class="text-lg font-bold text-white tracking-wide">Foxway Deurbel</h1>
+                    <span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v2.3.0</span>
+                </div>
+                <p class="text-xs text-gray-400">Beheerconsole & AI Systeemmonitor</p>
+            </div>
+        </div>
+
+        <!-- Live Server Status Bar -->
+        <div class="hidden md:flex items-center gap-6 text-xs text-gray-300">
+            <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span>Camera: <strong id="cam-ip-badge" class="text-white">192.168.2.31</strong></span>
+            </div>
+            <div class="flex items-center gap-2">
+                <span>CPU: <strong id="header-cpu" class="text-white">--%</strong></span>
+            </div>
+            <div class="flex items-center gap-2">
+                <span>RAM: <strong id="header-ram" class="text-white">--%</strong></span>
+            </div>
+            <div class="flex items-center gap-2">
+                <span>Opslag: <strong id="header-disk" class="text-white">--%</strong></span>
+            </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+            <a href="/admin/logout" class="px-3.5 py-1.5 rounded-lg text-xs font-medium text-gray-400 hover:text-white hover:bg-dark-800 border border-dark-700 transition">Uitloggen</a>
+        </div>
+    </header>
+
+    <!-- Main Navigation Tabs -->
+    <div class="border-b border-dark-800 bg-dark-900 px-6">
+        <nav class="flex space-x-1 sm:space-x-4 overflow-x-auto py-2">
+            <button onclick="switchTab('tab-live')" id="btn-tab-live" class="tab-btn active px-4 py-2.5 rounded-xl text-sm font-semibold border-b-2 border-transparent transition flex items-center gap-2 whitespace-nowrap">
+                <span>📡</span> Live Systeem & Stream
+            </button>
+            <button onclick="switchTab('tab-settings')" id="btn-tab-settings" class="tab-btn px-4 py-2.5 rounded-xl text-sm font-semibold border-b-2 border-transparent text-gray-400 hover:text-white transition flex items-center gap-2 whitespace-nowrap">
+                <span>⚙️</span> Dynamische AI Instellingen & Zones
+            </button>
+            <button onclick="switchTab('tab-inspector')" id="btn-tab-inspector" class="tab-btn px-4 py-2.5 rounded-xl text-sm font-semibold border-b-2 border-transparent text-gray-400 hover:text-white transition flex items-center gap-2 whitespace-nowrap">
+                <span>🔍</span> AI Verificatie-Inspector
+            </button>
+            <button onclick="switchTab('tab-logs')" id="btn-tab-logs" class="tab-btn px-4 py-2.5 rounded-xl text-sm font-semibold border-b-2 border-transparent text-gray-400 hover:text-white transition flex items-center gap-2 whitespace-nowrap">
+                <span>📋</span> Foutenlogboek & Crashes
+            </button>
+        </nav>
+    </div>
+
+    <!-- Main Content Area -->
+    <main class="flex-1 p-4 sm:p-6 max-w-7xl w-full mx-auto space-y-6">
+
+        <!-- ============================================================== -->
+        <!-- TAB 1: Live Systeem & Stream Monitor                           -->
+        <!-- ============================================================== -->
+        <section id="tab-live" class="tab-content space-y-6">
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <!-- Live 4:3 Camera Monitor -->
+                <div class="lg:col-span-2 bg-dark-900 border border-dark-800 rounded-2xl p-4 sm:p-5 shadow-xl flex flex-col justify-between">
+                    <div class="flex items-center justify-between mb-3">
+                        <div class="flex items-center gap-2.5">
+                            <span class="w-3 h-3 rounded-full bg-emerald-500 animate-pulse"></span>
+                            <h2 class="font-bold text-white tracking-wide">Live 4:3 Beeldverhouding (EZVIZ DB1)</h2>
+                        </div>
+                        <div class="flex items-center gap-2 text-xs">
+                            <span id="frame-age-badge" class="px-2.5 py-1 rounded-md bg-dark-800 border border-dark-700 text-gray-300">Vertraging: <strong id="frame-age">-- ms</strong></span>
+                            <span id="fps-badge" class="px-2.5 py-1 rounded-md bg-dark-800 border border-dark-700 text-emerald-400 font-semibold">10 FPS</span>
+                        </div>
+                    </div>
+
+                    <!-- 4:3 Video Viewport Container -->
+                    <div class="relative w-full aspect-[4/3] bg-black rounded-xl overflow-hidden border border-dark-700 flex items-center justify-center group shadow-2xl">
+                        <img id="live-img" src="/api/v1/live/instant.jpg" alt="Live camerabeeld" class="w-full h-full object-contain">
+                        
+                        <!-- Real-time HUD watermark -->
+                        <div class="absolute top-3 left-3 px-3 py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-xs font-mono text-white flex items-center gap-2">
+                            <span class="text-emerald-400 font-bold">LIVE</span>
+                            <span id="hud-clock">--:--:--</span>
+                            <span>• 768x576</span>
+                        </div>
+
+                        <div class="absolute bottom-3 right-3 px-3 py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-xs text-gray-300">
+                            Zero-Lag Pipe Drain Actief (&lt;100ms)
+                        </div>
+                    </div>
+
+                    <!-- 1-Click Operational Controls -->
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+                        <button onclick="actionResyncLive()" class="py-2.5 px-3 rounded-xl bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs font-semibold text-cyan-400 flex items-center justify-center gap-2 transition active:scale-95">
+                            <span>🔄</span> Sync Live (0ms)
+                        </button>
+                        <button onclick="actionCleanupClips()" class="py-2.5 px-3 rounded-xl bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs font-semibold text-amber-400 flex items-center justify-center gap-2 transition active:scale-95">
+                            <span>🧹</span> Ruim Valse Clips Op
+                        </button>
+                        <button onclick="actionTestRing()" class="py-2.5 px-3 rounded-xl bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs font-semibold text-emerald-400 flex items-center justify-center gap-2 transition active:scale-95">
+                            <span>🔔</span> Test Aanbellen
+                        </button>
+                        <button onclick="actionTestNotification()" class="py-2.5 px-3 rounded-xl bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs font-semibold text-purple-400 flex items-center justify-center gap-2 transition active:scale-95">
+                            <span>📱</span> Test Push Melding
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Right Side: Component & Resource Diagnostics -->
+                <div class="space-y-6">
+                    <!-- Component Status Card -->
+                    <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4">
+                        <h3 class="font-bold text-white text-sm uppercase tracking-wider text-gray-400">Systeemcomponenten</h3>
+                        <div class="space-y-3">
+                            <div class="flex items-center justify-between p-3 rounded-xl bg-dark-800/60 border border-dark-700/60">
+                                <div>
+                                    <div class="font-semibold text-sm text-white">go2rtc Media Engine</div>
+                                    <div class="text-xs text-gray-400">Poort 1984 / RTSP 8554</div>
+                                </div>
+                                <span id="status-go2rtc" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">ONLINE</span>
+                            </div>
+
+                            <div class="flex items-center justify-between p-3 rounded-xl bg-dark-800/60 border border-dark-700/60">
+                                <div>
+                                    <div class="font-semibold text-sm text-white">LiveHub RAM Streamer</div>
+                                    <div class="text-xs text-gray-400">Zero-Lag Drain &lt;100ms</div>
+                                </div>
+                                <span id="status-livehub" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">DRAIN ACTIEF</span>
+                            </div>
+
+                            <div class="flex items-center justify-between p-3 rounded-xl bg-dark-800/60 border border-dark-700/60">
+                                <div>
+                                    <div class="font-semibold text-sm text-white">VerificationGatekeeper</div>
+                                    <div class="text-xs text-gray-400">YOLOv8s 3-Laags Traject</div>
+                                </div>
+                                <span id="status-ai" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">GEWAARBORGD</span>
+                            </div>
+
+                            <div class="flex items-center justify-between p-3 rounded-xl bg-dark-800/60 border border-dark-700/60">
+                                <div>
+                                    <div class="font-semibold text-sm text-white">Ring Detector</div>
+                                    <div class="text-xs text-gray-400">728 Hz / 580 Hz Dual-Tone</div>
+                                </div>
+                                <span id="status-ring" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">LUISTEREND</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- System Resource Gauges -->
+                    <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4">
+                        <h3 class="font-bold text-white text-sm uppercase tracking-wider text-gray-400">HP EliteDesk 405 Resources</h3>
+                        
+                        <!-- CPU Bar -->
+                        <div>
+                            <div class="flex justify-between text-xs mb-1.5">
+                                <span class="text-gray-400">CPU-Belasting (Ryzen 5)</span>
+                                <strong id="gauge-cpu-val" class="text-white">--%</strong>
+                            </div>
+                            <div class="w-full bg-dark-800 rounded-full h-2.5 overflow-hidden">
+                                <div id="gauge-cpu-bar" class="bg-cyan-500 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+                            </div>
+                        </div>
+
+                        <!-- RAM Bar -->
+                        <div>
+                            <div class="flex justify-between text-xs mb-1.5">
+                                <span class="text-gray-400">Werkgeheugen (RAM)</span>
+                                <strong id="gauge-ram-val" class="text-white">--%</strong>
+                            </div>
+                            <div class="w-full bg-dark-800 rounded-full h-2.5 overflow-hidden">
+                                <div id="gauge-ram-bar" class="bg-emerald-500 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+                            </div>
+                        </div>
+
+                        <!-- Disk Bar -->
+                        <div>
+                            <div class="flex justify-between text-xs mb-1.5">
+                                <span class="text-gray-400">Opnameschijf (/mnt/opslag)</span>
+                                <strong id="gauge-disk-val" class="text-white">-- / 10 GB</strong>
+                            </div>
+                            <div class="w-full bg-dark-800 rounded-full h-2.5 overflow-hidden">
+                                <div id="gauge-disk-bar" class="bg-purple-500 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- TAB 2: Dynamische AI-Instellingen & Interactieve Zones         -->
+        <!-- ============================================================== -->
+        <section id="tab-settings" class="tab-content hidden space-y-6">
+            <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 sm:p-6 shadow-xl">
+                <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-4 border-b border-dark-800 gap-4">
+                    <div>
+                        <h2 class="text-lg font-bold text-white">Realtime Dynamische Variabelen & AI Filters</h2>
+                        <p class="text-xs text-gray-400 mt-0.5">Aanpassingen worden direct zonder container-herstart live overgenomen door de workers.</p>
+                    </div>
+                    <button onclick="saveSystemSettings()" class="py-2.5 px-6 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold shadow-lg shadow-emerald-600/20 text-sm transition active:scale-95">
+                        💾 Wijzigingen Opslaan
+                    </button>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 pt-6">
+                    <!-- Drempelwaarden Confidence -->
+                    <div class="space-y-4 p-4 rounded-xl bg-dark-800/40 border border-dark-700/50">
+                        <h3 class="text-xs font-bold text-emerald-400 uppercase tracking-wider">Confidence Drempelwaarden</h3>
+                        
+                        <div>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">Persoon Drempelwaarde (0.10 - 1.00)</label>
+                            <input type="number" step="0.01" min="0.1" max="1.0" id="setting-person_conf_threshold" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-emerald-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 0.52 (voorkomt struik-hallucinatie)</span>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">Voertuig Drempelwaarde (0.10 - 1.00)</label>
+                            <input type="number" step="0.01" min="0.1" max="1.0" id="setting-vehicle_conf_threshold" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-emerald-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 0.55</span>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">Dier Drempelwaarde (0.10 - 1.00)</label>
+                            <input type="number" step="0.01" min="0.1" max="1.0" id="setting-animal_conf_threshold" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-emerald-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 0.52</span>
+                        </div>
+                    </div>
+
+                    <!-- Traject Verplaatsing -->
+                    <div class="space-y-4 p-4 rounded-xl bg-dark-800/40 border border-dark-700/50">
+                        <h3 class="text-xs font-bold text-cyan-400 uppercase tracking-wider">Verplichte Verplaatsing (&Delta;d)</h3>
+                        
+                        <div>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">Min. Verplaatsing Persoon (% breedte)</label>
+                            <input type="number" step="0.5" min="1.0" max="30.0" id="setting-min_person_displacement_pct" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-cyan-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 6.0% (struiken wiebelen &lt;2%)</span>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">Min. Verplaatsing Voertuig (% breedte)</label>
+                            <input type="number" step="0.5" min="2.0" max="40.0" id="setting-min_vehicle_displacement_pct" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-cyan-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 12.0% (parkeerde auto's &lt;1.5%)</span>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">Traject Verificatie Frames (Frames)</label>
+                            <input type="number" step="1" min="2" max="10" id="setting-verify_frames_required" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-cyan-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 3 frames (over 1.2s bewijs)</span>
+                        </div>
+                    </div>
+
+                    <!-- Opnameduur & Roll Tijden -->
+                    <div class="space-y-4 p-4 rounded-xl bg-dark-800/40 border border-dark-700/50">
+                        <h3 class="text-xs font-bold text-purple-400 uppercase tracking-wider">Opname & Cooldown Tijden</h3>
+                        
+                        <div>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">Pre-Roll Seconden (RAM Buffer)</label>
+                            <input type="number" step="1" min="2" max="15" id="setting-pre_roll_seconds" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-purple-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 6s</span>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">Post-Roll Seconden (na verdwijnen)</label>
+                            <input type="number" step="1" min="2" max="15" id="setting-post_roll_seconds" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-purple-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 5s</span>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">Max Clip Duur bij AI Beweging (sec)</label>
+                            <input type="number" step="1" min="10" max="60" id="setting-max_clip_seconds" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-purple-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 25s (nooit meer 65s wind-clips!)</span>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">Event Cooldown Periode (sec)</label>
+                            <input type="number" step="1" min="5" max="60" id="setting-event_cooldown_seconds" class="w-full px-3 py-2 rounded-lg bg-dark-900 border border-dark-700 text-white text-sm focus:border-purple-500 focus:outline-none">
+                            <span class="text-[10px] text-gray-500">Standaard: 20s</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Interactive Exclusion Zone Canvas -->
+                <div class="mt-8 pt-6 border-t border-dark-800 space-y-4">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <h3 class="font-bold text-white text-sm">Interactieve Uitsluitingszones (Exclusion Masks)</h3>
+                            <p class="text-xs text-gray-400">Sleep met de muis over het beeld om een gebied te maskeren (bv. geparkeerde auto's of struiken).</p>
+                        </div>
+                        <button onclick="clearExclusionZones()" class="px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs text-red-400">
+                            Alle Zones Wissen
+                        </button>
+                    </div>
+
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div class="lg:col-span-2 relative aspect-[4/3] bg-black rounded-xl overflow-hidden border border-dark-700 select-none cursor-crosshair" id="zone-container">
+                            <img id="zone-bg-img" src="/api/v1/live/instant.jpg" alt="Exclusion Zone Background" class="w-full h-full object-contain pointer-events-none">
+                            <div id="zone-overlay" class="absolute inset-0"></div>
+                        </div>
+
+                        <div class="space-y-3">
+                            <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider">Actieve Maskers</h4>
+                            <div id="zone-list" class="space-y-2 max-h-80 overflow-y-auto">
+                                <!-- Rendered dynamically -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- TAB 3: AI Verificatie-Inspector                                -->
+        <!-- ============================================================== -->
+        <section id="tab-inspector" class="tab-content hidden space-y-6">
+            <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4">
+                <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-4 border-b border-dark-800 gap-3">
+                    <div>
+                        <h2 class="text-lg font-bold text-white">AI Verificatie-Inspector (Laatste 50 Evaluaties)</h2>
+                        <p class="text-xs text-gray-400">Geen zwarte doos meer: bekijk exact waarom een beweging werd goedgekeurd of afgewezen.</p>
+                    </div>
+                    <button onclick="loadAuditLogs()" class="px-4 py-2 rounded-xl bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs font-semibold text-gray-300 flex items-center gap-2">
+                        <span>🔄</span> Verversen
+                    </button>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left border-collapse text-xs">
+                        <thead>
+                            <tr class="border-b border-dark-700 text-gray-400 font-semibold uppercase tracking-wider">
+                                <th class="p-3">Status</th>
+                                <th class="p-3">Tijdstip</th>
+                                <th class="p-3">Categorie</th>
+                                <th class="p-3">Zekerheid</th>
+                                <th class="p-3">Verplaatsing (&Delta;d)</th>
+                                <th class="p-3">Reden & Bounding Box</th>
+                                <th class="p-3">Snapshot</th>
+                            </tr>
+                        </thead>
+                        <tbody id="inspector-table-body" class="divide-y divide-dark-800 text-gray-300">
+                            <tr>
+                                <td colspan="7" class="p-6 text-center text-gray-500">Laden van inspectielogs...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- TAB 4: Foutenlogboek & Android Crash Logs                      -->
+        <!-- ============================================================== -->
+        <section id="tab-logs" class="tab-content hidden space-y-6">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <!-- Python Backend Logs -->
+                <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4 flex flex-col h-[650px]">
+                    <div class="flex items-center justify-between pb-3 border-b border-dark-800">
+                        <div>
+                            <h3 class="font-bold text-white text-sm">Python Backend Foutenring</h3>
+                            <p class="text-xs text-gray-400">Waarschuwingen en uitzonderingen uit het geheugen</p>
+                        </div>
+                        <button onclick="loadBackendLogs()" class="px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs text-gray-300">
+                            Verversen
+                        </button>
+                    </div>
+                    <div id="backend-log-console" class="flex-1 bg-dark-950 rounded-xl p-3 font-mono text-xs overflow-y-auto space-y-1.5 border border-dark-800 text-gray-300">
+                        <!-- Rendered dynamically -->
+                    </div>
+                </div>
+
+                <!-- Android Client Crash Stacktraces -->
+                <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4 flex flex-col h-[650px]">
+                    <div class="flex items-center justify-between pb-3 border-b border-dark-800">
+                        <div>
+                            <h3 class="font-bold text-white text-sm">Android App Crash Stacktraces</h3>
+                            <p class="text-xs text-gray-400">Automatisch gemeld via POST /api/v1/logs/client-crash</p>
+                        </div>
+                        <button onclick="loadCrashLogs()" class="px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs text-gray-300">
+                            Verversen
+                        </button>
+                    </div>
+                    <div id="crash-log-container" class="flex-1 overflow-y-auto space-y-3">
+                        <!-- Rendered dynamically -->
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Modal for Snapshot View -->
+    <div id="snap-modal" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden z-50 flex items-center justify-center p-4" onclick="closeSnapModal()">
+        <div class="max-w-3xl w-full bg-dark-900 border border-dark-700 rounded-2xl overflow-hidden p-2 relative" onclick="event.stopPropagation()">
+            <img id="modal-img" src="" alt="Snapshot" class="w-full aspect-[4/3] object-contain rounded-xl">
+            <button onclick="closeSnapModal()" class="absolute top-4 right-4 bg-dark-800/80 text-white rounded-full p-2 hover:bg-dark-700">
+                ✕
+            </button>
+        </div>
+    </div>
+
+    <!-- Client-Side Javascript Logic -->
+    <script>
+        let currentTab = 'tab-live';
+        let exclusionZones = [];
+        let isDrawing = false;
+        let startX = 0, startY = 0;
+
+        function switchTab(tabId) {
+            currentTab = tabId;
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active', 'text-emerald-500', 'border-emerald-500'));
+            
+            document.getElementById(tabId).classList.remove('hidden');
+            const btn = document.getElementById('btn-' + tabId);
+            btn.classList.add('active', 'text-emerald-500', 'border-emerald-500');
+
+            if (tabId === 'tab-inspector') loadAuditLogs();
+            if (tabId === 'tab-settings') loadSystemSettings();
+            if (tabId === 'tab-logs') { loadBackendLogs(); loadCrashLogs(); }
+        }
+
+        // Live HUD clock & frame refresh
+        setInterval(() => {
+            const now = new Date();
+            document.getElementById('hud-clock').textContent = now.toTimeString().split(' ')[0];
+        }, 1000);
+
+        // Frame refresh loop (every 1.5s)
+        function refreshLiveFrame() {
+            if (currentTab === 'tab-live') {
+                const img = document.getElementById('live-img');
+                const t0 = performance.now();
+                const nextSrc = '/api/v1/live/instant.jpg?t=' + Date.now();
+                const temp = new Image();
+                temp.onload = () => {
+                    img.src = nextSrc;
+                    const elapsed = Math.round(performance.now() - t0);
+                    document.getElementById('frame-age').textContent = elapsed + ' ms';
+                };
+                temp.src = nextSrc;
+            }
+        }
+        setInterval(refreshLiveFrame, 1500);
+
+        // Periodic Status Refresh (CPU, RAM, Disk, Components)
+        async function fetchSystemStatus() {
+            try {
+                const res = await fetch('/api/v1/admin/system-status');
+                if (!res.ok) return;
+                const d = await res.json();
+                
+                // Gauges
+                document.getElementById('header-cpu').textContent = d.cpu_percent + '%';
+                document.getElementById('header-ram').textContent = d.ram_percent + '%';
+                document.getElementById('header-disk').textContent = d.disk_usage_percent + '%';
+
+                document.getElementById('gauge-cpu-val').textContent = d.cpu_percent + '%';
+                document.getElementById('gauge-cpu-bar').style.width = Math.min(100, d.cpu_percent) + '%';
+
+                document.getElementById('gauge-ram-val').textContent = d.ram_percent + '% (' + d.ram_used_mb + ' MB)';
+                document.getElementById('gauge-ram-bar').style.width = Math.min(100, d.ram_percent) + '%';
+
+                document.getElementById('gauge-disk-val').textContent = d.disk_used_mb + ' MB / ' + (d.disk_max_gb * 1024) + ' MB (' + d.disk_usage_percent + '%)';
+                document.getElementById('gauge-disk-bar').style.width = Math.min(100, d.disk_usage_percent) + '%';
+
+                if (d.doorbell_ip) {
+                    document.getElementById('cam-ip-badge').textContent = d.doorbell_ip;
+                }
+            } catch (e) {}
+        }
+        setInterval(fetchSystemStatus, 3000);
+        fetchSystemStatus();
+
+        // 1-Click Operations
+        async function actionResyncLive() {
+            try {
+                const res = await fetch('/api/v1/admin/resync-live', { method: 'POST' });
+                const d = await res.json();
+                alert('✅ Live stream buffer direct gesynchroniseerd naar realtime (0,0s)!');
+                refreshLiveFrame();
+            } catch (e) {
+                alert('Fout bij synchroniseren: ' + e);
+            }
+        }
+
+        async function actionCleanupClips() {
+            if (!confirm('Weet u zeker dat u vandaag ontstane valse wind-opnames wilt opruimen?')) return;
+            try {
+                const res = await fetch('/api/v1/admin/cleanup-false-clips', { method: 'POST' });
+                const d = await res.json();
+                alert(`✅ Succesvol ${d.deleted_count} valse wind-opnames verwijderd (${d.freed_mb} MB vrijgemaakt)!`);
+                fetchSystemStatus();
+            } catch (e) {
+                alert('Fout bij opruimen: ' + e);
+            }
+        }
+
+        async function actionTestRing() {
+            try {
+                const res = await fetch('/api/v1/admin/test-ring', { method: 'POST' });
+                const d = await res.json();
+                alert('🔔 Test-aanbelactie verzonden naar alle Android toestellen!');
+            } catch (e) {
+                alert('Fout: ' + e);
+            }
+        }
+
+        async function actionTestNotification() {
+            try {
+                const res = await fetch('/api/v1/admin/test-notification', { method: 'POST' });
+                const d = await res.json();
+                alert('📱 Test push-notificatie verzonden via WebSocket en FCM!');
+            } catch (e) {
+                alert('Fout: ' + e);
+            }
+        }
+
+        // Settings Load & Save
+        async function loadSystemSettings() {
+            try {
+                const res = await fetch('/api/v1/admin/settings');
+                if (!res.ok) return;
+                const d = await res.json();
+                
+                for (const [k, v] of Object.entries(d)) {
+                    const el = document.getElementById('setting-' + k);
+                    if (el) el.value = v;
+                }
+
+                if (d.exclusion_zones) {
+                    try {
+                        exclusionZones = typeof d.exclusion_zones === 'string' ? JSON.parse(d.exclusion_zones) : d.exclusion_zones;
+                    } catch (e) { exclusionZones = []; }
+                }
+                renderExclusionZones();
+            } catch (e) {}
+        }
+
+        async function saveSystemSettings() {
+            const updates = {};
+            const keys = [
+                'person_conf_threshold', 'vehicle_conf_threshold', 'animal_conf_threshold',
+                'min_person_displacement_pct', 'min_vehicle_displacement_pct', 'verify_frames_required',
+                'pre_roll_seconds', 'post_roll_seconds', 'max_clip_seconds', 'event_cooldown_seconds'
+            ];
+            for (const k of keys) {
+                const el = document.getElementById('setting-' + k);
+                if (el) updates[k] = el.value;
+            }
+            updates['exclusion_zones'] = JSON.stringify(exclusionZones);
+
+            try {
+                const res = await fetch('/api/v1/admin/settings', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(updates)
+                });
+                if (res.ok) {
+                    alert('✅ Alle AI-instellingen en uitsluitingszones direct live opgeslagen!');
+                } else {
+                    alert('Fout bij opslaan.');
+                }
+            } catch (e) {
+                alert('Fout: ' + e);
+            }
+        }
+
+        // Exclusion Zone Canvas Drawing
+        const zoneContainer = document.getElementById('zone-container');
+        const zoneOverlay = document.getElementById('zone-overlay');
+
+        zoneContainer.addEventListener('mousedown', (e) => {
+            const rect = zoneContainer.getBoundingClientRect();
+            startX = (e.clientX - rect.left) / rect.width;
+            startY = (e.clientY - rect.top) / rect.height;
+            isDrawing = true;
+        });
+
+        zoneContainer.addEventListener('mouseup', (e) => {
+            if (!isDrawing) return;
+            isDrawing = false;
+            const rect = zoneContainer.getBoundingClientRect();
+            const endX = (e.clientX - rect.left) / rect.width;
+            const endY = (e.clientY - rect.top) / rect.height;
+
+            const x1 = Math.max(0, Math.min(startX, endX));
+            const y1 = Math.max(0, Math.min(startY, endY));
+            const x2 = Math.min(1, Math.max(startX, endX));
+            const y2 = Math.min(1, Math.max(startY, endY));
+
+            if ((x2 - x1) > 0.04 && (y2 - y1) > 0.04) {
+                const name = prompt('Voer een naam in voor dit gemaskeerde gebied (bv. "Geparkeerde Auto"):', 'Masker #' + (exclusionZones.length + 1));
+                if (name) {
+                    exclusionZones.push({ name, x1: Number(x1.toFixed(3)), y1: Number(y1.toFixed(3)), x2: Number(x2.toFixed(3)), y2: Number(y2.toFixed(3)) });
+                    renderExclusionZones();
+                }
+            }
+        });
+
+        function renderExclusionZones() {
+            zoneOverlay.innerHTML = '';
+            const listEl = document.getElementById('zone-list');
+            listEl.innerHTML = '';
+
+            exclusionZones.forEach((z, idx) => {
+                // Box on overlay
+                const box = document.createElement('div');
+                box.className = 'zone-box rounded';
+                box.style.left = (z.x1 * 100) + '%';
+                box.style.top = (z.y1 * 100) + '%';
+                box.style.width = ((z.x2 - z.x1) * 100) + '%';
+                box.style.height = ((z.y2 - z.y1) * 100) + '%';
+                box.innerHTML = `<span class="bg-red-600/90 text-white text-[9px] px-1 py-0.5 rounded font-mono">${z.name}</span>`;
+                zoneOverlay.appendChild(box);
+
+                // Entry in list
+                const row = document.createElement('div');
+                row.className = 'flex items-center justify-between p-2.5 rounded-lg bg-dark-800 border border-dark-700 text-xs';
+                row.innerHTML = `
+                    <div>
+                        <div class="font-semibold text-white">${z.name}</div>
+                        <div class="text-[10px] text-gray-400 font-mono">x: ${Math.round(z.x1*100)}%-${Math.round(z.x2*100)}%, y: ${Math.round(z.y1*100)}%-${Math.round(z.y2*100)}%</div>
+                    </div>
+                    <button onclick="removeZone(${idx})" class="text-red-400 hover:text-red-300 font-bold px-2 py-1">✕</button>
+                `;
+                listEl.appendChild(row);
+            });
+        }
+
+        function removeZone(idx) {
+            exclusionZones.splice(idx, 1);
+            renderExclusionZones();
+        }
+
+        function clearExclusionZones() {
+            if (confirm('Alle uitsluitingszones wissen?')) {
+                exclusionZones = [];
+                renderExclusionZones();
+            }
+        }
+
+        // AI Verification Inspector
+        async function loadAuditLogs() {
+            const tbody = document.getElementById('inspector-table-body');
+            tbody.innerHTML = '<tr><td colspan="7" class="p-4 text-center text-gray-500">Laden...</td></tr>';
+            try {
+                const res = await fetch('/api/v1/admin/detections');
+                if (!res.ok) return;
+                const logs = await res.json();
+                if (logs.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" class="p-6 text-center text-gray-500">Nog geen evaluaties geregistreerd.</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = '';
+                logs.forEach(item => {
+                    const tr = document.createElement('tr');
+                    const isApproved = item.status === 'APPROVED';
+                    const badgeClass = isApproved 
+                        ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
+                        : 'bg-red-500/10 text-red-400 border border-red-500/20';
+
+                    const snapUrl = item.snapshot_path 
+                        ? (item.snapshot_path.startsWith('/') ? item.snapshot_path : '/' + item.snapshot_path)
+                        : '';
+
+                    tr.innerHTML = `
+                        <td class="p-3"><span class="px-2 py-0.5 rounded-full font-bold ${badgeClass}">${item.status}</span></td>
+                        <td class="p-3 text-gray-400 font-mono text-[11px]">${item.timestamp.split('.')[0].replace('T', ' ')}</td>
+                        <td class="p-3 font-semibold text-white">${item.label || item.category}</td>
+                        <td class="p-3 text-cyan-400 font-mono">${Math.round(item.confidence * 100)}%</td>
+                        <td class="p-3 font-mono font-bold ${item.displacement_pct >= 6 ? 'text-emerald-400' : 'text-red-400'}">${item.displacement_pct}%</td>
+                        <td class="p-3 text-gray-300 max-w-xs truncate" title="${item.reason}">${item.reason}</td>
+                        <td class="p-3">
+                            ${snapUrl ? `<button onclick="openSnapModal('${snapUrl}')" class="px-2 py-1 rounded bg-dark-800 hover:bg-dark-700 text-xs text-cyan-400 border border-dark-700">Bekijk</button>` : '<span class="text-gray-600">-</span>'}
+                        </td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            } catch (e) {
+                tbody.innerHTML = '<tr><td colspan="7" class="p-4 text-center text-red-400">Fout bij laden van inspectielogs.</td></tr>';
+            }
+        }
+
+        // Modal Helpers
+        function openSnapModal(url) {
+            document.getElementById('modal-img').src = url;
+            document.getElementById('snap-modal').classList.remove('hidden');
+        }
+        function closeSnapModal() {
+            document.getElementById('snap-modal').classList.add('hidden');
+        }
+
+        // Backend & Crash Logs
+        async function loadBackendLogs() {
+            const consoleEl = document.getElementById('backend-log-console');
+            try {
+                const res = await fetch('/api/v1/admin/crash-logs');
+                if (!res.ok) return;
+                const d = await res.json();
+                consoleEl.innerHTML = '';
+                if (d.backend_logs && d.backend_logs.length > 0) {
+                    d.backend_logs.forEach(l => {
+                        const div = document.createElement('div');
+                        const color = l.level === 'ERROR' ? 'text-red-400 font-bold' : (l.level === 'WARNING' ? 'text-amber-400' : 'text-gray-400');
+                        div.innerHTML = `<span class="text-gray-600">[${l.time}]</span> <span class="${color}">${l.level}</span> <span class="text-cyan-400 font-semibold">${l.logger}</span>: <span>${l.message}</span>`;
+                        consoleEl.appendChild(div);
+                    });
+                } else {
+                    consoleEl.innerHTML = '<div class="text-gray-500">Geen waarschuwingen of fouten geregistreerd in Python ring-buffer.</div>';
+                }
+            } catch (e) {}
+        }
+
+        async function loadCrashLogs() {
+            const container = document.getElementById('crash-log-container');
+            try {
+                const res = await fetch('/api/v1/admin/crash-logs');
+                if (!res.ok) return;
+                const d = await res.json();
+                container.innerHTML = '';
+                if (d.client_crashes && d.client_crashes.length > 0) {
+                    d.client_crashes.forEach(c => {
+                        const card = document.createElement('div');
+                        card.className = 'p-3.5 rounded-xl bg-dark-950 border border-red-500/30 text-xs space-y-2';
+                        card.innerHTML = `
+                            <div class="flex items-center justify-between text-red-400 font-bold">
+                                <span>📱 ${c.device_name || 'Android Toestel'} (${c.app_version || 'v2.x'})</span>
+                                <span class="text-gray-500 font-mono text-[10px]">${c.timestamp.split('.')[0].replace('T', ' ')}</span>
+                            </div>
+                            <div class="text-white font-semibold">${c.error_message}</div>
+                            ${c.screen_state ? `<div class="text-[11px] text-gray-400">Schermstatus: ${c.screen_state}</div>` : ''}
+                            <pre class="p-2.5 rounded-lg bg-black text-[10px] text-gray-400 overflow-x-auto font-mono max-h-36">${c.stacktrace}</pre>
+                        `;
+                        container.appendChild(card);
+                    });
+                } else {
+                    container.innerHTML = '<div class="p-6 text-center text-gray-500">Geen Android app crashes gemeld (applicatie draait stabiel).</div>';
+                }
+            } catch (e) {}
+        }
+    </script>
+</body>
+</html>

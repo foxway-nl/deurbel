@@ -1,40 +1,79 @@
-# Masterplan & Milestones: Custom Smart Doorbell (EZVIZ DB1 Pro + go2rtc + Android)
+# Foxway Smart Doorbell System Specification (v2.3.0)
 
-## Huidige Server Omgeving
-- **Locatie:** `/mnt/opslag/deurbel`
-- **Media Engine:** `go2rtc` draait al lokaal op `http://127.0.0.1:1984` (stream naam: `deurbel`, WebRTC poort: `8555` TCP/UDP).
-- **Externe URL's:** Backend via `https://deurbel.foxway.nl` (wijst naar poort `8090`), WebRTC extern via `sip.foxway.nl:8555` / `foxway.nl:8555`.
-- **Opslagmappen:** `/mnt/opslag/deurbel/clips`, `/mnt/opslag/deurbel/snapshots`, `/mnt/opslag/deurbel/audio`.
+**Versie:** `v2.3.0` (`versionCode = 14`)  
+**Datum:** 28 Oktober 2026  
+**Productie-omgeving:** `foxway` (`192.168.2.1`), WAN: `https://deurbel.foxway.nl`  
+**Camera:** EZVIZ DB1 (`192.168.2.31`), native **4:3 aspect ratio** (`768x576` / `960x720`)
 
-## Project Milestones
+---
 
-### Milestone 1: FastAPI Signaling & Media Backend (`/mnt/opslag/deurbel/backend`)
-- Draait in Docker (`network_mode: host`, poort `8090`, inclusief `ffmpeg` en `zeroconf`/`avahi`).
-- **Aanbel-trigger (`POST /api/ring`):**
-  1. Haalt direct een live JPEG-snapshot op bij `http://127.0.0.1:1984/api/frame.jpeg?src=deurbel` en slaat deze op in `/mnt/opslag/deurbel/snapshots`.
-  2. Start op de achtergrond een FFmpeg-opname van de `go2rtc` RTSP-stream (`rtsp://127.0.0.1:8554/deurbel`) naar `/mnt/opslag/deurbel/clips` (30 sec of tot einde gesprek).
-  3. Zet de call-state op `RINGING` en stuurt direct een WebSocket-event + FCM High-Priority push naar alle geregistreerde Android-toestellen.
-- **Multi-user Call State Machine:**
-  - `POST /api/call/claim` (met `user_id` en `user_name`): Eerste gebruiker die opneemt krijgt de lock (`ACTIVE`). Alle andere toestellen ontvangen direct een `CALL_ANSWERED_BY` event (met naam van degene die opnam) zodat het rinkelen daar stopt.
-  - `POST /api/call/hangup` en `POST /api/call/quick-reply` (speelt vooraf opgenomen audiobestand af via `go2rtc` backchannel naar de deurbel).
-- **mDNS / Zeroconf Discovery:** Zendt `_deurbel._tcp.local.` uit op poort `8090` zodat de Android-app op hetzelfde wifi-netwerk de server met 1 klik vindt en configureert.
-- **Clips API:** Endpoints om opgeslagen MP4-clips in `/mnt/opslag/deurbel/clips` op te vragen (`GET /api/clips`), te streamen, bij te knippen met FFmpeg (`POST /api/clips/trim` met start/eind-tijd) en te downloaden.
+## 1. Systeemoverzicht & Architectuur
+Het Foxway Deurbelsysteem is een end-to-end, privacy-vriendelijk en ultra-low-latency videodeurbelsysteem bestaande uit:
+1. **EZVIZ DB1 Camera (Poort 8000 C-SDK & RTSP):**
+   - Native 4:3 beeldsensor met microfoon en luidspreker.
+   - Tweeweg-audio gestuurd via `libhcnetsdk.so` C-SDK (`app/audio_bridge.py`) over TCP poort 8000.
+2. **FastAPI & Python Media Server (`backend` in Docker):**
+   - Draait op poort 8090 met `network_mode: host`.
+   - **Zero-lag Live Drain:** Dedicated achtergrond-draad leest direct van FFmpeg OS pipe (`/dev/shm/deurbel_ring`) en behoudt alleen het allerlaatste complete frame (`<100ms` latentie).
+   - **3-Laags AI Gatekeeper (`VerificationGatekeeper`):** YOLOv8s op volledig 4:3 frame, grondvlak-filtering ($y_2 \ge 0.25h$), interactieve uitsluitingszones, 3-frame trajectcontrole ($\Delta d \ge 6\%$ voor persoon/dier, $\ge 12\%$ voor voertuig).
+   - **Direct Push Coupling:** Stuurt FCM en WebSocket push notificaties binnen 1.5s (stub-event registratie op $T_0 + 1.0s$).
+   - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met sessie-authenticatie, live videomonitor, dynamische variabelen, uitsluitingszones canvas, AI inspectietabel en Android crash logs.
+3. **Android Client App (`android-app`):**
+   - Native Jetpack Compose, Kotlin coroutines.
+   - Telecom framework integratie met `ConnectionService` voor volscherm belscherm (`TelecomManager`).
+   - `RGB_565` bitmap decodering en `AudioTrack` mutex-bescherming tegen OOM en threading crashes.
+   - Automatische crash logger naar `crash_last.json` en `POST /api/v1/logs/client-crash`.
 
-### Milestone 2: Android App Basis & 1-Klik Netwerk Discovery
-- Native Android-app (Kotlin, Jetpack Compose, Material 3 UI).
-- Scant via Android `NsdManager` naar `_deurbel._tcp.local.`.
-- Met één druk op de knop koppelt de gebruiker (kiest eigen naam, bijv. "Mohamed" of "Hanan"), slaat zowel het lokale IP (`http://192.168.2.1:8090`) als de externe URL (`https://deurbel.foxway.nl`) op en houdt een persistente WebSocket/FCM-verbinding actief.
+---
 
-### Milestone 3: Echt Systeem-Belscherm & Multi-User Afhandeling
-- Gebruikt Android `TelecomManager` / `ConnectionService` en `fullScreenIntent` zodat de telefoon bij een aanbel-actie altijd direct een volscherm inkomend gesprek toont (ook op een vergrendelde Samsung S25 Plus).
-- Toont op het rinkelende belscherm direct de live snapshot van de bezoeker + knoppen voor: *Opnemen*, *Weigeren*, en *Quick-Reply* ("Zet pakketje bij de deur" / "Ik kom eraan").
-- Als een andere gebruiker als eerste opneemt, sluit het belscherm direct en verschijnt een melding: *"Oproep beantwoord door [Naam]"*.
+## 2. Harde Systeemeisen & Beschermde Componenten
+- **Geen Regressie:** Eerdere functionaliteit van v2.2.0 (Telecom belscherm, C-SDK tweeweg-audio, mDNS discovery) mag onder geen enkel beding worden gesloopt.
+- **Tweeweg-Audio (`backend/app/audio_bridge.py`):** De C-SDK `libhcnetsdk.so` met pre-warmed login sessies en 1000 Hz loopback FFT test is beschermd.
+- **4:3 Aspect Ratio:** Alle weergaven in Android (`LiveScreen.kt`, `CallScreen.kt`, `ClipsScreen.kt`) en Web Admin (`/admin`) zijn strikt 4:3.
+- **RAM Ring-Buffer:** `/dev/shm/deurbel_ring` draait in RAM voor 6 seconden Pre-Roll.
+- **Systeembronnen:** FFmpeg draait altijd met `nice -n 15`. Gradle builds met `--max-workers=2`.
 
-### Milestone 4: Razendsnelle 2-Weg WebRTC Video & Audio (< 300ms)
-- **WebRTC Pre-warming:** Zodra de telefoon begint te rinkelen (`RINGING`), bouwt de app op de achtergrond de WebRTC-verbinding met `go2rtc` al op (gedempt). Bij drukken op *Opnemen* zijn beeld en spraak direct live zonder laadtijd.
-- **Hardware Echo-onderdrukking:** Gebruikt `JavaAudioDeviceModule` op `USAGE_VOICE_COMMUNICATION` met hardwarematige `AcousticEchoCanceler` en `NoiseSuppressor` ingeschakeld tegen rondzingen.
-- **Stealth Live-View:** Handmatig live kijken vanuit de app start altijd met een **gemute microfoon** (Push-to-Talk knop om te spreken).
+---
 
-### Milestone 5: Clips Tijdlijn, Speler & In-App Video Trimmer
-- Overzichtelijke tab in de app met alle opnames en snapshots van de server.
-- Ingebouwde ExoPlayer/Media3 videospeler met een schuifbalk (trimmer) om een fragment te selecteren, via de backend te laten knippen en direct op de telefoon op te slaan of te delen.
+## 3. 3-Laags AI Verificatie Gatekeeper (`ai_detector.py`)
+Om valse meldingen door bewegende struiken, wind en geparkeerde auto's 100% uit te sluiten:
+1. **Laag 1 — Volledige 4:3 Frame Context & Grondvlak:**
+   - Geen misleidende mini-crops. YOLOv8s analyseert het volledige $960 \times 720$ frame.
+   - Grondvlak filter: Box onderkant $y_2 < 0.25 \times \text{hoogte}$ wordt direct genegeerd (vogels in de lucht, dakranden, bomen).
+   - Interactieve Uitsluitingszones: Bounding box overlaps met gedefinieerde polygonen/rects worden genegeerd.
+2. **Laag 2 — 3-Frame Trajectverificatie ($1.2\text{s}$ Bewijs):**
+   - Evaluatie op $t_0$, $t_0 + 0.5\text{s}$, $t_0 + 1.0\text{s}$.
+   - Berekening van de verplaatsing:
+     $$\Delta d = \frac{\sqrt{(cx_3 - cx_1)^2 + (cy_3 - cy_1)^2}}{\text{frame\_width}}$$
+   - **Persoon / Dier:** Vereist $\Delta d \ge 0.06$ ($6\%$ schermbreedte).
+   - **Voertuig:** Vereist $\Delta d \ge 0.12$ ($12\%$ schermbreedte).
+   - Statische objecten ($\Delta d < \text{threshold}$) worden als `REJECTED` opgeslagen in `ai_audit_logs`.
+3. **Laag 3 — Directe Push Koppeling & Object-Gestuurde Opnamelengte:**
+   - Op $T_0 + 1.0s$ wordt direct een event in de database opgeslagen met clip-stub.
+   - Push notificatie vertrekt binnen 1.5s naar alle toestellen.
+   - Opname stopt wanneer het gedetecteerde object het beeld verlaat $+ 5\text{s}$ post-roll (maximale lengte: 25s). Geen clips van 65s door wind/bladeren meer.
+
+---
+
+## 4. Web Admin Dashboard (`/admin`)
+- **Login:** `/admin/login` beveiligd met cookie-gebaseerde sessie (`doorbell_admin_session`) en bcrypt/sha256 wachtwoord hash.
+- **Tab 1: Live Systeem & Stream Monitor:**
+   - 4:3 live canvas, frame-leeftijd in ms, FPS, CPU/RAM meters, actieve processen.
+   - Actieknoppen: Resync Live Stream, Schoon Valse Clips Op, Test Aanbellen, Test Notificatie.
+- **Tab 2: Dynamische Variabelen & Uitsluitingszones:**
+   - Realtime instellen van thresholds, displacement %, pre/post roll, ring FFT frequenties.
+   - Interactief tekenen van maskeringszones op het camerabeeld.
+- **Tab 3: AI Verificatie Inspector:**
+   - Tabel met de laatste 50 evaluaties (Status: GOEDGEKEURD / GEBLOKKEERD), snapshot, categorie, confidence, $\Delta d\%$, en auditreden.
+- **Tab 4: Foutenlogboek & Android Crash Logs:**
+   - Realtime backend ring-logger (laatste 100 logs).
+   - Android client crash logs ontvangen via `POST /api/v1/logs/client-crash`.
+
+---
+
+## 5. Android Client Specificaties
+- **Versie:** `v2.3.0` (`versionCode = 14`).
+- **Crash Safety:** Globale `Thread.setDefaultUncaughtExceptionHandler` en `CoroutineExceptionHandler` schrijven direct naar `crash_last.json` en versturen direct én bij app-start naar de server.
+- **Geheugen:** `BitmapFactory.Options` gebruikt `inPreferredConfig = Bitmap.Config.RGB_565`.
+- **AudioTrack:** Beschermd met interne mutex en `state == STATE_INITIALIZED` controles.
+- **Sync Knop:** Prominente `"🔄 Sync Live"` knop in `LiveScreen.kt` herstart de verbinding zonder zwart beeld (laatste frame blijft zichtbaar).
