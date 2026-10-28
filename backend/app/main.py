@@ -733,13 +733,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "2.1.0",
-        "version_code": 12,
-        "build_time": "2026-10-27T23:30:00Z",
+        "version": "2.2.0",
+        "version_code": 13,
+        "build_time": "2026-10-28T09:30:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v2.1.0: Anti-freeze live stream architecture, 5G cloud onboarding, instant test trigger, AI vehicle displacement tracking & rain filter",
+        "changelog": "v2.2.0: Stop notification explosion on login (1-to-1 clip coupling) & open-source supervision + Frigate motion-crop AI",
     }
 
 
@@ -796,10 +796,14 @@ async def shelly_ring_status():
 # ══════════════════════════════════════════════════════════════════════
 
 @app.get("/api/v1/events")
-async def get_events_endpoint(since_id: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200)):
+async def get_events_endpoint(
+    since_id: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    order: str = Query("asc", pattern="^(asc|desc)$"),
+):
     """Retrieve event queue items since since_id for reliable push fallback."""
     from app.models import get_events_since
-    events = await get_events_since(since_id=since_id, limit=limit)
+    events = await get_events_since(since_id=since_id, limit=limit, order=order)
     return {"status": "ok", "events": events, "count": len(events)}
 
 

@@ -54,7 +54,6 @@ class WebSocketForegroundService : Service() {
     private var eventCollectorJob: Job? = null
     private var pollJob: Job? = null
     private var lastEventId: Long = 0L
-    private var isFirstPoll: Boolean = true
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     override fun onCreate() {
@@ -64,6 +63,9 @@ class WebSocketForegroundService : Service() {
         val prefs = FoxwayApp.instance.preferencesManager
         endpointResolver = EndpointResolver(prefs)
         persistentWebSocket = PersistentWebSocket(prefs, endpointResolver)
+
+        val eventPrefs = getSharedPreferences("foxway_events", Context.MODE_PRIVATE)
+        lastEventId = eventPrefs.getLong("last_seen_event_id", 0L)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -93,7 +95,7 @@ class WebSocketForegroundService : Service() {
             }
         }
 
-        Log.i(TAG, "Service started, WebSocket & 2s Polling Fallback active")
+        Log.i(TAG, "Service started, WebSocket & 2s Polling Fallback active (lastEventId=$lastEventId)")
         return START_STICKY
     }
 
@@ -108,24 +110,30 @@ class WebSocketForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // ── 3-Second Fallback Polling (Task 6) ───────────────────────────
+    // ── 2-Second Fallback Polling (Task 1 & Task 3) ──────────────────
 
     private suspend fun pollEvents() {
         val resolved = endpointResolver.resolve()
         val api = ApiClientFactory.createApi(resolved.apiBaseUrl)
+        val eventPrefs = getSharedPreferences("foxway_events", Context.MODE_PRIVATE)
 
-        if (isFirstPoll) {
-            // First time running: fetch latest event ID to avoid replaying old historical events
+        if (lastEventId <= 0L) {
+            // First time running / after login: fetch latest event ID to avoid replaying old historical events
             try {
                 val initialResp = api.getEvents(sinceId = 0, limit = 1)
                 if (initialResp.isSuccessful && initialResp.body() != null) {
                     val events = initialResp.body()!!.events
                     if (events.isNotEmpty()) {
-                        lastEventId = events.maxOf { it.id }
+                        val latestId = events.maxOf { it.id }
+                        lastEventId = latestId
+                        eventPrefs.edit().putLong("last_seen_event_id", latestId).apply()
+                        Log.i(TAG, "Initialized lastSeenEventId=$latestId from server (historical events suppressed)")
                     }
                 }
-            } catch (_: Exception) {}
-            isFirstPoll = false
+            } catch (e: Exception) {
+                Log.w(TAG, "Initial event bootstrap failed: ${e.message}")
+            }
+            // CRITICAL: NEVER fire any notification or call for existing events from the past!
             return
         }
 
@@ -135,6 +143,7 @@ class WebSocketForegroundService : Service() {
             for (item in events) {
                 if (item.id > lastEventId) {
                     lastEventId = item.id
+                    eventPrefs.edit().putLong("last_seen_event_id", lastEventId).apply()
                     processEventItem(item)
                 }
             }
@@ -142,17 +151,62 @@ class WebSocketForegroundService : Service() {
     }
 
     private suspend fun processEventItem(item: EventItemDto) {
-        Log.i(TAG, "Processing event: id=${item.id}, type=${item.type}, cat=${item.category}")
+        val eventSec = parseIsoEpochSeconds(item.createdAt)
+        val nowSec = System.currentTimeMillis() / 1000L
+        val ageSec = if (eventSec > 0) Math.abs(nowSec - eventSec) else 0L
+
+        Log.i(TAG, "Processing event: id=${item.id}, type=${item.type}, age=${ageSec}s")
         when (item.type.lowercase()) {
             "ring" -> {
+                // Hard Rule: A ring event MUST ONLY open the call screen if it is < 15 seconds old!
+                if (eventSec > 0 && ageSec > 15L) {
+                    Log.w(TAG, "Suppressed stale ring event id=${item.id}, age=${ageSec}s (>15s limit)")
+                    return
+                }
                 handleRinging(
                     callId = item.clipId.ifBlank { "ring_${item.id}" },
                     snapshotUrl = item.snapshotUrl
                 )
             }
             "motion" -> {
+                // Hard Rule: Motion notification only if < 60 seconds old AND not shown before
+                if (eventSec > 0 && ageSec > 60L) {
+                    Log.w(TAG, "Suppressed stale motion event id=${item.id}, age=${ageSec}s (>60s limit)")
+                    return
+                }
+                val eventPrefs = getSharedPreferences("foxway_events", Context.MODE_PRIVATE)
+                val shownIds = eventPrefs.getStringSet("shown_event_ids", emptySet())?.toMutableSet() ?: mutableSetOf()
+                val idStr = item.id.toString()
+                if (shownIds.contains(idStr)) {
+                    Log.i(TAG, "Suppressed duplicate motion event id=${item.id} (already shown)")
+                    return
+                }
+                shownIds.add(idStr)
+                if (shownIds.size > 500) {
+                    val pruned = shownIds.toList().takeLast(300).toSet()
+                    eventPrefs.edit().putStringSet("shown_event_ids", pruned).apply()
+                } else {
+                    eventPrefs.edit().putStringSet("shown_event_ids", shownIds).apply()
+                }
                 handleMotionNotification(item)
             }
+        }
+    }
+
+    private fun parseIsoEpochSeconds(isoStr: String?): Long {
+        if (isoStr.isNullOrBlank()) return 0L
+        return try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                java.time.Instant.parse(isoStr).epochSecond
+            } else {
+                val format = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).apply {
+                    timeZone = java.util.TimeZone.getTimeZone("UTC")
+                }
+                val cleanStr = if (isoStr.length >= 19) isoStr.substring(0, 19) else isoStr
+                format.parse(cleanStr)?.time?.div(1000L) ?: 0L
+            }
+        } catch (_: Exception) {
+            0L
         }
     }
 
@@ -164,6 +218,16 @@ class WebSocketForegroundService : Service() {
             DoorbellEvent.CALL_RINGING -> {
                 val callId = event.callId ?: return
                 val snapshotUrl = event.snapshotUrl ?: ""
+                val ts = event.timestamp
+                if (!ts.isNullOrBlank()) {
+                    val eventSec = parseIsoEpochSeconds(ts)
+                    val nowSec = System.currentTimeMillis() / 1000L
+                    val ageSec = Math.abs(nowSec - eventSec)
+                    if (eventSec > 0 && ageSec > 15L) {
+                        Log.w(TAG, "Suppressed stale WS CALL_RINGING, age=${ageSec}s (>15s limit)")
+                        return
+                    }
+                }
                 handleRinging(callId, snapshotUrl)
             }
             DoorbellEvent.CALL_CLAIMED -> handleClaimed(event)

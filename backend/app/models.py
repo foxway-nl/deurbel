@@ -221,6 +221,25 @@ async def init_db() -> None:
         except Exception:
             pass
 
+        # Cleanup orphan events without a valid clip_id in clips table and deduplicate to strict 1-to-1 coupling
+        try:
+            await db.execute("""
+                DELETE FROM events
+                WHERE clip_id NOT IN (SELECT clip_id FROM clips)
+                   OR clip_id IS NULL
+                   OR clip_id = ''
+            """)
+            await db.execute("""
+                DELETE FROM events
+                WHERE id NOT IN (
+                    SELECT max(id)
+                    FROM events
+                    GROUP BY clip_id
+                )
+            """)
+        except Exception:
+            pass
+
         await db.commit()
 
 
@@ -571,14 +590,32 @@ async def save_event(
         }
 
 
-async def get_events_since(since_id: int = 0, limit: int = 50) -> list[dict]:
-    """Retrieve new events since since_id."""
+async def get_events_since(since_id: int = 0, limit: int = 50, order: str = "asc") -> list[dict]:
+    """
+    Retrieve new events with strict 1-to-1 clip coupling.
+    If order == 'desc' or (since_id == 0 and limit == 1), returns the latest events.
+    Filters out any orphan events that do not have a valid clip in the clips table.
+    """
     async with aiosqlite.connect(_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?",
-            (since_id, max(1, min(limit, 200))),
-        )
+        if order.lower() == "desc" or (since_id == 0 and limit == 1):
+            cursor = await db.execute(
+                """
+                SELECT e.* FROM events e
+                WHERE e.clip_id IN (SELECT clip_id FROM clips)
+                ORDER BY e.id DESC LIMIT ?
+                """,
+                (max(1, min(limit, 200)),),
+            )
+        else:
+            cursor = await db.execute(
+                """
+                SELECT e.* FROM events e
+                WHERE e.id > ? AND e.clip_id IN (SELECT clip_id FROM clips)
+                ORDER BY e.id ASC LIMIT ?
+                """,
+                (since_id, max(1, min(limit, 200))),
+            )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 

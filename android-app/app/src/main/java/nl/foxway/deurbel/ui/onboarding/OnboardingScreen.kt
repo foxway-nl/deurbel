@@ -689,6 +689,27 @@ fun OnboardingScreen(
                                     wan = wanToSave
                                 )
                                 AppLogger.getInstance(context).info("Toestel gekoppeld als ${body.userName}")
+
+                                // Sync last_seen_event_id to latest server event to prevent notification explosion on login
+                                val eventPrefs = context.getSharedPreferences("foxway_events", Context.MODE_PRIVATE)
+                                try {
+                                    val activeApi = ApiClientFactory.createApi(if (isWanOnly) wanToSave else lanToSave)
+                                    val evResp = activeApi.getEvents(sinceId = 0, limit = 1)
+                                    val latestId = if (evResp.isSuccessful && evResp.body() != null) {
+                                        evResp.body()!!.events.maxOfOrNull { it.id } ?: 0L
+                                    } else 0L
+                                    eventPrefs.edit()
+                                        .putLong("last_seen_event_id", latestId)
+                                        .putStringSet("shown_event_ids", emptySet())
+                                        .apply()
+                                    AppLogger.getInstance(context).info("Events gesynchroniseerd bij inloggen: baseline-id=$latestId")
+                                } catch (_: Exception) {
+                                    eventPrefs.edit()
+                                        .putLong("last_seen_event_id", 0L)
+                                        .putStringSet("shown_event_ids", emptySet())
+                                        .apply()
+                                }
+
                                 onPairingSuccess()
                             } else {
                                 val errorDetail = try {
