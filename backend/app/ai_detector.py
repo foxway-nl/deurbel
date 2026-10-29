@@ -138,9 +138,9 @@ class DetectionSettings:
             "notify_vehicle": await get_setting("notify_vehicle", "true") == "true",
             "notify_animal": await get_setting("notify_animal", "true") == "true",
             "notify_motion": await get_setting("notify_motion", "false") == "true",
-            "quiet_hours_enabled": await get_setting("quiet_hours_enabled", "false") == "true",
-            "quiet_hours_start": await get_setting("quiet_hours_start", "23:00"),
-            "quiet_hours_end": await get_setting("quiet_hours_end", "07:00"),
+            "quiet_hours_enabled": await get_setting("quiet_hours_enabled", "true") == "true",
+            "quiet_hours_start": await get_setting("quiet_hours_start", "23:30"),
+            "quiet_hours_end": await get_setting("quiet_hours_end", "07:30"),
             "motion_sensitivity": float(await get_setting("motion_sensitivity", "1.5")),
         }
 
@@ -199,6 +199,7 @@ class SmartDetector:
 
         # Spatial parked vehicle reference boxes: list of (x1, y1, x2, y2)
         self.parked_vehicle_boxes: list[tuple[float, float, float, float]] = []
+        self.parked_spots: collections.deque[tuple[float, float, float, float]] = collections.deque(maxlen=30)
         self.static_parked_boxes: list[tuple[float, float, float, float]] = []
         self.last_baseline_update: float = 0.0
 
@@ -237,10 +238,16 @@ class SmartDetector:
             logger.error("Failed loading YOLOv8n/Supervision: %s", e)
             return False
 
-    def is_in_quiet_hours(self, start_str: str, end_str: str) -> bool:
-        """Check if current local time is within quiet hours (e.g. 23:00 to 07:00)."""
+    def is_in_quiet_hours(self, start_str: str, end_str: str, check_time: Optional[datetime] = None) -> bool:
+        """Check if current local time (or check_time) in Europe/Amsterdam is within quiet hours (e.g. 23:30 to 07:30)."""
         try:
-            now = datetime.now()
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo("Europe/Amsterdam")
+            now = check_time if check_time is not None else datetime.now(tz)
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=tz)
+            else:
+                now = now.astimezone(tz)
             start_parts = [int(p) for p in start_str.split(":")]
             end_parts = [int(p) for p in end_str.split(":")]
             start_time = now.replace(hour=start_parts[0], minute=start_parts[1], second=0, microsecond=0)
@@ -248,7 +255,7 @@ class SmartDetector:
 
             if start_time < end_time:
                 return start_time <= now <= end_time
-            else:  # Crosses midnight (e.g., 23:00 -> 07:00)
+            else:  # Crosses midnight (e.g., 23:30 -> 07:30)
                 return now >= start_time or now <= end_time
         except Exception:
             return False
@@ -755,15 +762,26 @@ class SmartDetector:
                 else 0.0
             )
 
-            # Static Parked Car Check:
-            if category == "vehicle" and changed_pixel_ratio < 0.04:
-                # Add to static parked car list so spot is remembered
-                if not is_parked_vehicle(box, self.parked_vehicle_boxes, threshold=0.50):
-                    self.parked_vehicle_boxes.append(box)
-                    if len(self.parked_vehicle_boxes) > 15:
-                        self.parked_vehicle_boxes.pop(0)
-                logger.debug("STATIC_PARKED_CAR rejected at %s (ratio=%.4f < 0.04)", box, changed_pixel_ratio)
-                continue
+            # Static Parked Car & Parked Spots Pre-filtering:
+            if category == "vehicle":
+                # Check overlap with known parked spots (TAAK 4)
+                all_parked = list(self.parked_spots) + self.parked_vehicle_boxes
+                is_on_parked_spot = any(compute_iou(box, p_box) >= 0.55 for p_box in all_parked)
+
+                if is_on_parked_spot and changed_pixel_ratio < 0.30:
+                    logger.debug("PARKED_SPOT_REJECTED at %s (IoU>=0.55, ratio=%.4f < 0.30)", box, changed_pixel_ratio)
+                    continue
+
+                if changed_pixel_ratio < 0.10:
+                    if not is_parked_vehicle(box, list(self.parked_spots), threshold=0.65):
+                        self.parked_spots.append(box)
+                    if not is_parked_vehicle(box, self.parked_vehicle_boxes, threshold=0.65):
+                        self.parked_vehicle_boxes.append(box)
+                        if len(self.parked_vehicle_boxes) > 20:
+                            self.parked_vehicle_boxes.pop(0)
+                    if changed_pixel_ratio < 0.04:
+                        logger.debug("STATIC_PARKED_CAR rejected at %s (ratio=%.4f < 0.04)", box, changed_pixel_ratio)
+                        continue
 
             detected_candidates.append((category, label, conf, box, changed_pixel_ratio))
 
@@ -791,15 +809,25 @@ class SmartDetector:
                     bcy = (box[1] + box[3]) / 2.0
                     lcx = (last_box[0] + last_box[2]) / 2.0
                     lcy = (last_box[1] + last_box[3]) / 2.0
+                    step_disp_x = abs(bcx - lcx) / float(w)
                     dist = math.hypot(bcx - lcx, bcy - lcy) / float(w)
                     bw = box[2] - box[0]
                     lbw = last_box[2] - last_box[0]
                     size_ratio = min(bw, lbw) / max(1.0, max(bw, lbw))
 
-                    if iou >= 0.20 or (dist < 0.12 and size_ratio > 0.50):
-                        if iou > best_iou or (best_iou == 0.0 and dist < 0.12):
-                            best_iou = max(iou, 0.01)
+                    if category == "vehicle":
+                        # TAAK 4: Moving car in 5 FPS stream cannot jump >12% screen width in 0.2s, and must have continuous IoU overlap >= 0.15
+                        # This strictly prevents car swap bugs between adjacent parked cars (e.g. cx=0.42 to cx=0.62)
+                        if step_disp_x > 0.12 or iou < 0.15:
+                            continue
+                        if iou > best_iou:
+                            best_iou = iou
                             matched_id = tid
+                    else:
+                        if iou >= 0.20 or (dist < 0.12 and size_ratio > 0.50):
+                            if iou > best_iou or (best_iou == 0.0 and dist < 0.12):
+                                best_iou = max(iou, 0.01)
+                                matched_id = tid
 
             if matched_id is not None:
                 track = self._candidate_tracks[matched_id]
@@ -846,7 +874,18 @@ class SmartDetector:
 
                     # Manier 1 (Nieuw in beeld verschenen):
                     # Niet op een geparkeerde plek 2s geleden, gezien in 2 frames met changed_pixel_ratio >= 0.15
-                    if (not is_parked_spot) and max_pixel_ratio >= 0.15 and len(track.frames) >= 2:
+                    # En alle opeenvolgende stappen moeten voldoen aan: step_dx <= 0.12 en IoU >= 0.15
+                    valid_steps = True
+                    for idx in range(1, len(track.frames)):
+                        pb = track.frames[idx - 1][1]
+                        cb = track.frames[idx][1]
+                        sdx = abs(((cb[0] + cb[2]) / 2.0) - ((pb[0] + pb[2]) / 2.0)) / float(w)
+                        siou = compute_iou(pb, cb)
+                        if sdx > 0.12 or siou < 0.15:
+                            valid_steps = False
+                            break
+
+                    if (not is_parked_spot) and max_pixel_ratio >= 0.15 and len(track.frames) >= 2 and valid_steps:
                         is_valid_object = True
                         verified_disp_pct = max(delta_d_pct, 5.0)
                         logger.info("Vehicle Manier 1 (New Moving Vehicle): %s ratio=%.2f, frames=%d", track.label, max_pixel_ratio, len(track.frames))
@@ -988,10 +1027,12 @@ class SmartDetector:
             return
 
         in_quiet_hours = False
-        if cfg.get("quiet_hours_enabled", False):
+        if cfg.get("quiet_hours_enabled", True):
             in_quiet_hours = self.is_in_quiet_hours(
-                cfg.get("quiet_hours_start", "23:00"), cfg.get("quiet_hours_end", "07:00")
+                cfg.get("quiet_hours_start", "23:30"), cfg.get("quiet_hours_end", "07:30")
             )
+        if in_quiet_hours:
+            should_notify = False
 
         clip_id = str(uuid.uuid4())
         clip_path = str(settings.CLIPS_DIR / f"{clip_id}.mp4")
@@ -1049,6 +1090,7 @@ class SmartDetector:
             title=title,
             clip_id=clip_id,
             snapshot_url=snapshot_url,
+            silent=in_quiet_hours or not should_notify,
         )
 
         # 5. Log to ai_audit_logs as APPROVED with debug snapshot for Web Admin Inspector
@@ -1076,7 +1118,8 @@ class SmartDetector:
                 "timestamp": t0_iso,
                 "snapshot_url": snapshot_url,
                 "in_quiet_hours": in_quiet_hours,
-                "should_notify": should_notify,
+                "should_notify": should_notify and not in_quiet_hours,
+                "silent": in_quiet_hours or not should_notify,
             },
         )
         logger.info("Dispatched immediate push notification for %s (%s) within 1.2s", category, label)

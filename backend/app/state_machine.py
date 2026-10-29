@@ -102,8 +102,18 @@ class CallStateMachine:
         async with self._lock:
             now = time.monotonic()
 
-            # If already RINGING, retrigger the notification and extend timeout!
-            if self._current and self._current.state == CallState.RINGING:
+            if force:
+                logger.info("Force ring requested — bypassing all cooldowns and resetting active call")
+                if self._current:
+                    if self._current.timeout_task and not self._current.timeout_task.done():
+                        self._current.timeout_task.cancel()
+                    if self._current.recorder_task and not self._current.recorder_task.done():
+                        self._current.recorder_task.cancel()
+                    self._current = None
+                self._last_ring_ts = 0.0
+
+            # If already RINGING (and not forced), retrigger the notification and extend timeout!
+            elif self._current and self._current.state == CallState.RINGING:
                 logger.info("Call %s is already RINGING — retriggering notification & extending timeout", self._current.call_id)
                 call = self._current
                 call.started_at = datetime.now(timezone.utc).isoformat()
@@ -116,12 +126,12 @@ class CallStateMachine:
                 return call
 
             # Ignore duplicate presses during cooldown (unless force=True)
-            if not force and (now - self._last_ring_ts < settings.RING_COOLDOWN_SECONDS):
+            elif (now - self._last_ring_ts < settings.RING_COOLDOWN_SECONDS):
                 logger.info("Ring suppressed (cooldown %.1fs remaining)", settings.RING_COOLDOWN_SECONDS - (now - self._last_ring_ts))
                 return None
 
             # Already in an active conversation (unless force=True)
-            if not force and self._current and self._current.state == CallState.IN_CALL:
+            elif self._current and self._current.state == CallState.IN_CALL:
                 logger.info("Ring suppressed (active call %s in progress)", self._current.call_id)
                 return None
 

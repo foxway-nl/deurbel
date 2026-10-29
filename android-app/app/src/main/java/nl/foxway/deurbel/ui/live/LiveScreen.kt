@@ -74,14 +74,9 @@ fun LiveScreen() {
     val activeBaseUrl by connectionManager.activeBaseUrl.collectAsState()
     val isWanMode by connectionManager.isWanMode.collectAsState()
     val connectionType by resolver.connectionType.collectAsState()
-    val isLanConnection = !isWanMode && connectionType == EndpointResolver.ConnectionType.LAN
-    val playerUrl = remember(activeBaseUrl, isLanConnection) {
-        if (isLanConnection) {
-            "http://192.168.2.1:1984/stream.html?src=deurbel&mode=webrtc,mse"
-        } else {
-            val base = activeBaseUrl.ifEmpty { "https://deurbel.foxway.nl" }
-            "$base/api/v1/live/player"
-        }
+    val playerUrl = remember(activeBaseUrl) {
+        val base = activeBaseUrl.ifEmpty { "http://192.168.2.1:8090" }
+        "$base/api/v1/live/player"
     }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
@@ -276,6 +271,7 @@ fun LiveScreen() {
                             onDragEnd = {
                                 if (totalDragY > 120f) {
                                     liveStream.restartStream(forceServerRestart = true)
+                                    webViewRef?.evaluateJavascript("window.reconnectStream && window.reconnectStream();", null)
                                     webViewRef?.reload()
                                     Toast.makeText(context, "Beeld vernieuwd (Pull-to-Refresh)", Toast.LENGTH_SHORT).show()
                                 }
@@ -300,6 +296,11 @@ fun LiveScreen() {
                             settings.loadWithOverviewMode = true
                             setLayerType(View.LAYER_TYPE_HARDWARE, null)
                             webViewClient = object : WebViewClient() {}
+                            webChromeClient = object : android.webkit.WebChromeClient() {
+                                override fun getDefaultVideoPoster(): android.graphics.Bitmap {
+                                    return android.graphics.Bitmap.createBitmap(1, 1, android.graphics.Bitmap.Config.ARGB_8888)
+                                }
+                            }
                             loadUrl(playerUrl)
                             webViewRef = this
                         }
@@ -435,6 +436,7 @@ fun LiveScreen() {
                     border = androidx.compose.foundation.BorderStroke(1.dp, CyanAccent.copy(alpha = 0.5f)),
                     modifier = Modifier.clickable {
                         liveStream.restartStream(forceServerRestart = true)
+                        webViewRef?.evaluateJavascript("window.reconnectStream && window.reconnectStream();", null)
                         webViewRef?.reload()
                         Toast.makeText(context, "Live stream gesynchroniseerd", Toast.LENGTH_SHORT).show()
                     }

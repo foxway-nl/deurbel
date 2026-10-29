@@ -235,9 +235,9 @@ data class DetectionSettingsDto(
     @SerializedName("notify_vehicle") val notifyVehicle: Boolean = true,
     @SerializedName("notify_animal") val notifyAnimal: Boolean = true,
     @SerializedName("notify_motion") val notifyMotion: Boolean = false,
-    @SerializedName("quiet_hours_enabled") val quietHoursEnabled: Boolean = false,
-    @SerializedName("quiet_hours_start") val quietHoursStart: String = "23:00",
-    @SerializedName("quiet_hours_end") val quietHoursEnd: String = "07:00",
+    @SerializedName("quiet_hours_enabled") val quietHoursEnabled: Boolean = true,
+    @SerializedName("quiet_hours_start") val quietHoursStart: String = "23:30",
+    @SerializedName("quiet_hours_end") val quietHoursEnd: String = "07:30",
     @SerializedName("activity_zone_top_ignore_percent") val activityZoneTopIgnorePercent: Int = 20,
     @SerializedName("motion_sensitivity") val motionSensitivity: Double = 1.5
 )

@@ -1,11 +1,15 @@
 package nl.foxway.deurbel.network
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import nl.foxway.deurbel.FoxwayApp
 import nl.foxway.deurbel.data.PreferencesManager
 import nl.foxway.deurbel.data.models.EndpointConfig
 import okhttp3.OkHttpClient
@@ -53,6 +57,27 @@ class EndpointResolver(
      */
     suspend fun resolve(): ResolvedEndpoints = withContext(Dispatchers.IO) {
         var config = preferencesManager.getEndpointConfig()
+
+        val appCtx = FoxwayApp.instance
+        val cm = appCtx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val network = cm?.activeNetwork
+        val caps = cm?.getNetworkCapabilities(network)
+        val isCellularOnly = caps != null &&
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
+                !caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+
+        if (isCellularOnly) {
+            _connectionType.value = ConnectionType.WAN
+            val baseUrl = config.wanApiUrl.ifBlank { "https://deurbel.foxway.nl" }.trimEnd('/')
+            _activeApiUrl.value = baseUrl
+            _activeGo2rtcWs.value = config.go2rtcWanWs.ifBlank { "wss://deurbel.foxway.nl/api/go2rtc/ws" }
+            return@withContext ResolvedEndpoints(
+                apiBaseUrl = baseUrl,
+                go2rtcWsUrl = _activeGo2rtcWs.value,
+                wsUrl = baseUrl.replace("http://", "ws://").replace("https://", "wss://"),
+                isLan = false
+            )
+        }
 
         var isLan = false
         if (config.lanApiUrl.isNotBlank()) {

@@ -459,23 +459,75 @@ fun SettingsScreen(
                     HorizontalDivider(color = DividerDark)
 
                     // 4. Stille Uren / Nachtmodus
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Icon(imageVector = Icons.Default.Bedtime, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(18.dp))
-                                Text("Stille Uren / Nachtmodus", fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Icon(imageVector = Icons.Default.Bedtime, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(18.dp))
+                                    Text("Stille Uren / Nachtmodus", fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                                }
+                                Text(
+                                    "Muteert pushmeldingen tussen ${detectionSettings.quietHoursStart} en ${detectionSettings.quietHoursEnd} (opnames blijven actief)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary
+                                )
                             }
-                            Text("Muteert pushmeldingen tussen ${detectionSettings.quietHoursStart} en ${detectionSettings.quietHoursEnd} (opnames blijven actief)", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                            Switch(
+                                checked = detectionSettings.quietHoursEnabled,
+                                onCheckedChange = { saveDetection(detectionSettings.copy(quietHoursEnabled = it)) },
+                                colors = modernSwitchColors
+                            )
                         }
-                        Switch(
-                            checked = detectionSettings.quietHoursEnabled,
-                            onCheckedChange = { saveDetection(detectionSettings.copy(quietHoursEnabled = it)) },
-                            colors = modernSwitchColors
-                        )
+
+                        if (detectionSettings.quietHoursEnabled) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = detectionSettings.quietHoursStart,
+                                    onValueChange = { newVal ->
+                                        if (newVal.length <= 5) {
+                                            saveDetection(detectionSettings.copy(quietHoursStart = newVal))
+                                        }
+                                    },
+                                    label = { Text("Begintijd", color = TextSecondary, fontSize = 11.sp) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f),
+                                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimary),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = CyanAccent,
+                                        unfocusedBorderColor = DividerDark,
+                                        focusedContainerColor = SurfaceDark,
+                                        unfocusedContainerColor = SurfaceDark
+                                    )
+                                )
+
+                                OutlinedTextField(
+                                    value = detectionSettings.quietHoursEnd,
+                                    onValueChange = { newVal ->
+                                        if (newVal.length <= 5) {
+                                            saveDetection(detectionSettings.copy(quietHoursEnd = newVal))
+                                        }
+                                    },
+                                    label = { Text("Eindtijd", color = TextSecondary, fontSize = 11.sp) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f),
+                                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimary),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = CyanAccent,
+                                        unfocusedBorderColor = DividerDark,
+                                        focusedContainerColor = SurfaceDark,
+                                        unfocusedContainerColor = SurfaceDark
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -755,6 +807,7 @@ fun SettingsScreen(
                                 try {
                                     isTriggeringShelly = true
                                     shellyTriggerResult = null
+                                    nl.foxway.deurbel.telecom.DoorbellConnectionService.resetDeduplication()
                                     val api = ApiClientFactory.createApi()
                                     val resp = api.triggerShellyWebhook(force = true)
                                     if (resp.isSuccessful) {

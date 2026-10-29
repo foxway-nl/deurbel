@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell System Specification (v2.8.0)
+# Foxway Smart Doorbell System Specification (v2.9.0)
 
-**Versie:** `v2.8.0` (`versionCode = 19`)  
+**Versie:** `v2.9.0` (`versionCode = 20`)  
 **Datum:** 29 Oktober 2026  
 **Productie-omgeving:** `foxway` (`192.168.2.1`), WAN: `https://deurbel.foxway.nl`  
 **Camera:** EZVIZ DB1 (`192.168.2.31`), native **4:3 aspect ratio** (`768x576` / `960x720`)
@@ -14,17 +14,19 @@ Het Foxway Deurbelsysteem is een end-to-end, privacy-vriendelijk en ultra-low-la
    - Tweeweg-audio gestuurd via `libhcnetsdk.so` C-SDK (`app/audio_bridge.py`) over TCP poort 8000.
 2. **FastAPI & Python Media Server (`backend` in Docker):**
    - Draait op poort 8090 met `network_mode: host`.
+   - **Zero-UI Live Player op `/api/v1/live/player`:** Eigen lichtgewicht speler gebaseerd op `<zero-player>` en `/api/go2rtc/video-rtc.js`. Toont direct op milliseconde 0 het laatste snapshot (`/api/v1/live/instant.jpg`) als achtergrond/poster, verwijdert alle controls via MutationObserver, verbergt go2rtc overlays via CSS en beschikt over een 1500ms freeze watchdog die bij stilstand direct herverbindt.
+   - **Onbeperkt Opeenvolgend Deurbel Testen:** `POST /api/v1/webhook/shelly-ring?force=true` omzeilt alle debounces en reset eerdere gespreksstatussen direct om telkens een nieuwe oproep met unieke call_id uit te zenden.
+   - **Stille Uren (23:30 - 07:30 Europe/Amsterdam):** AI bewegingsclips worden 's nachts stil opgenomen (`silent = True`, geen pushmelding/FCM), terwijl deurbeloproepen altijd met hoogste prioriteit doorkomen. Instelbaar via `/admin` en de Android app.
+   - **Anti-Car Swap Filter (`app/ai_detector.py`):** `parked_spots` pre-filtering (`IoU >= 0.55` en `changed_pixel_ratio < 0.30` direct afgekeurd) en stap-verplaatsing validatie (`0.02*w <= step_disp <= 0.12*w` met `IoU >= 0.15` tussen opeenvolgende 5 FPS frames) voorkomen dat de detector tussen stilstaande auto's verspringt.
    - **2-Fasen Clip Lifecycle (`RECORDING` -> `READY`):** Bij detectie $T_0$ wordt direct synchroon de geverifieerde miniatuurfoto opgeslagen naar `/mnt/opslag/deurbel/clips/thumb_<clip_id>.jpg` (>5 KB). Meteen daarna wordt de clip-rij met `status = "RECORDING"` aangemaakt en pas daarna gaat de push-melding uit. Pas na afronding van de 20s Post-Roll en concat (`.mp4 > 100 KB`, `duration >= 5s`) wordt de status geüpdatet naar `READY`.
-   - **Native Hardware Streaming (go2rtc MSE + WebRTC):** Live streaming verloopt via go2rtc MSE + WebRTC (`/api/v1/live/player`, proxy `/api/go2rtc/ws`). 0% CPU serverbelasting tijdens live kijken, vlekkeloze weergave op 25 FPS zonder haperende secondenteller.
    - **Gecentraliseerde SQLite WAL Database (`app/database.py`):** WAL mode met `PRAGMA synchronous=NORMAL;`, `PRAGMA busy_timeout=60000;`, timeout=60.0s en async write lock serialisatie.
-   - **Temporal Pixel-Diff AI Detector (`app/ai_detector.py`):** YOLOv8n (<45ms) op 5 FPS met 1.2s temporal grayscale difference mask. Bounding box pixel-diff check: geparkeerde auto's (<4% motion) worden direct als `STATIC_PARKED_CAR` genegeerd. Rijdende auto's worden geverifieerd via Manier 1 of Manier 2. Cooldown is 8s.
-   - **Chronologische Unix-Timestamp Opnames & Anti-Time-Jump (`app/recorder.py`):** `/dev/shm/deurbel_ring` slaat segmenten op als `seg_%s.ts` met gap-detectie (>4.0s). 20s pre-roll en 20s post-roll.
-   - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met 25 FPS live preview player, dynamische variabelen, uitsluitingszones canvas en AI inspectie.
+   - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met 25 FPS live preview player, dynamische variabelen, stille uren configuratie, uitsluitingszones canvas en AI inspectie.
 3. **Android Client App (`android-app`):**
-   - Native Jetpack Compose, Kotlin coroutines, versie 2.8.0 (`versionCode = 19`).
-   - Slimme videospeler (`ClipPlayerDialog` / `ClipsScreen.kt`): bij clips die nog bezig zijn (`status == "RECORDING"`), toont de speler direct de live snapshot preview en een duidelijke `🔴 Opname wordt nog afgerond (20s na-opname)...` status-card, terwijl hij elke 2.0s pollt tot de MP4 klaar is en naadloos start.
-   - Push notificaties met directe miniatuurfoto rechts via `setLargeIcon(bitmap)` en `BigPictureStyle().bigPicture(bitmap)` met fallback retry.
-   - Hardware-versnelde live streaming via native go2rtc speler (MSE + WebRTC).
+   - Native Jetpack Compose, Kotlin coroutines, versie 2.9.0 (`versionCode = 20`).
+   - `WebChromeClient.getDefaultVideoPoster()` retourneert een 1x1 transparante bitmap (0% grijze play-knop).
+   - "🔄 Sync Live" knop herlaadt en roept direct `window.reconnectStream()` aan.
+   - Cellular-only WAN lock in `ConnectionManager.kt` en `EndpointResolver.kt` voorkomt LAN ping-pong op mobiele data.
+   - Sluiten van clips in `ClipsScreen.kt` stopt en released ExoPlayer direct en wist deeplink parameters.
 
 ---
 

@@ -1,10 +1,68 @@
-# Foxway Smart Doorbell API Documentatie (v2.8.0)
+# Foxway Smart Doorbell API Documentatie (v2.9.0)
 
 De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8090`, WAN: `https://deurbel.foxway.nl`).
 
 ---
 
-## 1. Clips & 2-Fasen Clip Lifecycle (`v2.8.0`)
+## 1. Zero-UI Live Player & Streaming (`v2.9.0`)
+
+### `GET /api/v1/live/player` (en `/live/player`)
+- **Beschrijving:** Schone Zero-UI fullscreen 4:3 HTML5 hardware-speler (MSE + WebRTC).
+- **Kenmerken:**
+  - Toont op milliseconde 0 direct `/api/v1/live/instant.jpg` als snapshot-poster, zodat er nooit een zwart laadscherm ontstaat.
+  - Verwijdert dynamisch eventuele video controls via MutationObserver.
+  - Verbergt alle go2rtc badges ("MSE", overlay div's) via CSS.
+  - Beschikt over een actieve freeze-watchdog die elke 1500ms `video.currentTime` controleert en na 2.5s stilstand automatisch herverbindt.
+  - Exposeert `window.reconnectStream = function() { ... }` voor de Android app (`Sync Live`).
+
+### `GET /api/go2rtc/ws` (en `/api/v1/go2rtc/ws`)
+- **Type:** WebSocket
+- **Beschrijving:** Zero-buffer bidirectionele proxy naar `ws://127.0.0.1:1984/api/ws?src=deurbel`.
+- **Geschikt voor:** MSE streaming over 5G/Cloudflare WSS (TCP 443) zonder UDP vereiste, en WebRTC op LAN.
+
+---
+
+## 2. Shelly Deurbel & Ring Webhooks (`v2.9.0`)
+
+### `POST /api/v1/webhook/shelly-ring?force=true` (en `/api/v1/ring`)
+- **Query Parameter:** `force=true`
+- **Gedrag:**
+  - Omzeilt de standaard 15s debounce periode volledig.
+  - Beëindigt/reset eventuele hangende gesprekstasken.
+  - Genereert direct een nieuwe unieke `call_id` en zendt onmiddellijk `CALL_RINGING` uit via WebSocket en FCM.
+  - Maakt oneindig herhaaldelijk testen mogelijk zonder wachttijd.
+
+---
+
+## 3. Stille Uren & Systeeminstellingen (`v2.9.0`)
+
+### `GET /api/v1/settings/detection`
+- **Output:**
+```json
+{
+  "detection_enabled": true,
+  "record_person": true,
+  "record_vehicle": true,
+  "record_animal": true,
+  "record_motion": false,
+  "notify_person": true,
+  "notify_vehicle": true,
+  "notify_animal": true,
+  "notify_motion": false,
+  "quiet_hours_enabled": true,
+  "quiet_hours_start": "23:30",
+  "quiet_hours_end": "07:30",
+  "activity_zone_top_ignore_percent": 20,
+  "motion_sensitivity": 1.5
+}
+```
+
+### `PUT /api/v1/settings/detection`
+- **Beschrijving:** Realtime bijwerken van AI detectie en Stille Uren (23:30 - 07:30 Europe/Amsterdam).
+
+---
+
+## 4. Clips & 2-Fasen Clip Lifecycle
 
 ### `GET /api/v1/clips`
 - **Beschrijving:** Haalt alle opgeslagen en momenteel lopende clips op.

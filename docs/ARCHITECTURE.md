@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell Architectuur (v2.8.0)
+# Foxway Smart Doorbell Architectuur (v2.9.0)
 
-Dit document beschrijft de technische opzet en datastromen van versie 2.8.0.
+Dit document beschrijft de technische opzet en datastromen van versie 2.9.0.
 
 ---
 
@@ -20,27 +20,29 @@ flowchart TD
         RingBuffer["RAM Ring-Buffer (/dev/shm/deurbel_ring - Unix TS seg_%s.ts)"]
         
         subgraph Backend ["FastAPI Backend (Docker :8090)"]
-            WSProxy["WebSocket Proxy (/api/go2rtc/ws) & Player (/api/v1/live/player)"]
-            TemporalAI["Temporal Pixel-Diff AI (YOLOv8n 5 FPS, 1.2s diff mask)"]
+            WSProxy["WebSocket Proxy (/api/go2rtc/ws) & Zero-UI Player (/api/v1/live/player)"]
+            TemporalAI["Temporal Pixel-Diff AI & Anti-Car Swap (parked_spots pre-filter)"]
             Lifecycle["2-Fasen Clip Lifecycle (RECORDING -> READY)"]
-            AdminUI["Web Admin Dashboard (/admin - 25 FPS Preview)"]
+            QuietHours["Stille Uren Scheduler (23:30 - 07:30 Europe/Amsterdam)"]
+            AdminUI["Web Admin Dashboard (/admin - 25 FPS Preview & Stille Uren)"]
             SQLite[("SQLite DB WAL Mode (database.py)")]
         end
     end
 
-    subgraph Client ["Android Toestel (v2.8.0)"]
-        Telecom["Telecom Framework (10s Deduplicated CallScreen)"]
-        LiveView["LiveScreen / CallScreen (Hardware MSE + WebRTC Player, 72dp knoppen)"]
-        ClipPlayer["ClipPlayerDialog (Smart In-Progress Preview + 2s Polling)"]
+    subgraph Client ["Android Toestel (v2.9.0 Build 20)"]
+        Telecom["Telecom Framework (Instant Deduplication Reset on Hangup)"]
+        LiveView["LiveScreen / CallScreen (Zero-UI WebChromeClient, 0% Gray Play-Button)"]
+        ClipPlayer["ClipPlayerDialog (Clean ExoPlayer Dismiss & Release)"]
+        ConnMgr["ConnectionManager (Cellular-Only WAN Lock, 0ms Ping-Pong)"]
         NotifService["WebSocketForegroundService (LargeIcon + BigPicture Notification)"]
-        SettingsUI["4-Kaarten SettingsScreen (Profiel, AI, Opslag, Systeem)"]
+        SettingsUI["4-Kaarten SettingsScreen (Profiel, AI & Stille Uren, Opslag, Systeem)"]
     end
 
     CamSensor -->|RTSP| RTSP
     RTSP -->|FFmpeg| RingBuffer
     RTSP <-->|WebSocket Stream| WSProxy
     WSProxy -->|Native 25 FPS MSE/WebRTC| LiveView
-    WSProxy -->|Embedded Player| AdminUI
+    WSProxy -->|Embedded Zero-UI Player| AdminUI
     RTSP -.->|Instant Substream Frames| TemporalAI
     
     CamMic <-->|SDK Audio| SDK
@@ -48,12 +50,14 @@ flowchart TD
     
     RingBuffer -->|20s Pre-roll & Gap Check| Lifecycle
     TemporalAI -->|1. Sync Snapshot >5KB| Lifecycle
+    QuietHours -.->|Mute Push Notifications| NotifService
     Lifecycle -->|2. Status RECORDING| SQLite
     Lifecycle -->|3. Push <1.5s + Thumbnail| NotifService
     NotifService -->|Deeplink met Clip-ID| ClipPlayer
     ClipPlayer -->|Poll 2.0s GET /clips/id| Lifecycle
     Lifecycle -->|4. Status READY na 20s Post-Roll| SQLite
     ClipPlayer -->|Auto-Start ExoPlayer| WSProxy
+    ConnMgr -->|Lock WAN on 5G| LiveView
 ```
     
     CrashHandler -.->|POST crash| AdminUI

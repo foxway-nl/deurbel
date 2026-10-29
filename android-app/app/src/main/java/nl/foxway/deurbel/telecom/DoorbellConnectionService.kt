@@ -230,7 +230,14 @@ class DoorbellConnectionService : ConnectionService() {
             }
         }
 
+        fun resetDeduplication() {
+            lastCallTime = 0L
+            lastCallId = ""
+            CallActivity.isCallActivityVisible = false
+        }
+
         fun notifyRejected() {
+            resetDeduplication()
             cancelCallNotification(FoxwayApp.instance)
             currentConnection?.let { conn ->
                 Log.i(TAG, "notifyRejected called from UI")
@@ -242,6 +249,7 @@ class DoorbellConnectionService : ConnectionService() {
         }
 
         fun notifyDisconnected() {
+            resetDeduplication()
             cancelCallNotification(FoxwayApp.instance)
             currentConnection?.let { conn ->
                 Log.i(TAG, "notifyDisconnected called from UI")
@@ -261,6 +269,7 @@ class DoorbellConnectionService : ConnectionService() {
         }
 
         fun notifyDismissed() {
+            resetDeduplication()
             cancelCallNotification(FoxwayApp.instance)
             currentConnection?.let { conn ->
                 Log.i(TAG, "notifyDismissed called")

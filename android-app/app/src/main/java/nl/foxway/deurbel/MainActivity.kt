@@ -228,7 +228,13 @@ fun MainAppScaffold(
                     MainTab.LIVE -> LiveScreen()
                     MainTab.CLIPS -> ClipsScreen(
                         initialClipId = activeTargetClipId,
-                        onClipSelected = { activeTargetClipId = null }
+                        onClipSelected = {
+                            activeTargetClipId = null
+                            (context as? android.app.Activity)?.intent?.apply {
+                                removeExtra("clip_id")
+                                removeExtra("screen")
+                            }
+                        }
                     )
                     MainTab.SETTINGS -> SettingsScreen(onUnpair = onUnpair)
                 }

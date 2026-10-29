@@ -232,6 +232,7 @@ CREATE TABLE IF NOT EXISTS events (
     title         TEXT NOT NULL,
     clip_id       TEXT,
     snapshot_url  TEXT,
+    silent        INTEGER DEFAULT 0,
     created_at    TEXT NOT NULL
 );
 
@@ -341,6 +342,9 @@ async def init_db() -> None:
             ("ring_sharpness", "4.5", "Scherpte / resonantiefactor toonbel"),
             ("exclusion_zones", "[]", "JSON lijst van gemaskeerde zones [x1, y1, x2, y2]"),
             ("admin_password", "foxway2024", "Beheerderswachtwoord voor /admin"),
+            ("quiet_hours_enabled", "true", "Stille uren inschakelen (geen pushmeldingen voor beweging)"),
+            ("quiet_hours_start", "23:30", "Begintijd stille uren (HH:MM)"),
+            ("quiet_hours_end", "07:30", "Eindtijd stille uren (HH:MM)"),
         ]
         for k, v, desc in default_settings:
             try:
@@ -351,13 +355,28 @@ async def init_db() -> None:
             except Exception:
                 pass
 
-        # Migration to v2.6.0: update defaults
+        # Migration to v2.6.0 & v2.9.0: update defaults
         try:
             await db.execute("UPDATE system_settings SET value = '20' WHERE key = 'pre_roll_seconds' AND value = '6'")
             await db.execute("UPDATE system_settings SET value = '20' WHERE key = 'post_roll_seconds' AND value = '5'")
             await db.execute("UPDATE system_settings SET value = '2' WHERE key = 'verify_frames_required'")
             await db.execute("UPDATE system_settings SET value = '5.0' WHERE key = 'min_vehicle_displacement_pct'")
             await db.execute("UPDATE system_settings SET value = '8' WHERE key = 'event_cooldown_seconds'")
+            await db.execute("UPDATE system_settings SET value = '23:30' WHERE key = 'quiet_hours_start' AND value = '23:00'")
+            await db.execute("UPDATE system_settings SET value = '07:30' WHERE key = 'quiet_hours_end' AND value = '07:00'")
+            await db.execute(
+                "INSERT OR IGNORE INTO system_settings (key, value, description, updated_at) VALUES ('quiet_hours_enabled', 'true', 'Stille uren inschakelen (geen pushmeldingen voor beweging)', ?)",
+                (now_iso,),
+            )
+            await db.execute(
+                "INSERT OR IGNORE INTO system_settings (key, value, description, updated_at) VALUES ('quiet_hours_start', '23:30', 'Begintijd stille uren (HH:MM)', ?)",
+                (now_iso,),
+            )
+            await db.execute(
+                "INSERT OR IGNORE INTO system_settings (key, value, description, updated_at) VALUES ('quiet_hours_end', '07:30', 'Eindtijd stille uren (HH:MM)', ?)",
+                (now_iso,),
+            )
+            await db.execute("ALTER TABLE events ADD COLUMN silent INTEGER DEFAULT 0")
             await db.execute(
                 "INSERT OR IGNORE INTO system_settings (key, value, description, updated_at) VALUES ('max_active_motion_seconds', '30', 'Maximale actieve bewegingsduur tijdens opname (sec)', ?)",
                 (now_iso,),
@@ -707,18 +726,20 @@ async def save_event(
     title: str,
     clip_id: str = "",
     snapshot_url: str = "",
+    silent: bool = False,
 ) -> dict:
     """Record an event (ring or confirmed motion) in the events table."""
     now_iso = datetime.now(timezone.utc).isoformat()
     if not snapshot_url and clip_id:
         snapshot_url = f"/api/v1/clips/{clip_id}/thumbnail"
+    silent_val = 1 if silent else 0
     async with get_db(write=True) as db:
         cursor = await db.execute(
             """
-            INSERT INTO events (type, category, title, clip_id, snapshot_url, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO events (type, category, title, clip_id, snapshot_url, silent, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (event_type, category, title, clip_id, snapshot_url, now_iso),
+            (event_type, category, title, clip_id, snapshot_url, silent_val, now_iso),
         )
         event_id = cursor.lastrowid
         return {
@@ -728,6 +749,7 @@ async def save_event(
             "title": title,
             "clip_id": clip_id,
             "snapshot_url": snapshot_url,
+            "silent": silent,
             "created_at": now_iso,
         }
 

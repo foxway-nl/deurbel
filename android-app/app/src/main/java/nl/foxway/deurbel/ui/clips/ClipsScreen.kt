@@ -87,39 +87,47 @@ fun ClipsScreen(
     }
 
     // Auto-select initialClipId if passed (Deeplinking from notification)
-    LaunchedEffect(initialClipId, clips) {
+    LaunchedEffect(initialClipId) {
         if (!initialClipId.isNullOrBlank()) {
-            val found = clips.firstOrNull { it.id == initialClipId }
+            val targetId = initialClipId
+            onClipSelected() // Clear pending deeplink parameter immediately
+            val found = clips.firstOrNull { it.id == targetId }
             if (found != null) {
                 selectedClip = found
-                onClipSelected()
-            } else if (baseUrl.isNotBlank() && selectedClip == null) {
+            } else if (baseUrl.isNotBlank()) {
                 // Query server immediately for 2-phase lifecycle status
-                coroutineScope.launch {
-                    try {
-                        val api = ApiClientFactory.createApi(baseUrl)
-                        val resp = api.getClipDetail(initialClipId)
-                        if (resp.isSuccessful && resp.body() != null) {
-                            selectedClip = resp.body()
-                            onClipSelected()
-                            return@launch
-                        }
-                    } catch (_: Exception) {}
-                    if (selectedClip == null) {
+                try {
+                    val api = ApiClientFactory.createApi(baseUrl)
+                    val resp = api.getClipDetail(targetId)
+                    if (resp.isSuccessful && resp.body() != null) {
+                        selectedClip = resp.body()
+                    } else {
                         selectedClip = ClipItem(
-                            id = initialClipId,
+                            id = targetId,
                             timestamp = java.time.Instant.now().toString(),
                             duration = 0.0,
                             sizeBytes = 0L,
-                            snapshotUrl = "/api/v1/clips/$initialClipId/thumbnail",
-                            videoUrl = "/api/v1/clips/$initialClipId/stream",
+                            snapshotUrl = "/api/v1/clips/$targetId/thumbnail",
+                            videoUrl = "/api/v1/clips/$targetId/stream",
                             answeredBy = "Opname bekijken",
                             starred = false,
                             status = "RECORDING",
-                            thumbnailUrl = "/api/v1/clips/$initialClipId/thumbnail"
+                            thumbnailUrl = "/api/v1/clips/$targetId/thumbnail"
                         )
-                        onClipSelected()
                     }
+                } catch (_: Exception) {
+                    selectedClip = ClipItem(
+                        id = targetId,
+                        timestamp = java.time.Instant.now().toString(),
+                        duration = 0.0,
+                        sizeBytes = 0L,
+                        snapshotUrl = "/api/v1/clips/$targetId/thumbnail",
+                        videoUrl = "/api/v1/clips/$targetId/stream",
+                        answeredBy = "Opname bekijken",
+                        starred = false,
+                        status = "RECORDING",
+                        thumbnailUrl = "/api/v1/clips/$targetId/thumbnail"
+                    )
                 }
             }
         }
@@ -409,7 +417,10 @@ fun ClipsScreen(
                     ClipPlayerDialog(
                         clip = clip,
                         baseUrl = baseUrl,
-                        onDismiss = { selectedClip = null }
+                        onDismiss = {
+                            selectedClip = null
+                            onClipSelected()
+                        }
                     )
                 }
             }
@@ -850,8 +861,17 @@ private fun ClipPlayerDialog(
         }
     }
 
+    val handleDismiss = {
+        try {
+            exoPlayer.stop()
+            exoPlayer.clearMediaItems()
+            exoPlayer.release()
+        } catch (_: Exception) {}
+        onDismiss()
+    }
+
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = handleDismiss,
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
             dismissOnBackPress = true
@@ -1044,7 +1064,7 @@ private fun ClipPlayerDialog(
 
                         // Close (X) button
                         IconButton(
-                            onClick = onDismiss,
+                            onClick = handleDismiss,
                             modifier = Modifier
                                 .size(40.dp)
                                 .background(Color(0xCC1E293B), CircleShape)

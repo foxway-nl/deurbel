@@ -178,6 +178,13 @@ async def send_fcm_to_all(event: str, data: dict, exclude_user: Optional[str] = 
     if not tokens:
         return 0
 
+    # Suppress push notifications during quiet hours or when marked silent / notifiable=False
+    # Doorbell ring calls (CALL_RINGING) are ALWAYS dispatched regardless of quiet hours!
+    if event != "CALL_RINGING":
+        if data.get("in_quiet_hours") or data.get("silent") or data.get("should_notify") is False:
+            logger.info("FCM push suppressed for event %s (quiet hours / silent / should_notify=False)", event)
+            return 0
+
     # Convert all values to strings (FCM data payloads are string-only)
     str_data = {k: json.dumps(v) if not isinstance(v, str) else v for k, v in data.items()}
     str_data["event"] = event

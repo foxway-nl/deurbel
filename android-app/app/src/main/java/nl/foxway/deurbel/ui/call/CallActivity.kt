@@ -223,6 +223,7 @@ class CallActivity : ComponentActivity() {
         finishAndRemoveTask()
         DoorbellConnectionService.silenceRingtone()
         DoorbellConnectionService.cancelCallNotification(this)
+        DoorbellConnectionService.resetDeduplication()
         DoorbellConnectionService.notifyDisconnected()
         audioStreamer.stopStreaming()
 

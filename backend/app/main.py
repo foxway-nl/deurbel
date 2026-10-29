@@ -358,7 +358,7 @@ openapi_tags = [
 
 app = FastAPI(
     title="Foxway Smart Doorbell API",
-    version="2.3.0",
+    version="2.9.0",
     description="Signaling, state management, media proxy, and clip API for the Foxway Doorbell system.",
     openapi_tags=openapi_tags,
     lifespan=lifespan,
@@ -737,13 +737,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "2.8.0",
-        "version_code": 19,
-        "build_time": "2026-10-29T10:45:00Z",
+        "version": "2.9.0",
+        "version_code": 20,
+        "build_time": "2026-10-29T23:00:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v2.8.0: 2-stage clip lifecycle (RECORDING -> READY), instant pre-notification thumbnail, smart in-progress player with live preview, largeIcon push notification",
+        "changelog": "v2.9.0: Zero-UI live player, infinite repeated ring triggers, quiet hours 23:30-07:30, parked cars swap fix, clip overlay dismiss fix, cellular WAN lock",
     }
 
 
@@ -1413,8 +1413,8 @@ async def proxy_go2rtc_asset(asset_name: str):
 @app.get("/live/player", response_class=HTMLResponse)
 async def get_live_player(src: str = Query("deurbel")):
     """
-    Minimal fullscreen 4:3 HTML5 player for native go2rtc hardware streaming (MSE + WebRTC).
-    Zero-latency, 25 FPS hardware video playback without CPU re-encoding.
+    Clean Zero-UI fullscreen 4:3 HTML5 player for native go2rtc hardware streaming (MSE + WebRTC).
+    Zero controls, instant snapshot poster at millisecond 0, automatic freeze watchdog & JS reconnect.
     """
     html = f"""<!DOCTYPE html>
 <html lang="nl">
@@ -1423,7 +1423,7 @@ async def get_live_player(src: str = Query("deurbel")):
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>Foxway Live Stream</title>
   <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    * {{ box-sizing: border-box; margin: 0; padding: 0; overflow: hidden; }}
     html, body {{
       width: 100%;
       height: 100%;
@@ -1436,38 +1436,111 @@ async def get_live_player(src: str = Query("deurbel")):
     .video-container {{
       width: 100%;
       height: 100%;
+      position: relative;
       display: flex;
       align-items: center;
       justify-content: center;
-      position: relative;
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
     }}
-    video-stream {{
+    zero-player {{
       width: 100%;
       height: 100%;
       display: block;
-      background: #000000;
+      background: transparent;
     }}
-    video-stream video {{
+    zero-player video, video {{
       width: 100%;
       height: 100%;
-      object-fit: contain;
-      background: #000000;
+      object-fit: cover;
+      background: transparent;
     }}
-    .info {{
+    /* Strict kill for any status badges, mse overlays, or injected controls */
+    .status, .mse, [class*="status"], [class*="controls"], [class*="badge"], .info, .mode {{
       display: none !important;
+      opacity: 0 !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
     }}
   </style>
 </head>
 <body>
-  <div class="video-container">
-    <video-stream id="player" src="" mode="mse,webrtc,mp4" playsinline autoplay muted></video-stream>
+  <div class="video-container" id="container">
+    <zero-player id="player" src="" mode="webrtc,mse,mp4" playsinline autoplay muted disablepictureinpicture></zero-player>
   </div>
-  <script type="module" src="/api/go2rtc/video-stream.js"></script>
   <script type="module">
+    import {{ VideoRTC }} from '/api/go2rtc/video-rtc.js';
+
+    class ZeroPlayer extends VideoRTC {{
+      oninit() {{
+        super.oninit();
+        if (this.video) {{
+          this.video.controls = false;
+          this.video.removeAttribute('controls');
+          this.video.playsInline = true;
+          this.video.setAttribute('playsinline', '');
+          this.video.setAttribute('disablepictureinpicture', '');
+          this.video.poster = '/api/v1/live/instant.jpg?t=' + Date.now();
+          this.video.style.objectFit = 'cover';
+        }}
+      }}
+    }}
+    if (!customElements.get('zero-player')) {{
+      customElements.define('zero-player', ZeroPlayer);
+    }}
+
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${{proto}}//${{location.host}}/api/go2rtc/ws?src={src}`;
     const player = document.getElementById('player');
+    const container = document.getElementById('container');
+    container.style.backgroundImage = `url('/api/v1/live/instant.jpg?t=${{Date.now()}}')`;
+
     player.src = wsUrl;
+
+    // MutationObserver to enforce no controls
+    const observer = new MutationObserver(() => {{
+      const v = player.querySelector('video') || player.video;
+      if (v) {{
+        if (v.hasAttribute('controls')) v.removeAttribute('controls');
+        if (v.controls) v.controls = false;
+      }}
+    }});
+    observer.observe(player, {{ attributes: true, subtree: true, childList: true }});
+
+    // Global reconnect function for Android Sync Live
+    window.reconnectStream = function() {{
+      console.log('[ZeroPlayer] Reconnecting live stream...');
+      container.style.backgroundImage = `url('/api/v1/live/instant.jpg?t=${{Date.now()}}')`;
+      try {{
+        if (player.ondisconnect) player.ondisconnect();
+        if (player.onconnect) player.onconnect();
+      }} catch (e) {{
+        console.warn('Reconnect error:', e);
+      }}
+    }};
+
+    // Watchdog: check currentTime every 1500ms; auto-reconnect if frozen >= 2.5s
+    let lastTime = -1;
+    let freezeTicks = 0;
+    setInterval(() => {{
+      const v = player.querySelector('video') || player.video;
+      if (!v) return;
+      if (v.currentTime > 0) {{
+        if (v.currentTime === lastTime) {{
+          freezeTicks++;
+          if (freezeTicks >= 2) {{
+            console.warn('[ZeroPlayer] Freeze detected (>2.5s), auto-reconnecting...');
+            window.reconnectStream();
+            freezeTicks = 0;
+          }}
+        }} else {{
+          lastTime = v.currentTime;
+          freezeTicks = 0;
+          container.style.backgroundImage = 'none';
+        }}
+      }}
+    }}, 1500);
   </script>
 </body>
 </html>"""
@@ -1664,9 +1737,9 @@ class DetectionSettingsModel(BaseModel):
     notify_vehicle: bool = True
     notify_animal: bool = True
     notify_motion: bool = False
-    quiet_hours_enabled: bool = False
-    quiet_hours_start: str = "23:00"
-    quiet_hours_end: str = "07:00"
+    quiet_hours_enabled: bool = True
+    quiet_hours_start: str = "23:30"
+    quiet_hours_end: str = "07:30"
     activity_zone_top_ignore_percent: int = 20
     motion_sensitivity: float = 1.5
 

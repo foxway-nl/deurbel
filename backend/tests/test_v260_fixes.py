@@ -146,8 +146,8 @@ async def test_go2rtc_live_player_and_proxy_endpoints():
         resp = await client.get("/api/v1/live/player")
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
-        assert "<video-stream" in resp.text
-        assert "video-stream.js" in resp.text
+        assert ("<video-stream" in resp.text or "<zero-player" in resp.text)
+        assert ("video-stream.js" in resp.text or "video-rtc.js" in resp.text)
 
         # Alias
         resp_alias = await client.get("/live/player")
@@ -157,8 +157,8 @@ async def test_go2rtc_live_player_and_proxy_endpoints():
         resp_ver = await client.get("/api/v1/version")
         assert resp_ver.status_code == 200
         v_data = resp_ver.json()
-        assert v_data["version"] in ("2.6.0", "2.8.0")
-        assert v_data["version_code"] in (17, 19)
+        assert v_data["version"] in ("2.6.0", "2.8.0", "2.9.0")
+        assert v_data["version_code"] in (17, 19, 20)
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -63,13 +63,9 @@ fun CallScreen(
     val connectionManager = remember { ConnectionManager.getInstance(context) }
     val activeBaseUrl by connectionManager.activeBaseUrl.collectAsState()
     val isWanMode by connectionManager.isWanMode.collectAsState()
-    val playerUrl = remember(activeBaseUrl, isWanMode) {
-        if (!isWanMode) {
-            "http://192.168.2.1:1984/stream.html?src=deurbel&mode=webrtc,mse"
-        } else {
-            val base = activeBaseUrl.ifEmpty { "https://deurbel.foxway.nl" }
-            "$base/api/v1/live/player"
-        }
+    val playerUrl = remember(activeBaseUrl) {
+        val base = activeBaseUrl.ifEmpty { "http://192.168.2.1:8090" }
+        "$base/api/v1/live/player"
     }
     val frame by liveStream.currentBitmap.collectAsState()
     val isConnected by liveStream.isConnected.collectAsState()
@@ -129,6 +125,11 @@ fun CallScreen(
                             settings.loadWithOverviewMode = true
                             setLayerType(View.LAYER_TYPE_HARDWARE, null)
                             webViewClient = object : WebViewClient() {}
+                            webChromeClient = object : android.webkit.WebChromeClient() {
+                                override fun getDefaultVideoPoster(): android.graphics.Bitmap {
+                                    return android.graphics.Bitmap.createBitmap(1, 1, android.graphics.Bitmap.Config.ARGB_8888)
+                                }
+                            }
                             loadUrl(playerUrl)
                         }
                     },
