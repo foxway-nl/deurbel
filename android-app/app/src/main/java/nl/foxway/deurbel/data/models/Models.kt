@@ -72,8 +72,14 @@ data class ClipItem(
     @SerializedName("snapshot_url") val snapshotUrl: String,
     @SerializedName("video_url") val videoUrl: String,
     @SerializedName("answered_by") val answeredBy: String?,
-    val starred: Boolean = false
-)
+    val starred: Boolean = false,
+    val status: String = "READY",
+    @SerializedName("thumbnail_url") val thumbnailUrl: String = "",
+    val category: String = ""
+) {
+    val isRecording: Boolean
+        get() = status.equals("RECORDING", ignoreCase = true)
+}
 
 /** Trim response from POST /api/v1/clips/{clip_id}/trim */
 data class TrimResponse(

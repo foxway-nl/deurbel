@@ -56,6 +56,11 @@ interface FoxwayApi {
         @Query("offset") offset: Int = 0
     ): Response<List<ClipItem>>
 
+    @GET("/api/v1/clips/{clipId}")
+    suspend fun getClipDetail(
+        @Path("clipId") clipId: String
+    ): Response<ClipItem>
+
     @POST("/api/v1/clips/{clipId}/trim")
     suspend fun trimClip(
         @Path("clipId") clipId: String,

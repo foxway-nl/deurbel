@@ -47,6 +47,8 @@ from app.models import (
     get_system_setting,
     get_system_settings,
     save_clip,
+    update_clip,
+    delete_clip as db_delete_clip,
     save_event,
     save_ai_audit_log,
 )
@@ -993,11 +995,21 @@ class SmartDetector:
 
         clip_id = str(uuid.uuid4())
         clip_path = str(settings.CLIPS_DIR / f"{clip_id}.mp4")
+        t0_iso = datetime.now(timezone.utc).isoformat()
 
-        # 1. Save CLEAN snapshot (without boxes) for Android App (TAAK 2.3)
+        # 1. Stap 1 — Sla EERST de Snapshot op schijf op (VÓÓR het event wordt verstuurd!) (TAAK 1.1)
+        settings.CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+        settings.SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        thumb_clip_path = str(settings.CLIPS_DIR / f"thumb_{clip_id}.jpg")
         clean_snapshot_path = str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg")
+
+        cv2.imwrite(thumb_clip_path, keyframe)
         cv2.imwrite(clean_snapshot_path, keyframe)
-        snapshot_url = f"/api/v1/snapshots/{clip_id}.jpg"
+
+        if not os.path.exists(thumb_clip_path) or os.path.getsize(thumb_clip_path) < 5000:
+            logger.warning("Thumbnail %s is smaller than 5KB or write failed", thumb_clip_path)
+
+        snapshot_url = f"/api/v1/clips/{clip_id}/thumbnail"
 
         # 2. Save DEBUG snapshot (with boxes) ONLY for Web Admin Inspector
         debug_snapshot_path = str(settings.SNAPSHOTS_DIR / f"{clip_id}_debug.jpg")
@@ -1016,8 +1028,21 @@ class SmartDetector:
         }.get(category, "Beweging")
         title = f"{category_dutch}: {label}"
 
-        # 3. Insert event in events table immediately for instant push (<1.5s)
-        # Note: Do NOT insert 00:00 stub into clips table to prevent ghost clips!
+        # 3. Stap 2 — Maak de Clip-rij direct aan met status = "RECORDING" (TAAK 1.2)
+        await save_clip(
+            clip_id=clip_id,
+            call_id=clip_id,
+            video_path=clip_path,
+            snapshot_path=thumb_clip_path,
+            answered_by=f"AI: {category_dutch} ({label})",
+            duration=0.0,
+            status="RECORDING",
+            category=category,
+            file_size=0,
+            created_at=t0_iso,
+        )
+
+        # 4. Insert event in events table immediately for instant push (<1.5s)
         event_dict = await save_event(
             event_type="motion",
             category=category,
@@ -1026,7 +1051,7 @@ class SmartDetector:
             snapshot_url=snapshot_url,
         )
 
-        # 4. Log to ai_audit_logs as APPROVED with debug snapshot for Web Admin Inspector
+        # 5. Log to ai_audit_logs as APPROVED with debug snapshot for Web Admin Inspector
         await save_ai_audit_log(
             status="APPROVED",
             category=category,
@@ -1038,7 +1063,7 @@ class SmartDetector:
             boxes_json=json.dumps([{"x1": x1, "y1": y1, "x2": x2, "y2": y2}]),
         )
 
-        # 5. Push IMMEDIATELY via WebSocket (instant <1.5s delivery)
+        # 6. Push IMMEDIATELY via WebSocket (instant <1.5s delivery)
         await push_event(
             "AI_DETECTION",
             {
@@ -1048,7 +1073,7 @@ class SmartDetector:
                 "label": label,
                 "title": title,
                 "confidence": round(confidence, 2),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": t0_iso,
                 "snapshot_url": snapshot_url,
                 "in_quiet_hours": in_quiet_hours,
                 "should_notify": should_notify,
@@ -1056,14 +1081,14 @@ class SmartDetector:
         )
         logger.info("Dispatched immediate push notification for %s (%s) within 1.2s", category, label)
 
-        # 6. Launch background clip recording under single recording lock
+        # 7. Launch background clip recording under single recording lock
         asyncio.create_task(
             self._finalize_clip_recording(
                 clip_id=clip_id,
                 clip_path=clip_path,
                 category=category,
                 label=label,
-                clean_snapshot_path=clean_snapshot_path,
+                clean_snapshot_path=thumb_clip_path,
             )
         )
 
@@ -1077,7 +1102,8 @@ class SmartDetector:
     ) -> None:
         """
         Records video in background under single recording lock.
-        Inserts clip into database ONLY after successful MP4 completion (>100KB, >=5s).
+        Updates clip status from RECORDING to READY once MP4 completion succeeds (>100KB, >=5s).
+        If failed, removes row from database.
         """
         try:
             from app.recorder import (
@@ -1095,10 +1121,10 @@ class SmartDetector:
             max_duration = float(sys_settings.get("max_active_motion_seconds", sys_settings.get("max_clip_seconds", "30")))
 
             # Single recording lock check (TAAK 2.2):
-            # If another recording is already running, extend it instead of creating duplicate clips!
             if is_recording_active():
                 extend_active_recording(category, label, duration_sec=max_duration)
                 logger.info("Smart clip already recording; extended current clip deadline and updated priority for %s", label)
+                await db_delete_clip(clip_id)
                 return
 
             async with recording_lock:
@@ -1112,12 +1138,12 @@ class SmartDetector:
                 )
 
                 if not clean_snapshot_path:
-                    clean_snapshot_path = str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg")
+                    clean_snapshot_path = str(settings.CLIPS_DIR / f"thumb_{clip_id}.jpg")
                 snapshot_path = await ensure_thumbnail(clip_id, clip_path, preroll_seconds=preroll)
 
                 file_size = os.path.getsize(clip_path) if os.path.exists(clip_path) else 0
 
-                # Database Insert ONLY after successful MP4 (TAAK 2.2):
+                # Database Update to READY (TAAK 1.3):
                 # Must be > 100 KB and duration >= 5 seconds!
                 if os.path.exists(clip_path) and file_size > 100000 and duration >= 5.0:
                     category_dutch = {
@@ -1127,21 +1153,22 @@ class SmartDetector:
                         "motion": "Beweging gedetecteerd",
                     }.get(category, "Beweging")
 
-                    await save_clip(
+                    await update_clip(
                         clip_id=clip_id,
-                        call_id=clip_id,
-                        video_path=clip_path,
-                        snapshot_path=snapshot_path or clean_snapshot_path,
-                        answered_by=f"AI: {category_dutch} ({label})",
+                        status="READY",
                         duration=duration,
+                        file_size=file_size,
+                        answered_by=f"AI: {category_dutch} ({label})",
+                        snapshot_path=snapshot_path or clean_snapshot_path,
                     )
-                    logger.info("Saved valid verified clip %s: duration=%.1fs, size=%d bytes", clip_id, duration, file_size)
+                    logger.info("Updated verified clip %s to READY: duration=%.1fs, size=%d bytes", clip_id, duration, file_size)
                     asyncio.create_task(compress_clip_background(clip_path))
                 else:
                     logger.warning(
-                        "Discarded invalid/incomplete clip %s (size=%d bytes, duration=%.1fs < 5s) — not saved to DB",
+                        "Discarded invalid/incomplete clip %s (size=%d bytes, duration=%.1fs < 5s) — removing row from DB",
                         clip_id, file_size, duration,
                     )
+                    await db_delete_clip(clip_id)
                     if os.path.exists(clip_path):
                         try:
                             os.unlink(clip_path)
@@ -1149,6 +1176,10 @@ class SmartDetector:
                             pass
         except Exception as e:
             logger.error("Error finalizing background clip %s: %s", clip_id, e)
+            try:
+                await db_delete_clip(clip_id)
+            except Exception:
+                pass
 
 
 smart_detector = SmartDetector()

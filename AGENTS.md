@@ -7,13 +7,15 @@ Welkom in het Foxway Smart Doorbell project. Lees deze regels zorgvuldig voordat
 ## 🚨 HARDE ANTI-REGRESSIE REGELS
 
 1. **NOOIT OUDE SPECS GEBRUIKEN:**
-   - De codebase bevindt zich op versie **v2.6.0** (`versionCode = 17`).
-   - Oude documenten over v1.0 / v2.0 / v2.3 / v2.4 / v2.5 mogen nooit leidend zijn.
+   - De codebase bevindt zich op versie **v2.8.0** (`versionCode = 19`).
+   - Oude documenten over v1.0 / v2.0 / v2.3 / v2.4 / v2.5 / v2.6 mogen nooit leidend zijn.
 
 2. **BESCHERMDE KERN-COMPONENTEN (NIET AANRAKEN):**
    - **Tweeweg-Audio (`backend/app/audio_bridge.py`):** De Hikvision Poort 8000 C-SDK (`libhcnetsdk.so`) met pre-warmed login sessies en 1000 Hz loopback FFT test werkt foutloos. Wijzig deze logica NIET.
    - **4:3 Beeldverhouding:** De EZVIZ DB1 heeft een native 4:3 sensor. Alle videostreams, opnames en Android UI-containers (`LiveScreen.kt`, `CallScreen.kt`, `ClipsScreen.kt`, `/admin`) moeten 4:3 blijven.
    - **Native Hardware Streaming (go2rtc):** Live streaming verloopt via go2rtc MSE + WebRTC (`/api/v1/live/player`, proxy `/api/go2rtc/ws`). `live_hub.py` voert 0% CPU transcoding uit wanneer geen clients luisteren.
+   - **2-Fasen Clip Lifecycle (`RECORDING` -> `READY`):** Bij detectie $T_0$ wordt EERST de thumbnail synchroon weggeschreven naar `/mnt/opslag/deurbel/clips/thumb_<clip_id>.jpg` (>5 KB), waarna de clip-rij direct met `status = "RECORDING"` in de database wordt geplaatst vóór het push-event. Pas nadat de 20s Post-Roll en concat klaar zijn (`.mp4 > 100 KB`, `duration >= 5s`), wordt de clip bijgewerkt naar `status = "READY"`.
+   - **Push Notificatie Miniatuurfoto's:** Notificaties bevatten direct `.setLargeIcon(bitmap)` én `.setStyle(BigPictureStyle().bigPicture(bitmap))` via `$activeBaseUrl/api/v1/clips/<clip_id>/thumbnail` met 500ms fallback retry.
    - **Temporal Pixel-Diff AI Detector (`backend/app/ai_detector.py`):** YOLOv8n (<45ms) op 5 FPS met 1.2s temporal diff. Geparkeerde auto's (<4% diff) worden genegeerd; rijdende auto's (Manier 1: IoU < 0.50, 2 frames, ratio >= 0.15; Manier 2: spot overlap, ratio >= 0.25, centroid shift >= 5%) worden direct geverifieerd. Cooldown is 8s.
    - **RAM Ring-Buffer & Sourcing:** `/dev/shm/deurbel_ring` schrijft chronologische 2-seconden Unix-timestamp segmenten (`seg_%s.ts`) met automatische gap-detectie en 20s pre-roll / 20s post-roll.
    - **Gecentraliseerde SQLite WAL (`backend/app/database.py`):** Alle database-operaties verlopen via `get_db()` met WAL mode, busy timeout 60s en write-lock bescherming.

@@ -239,6 +239,8 @@ async def record_smart_clip(
     if t0 is None:
         t0 = time.time()
 
+    _active_recording_info["clip_id"] = clip_id
+
     # Save immediate clean snapshot from live_hub frame if not already present
     try:
         from app.live_hub import live_hub
@@ -394,6 +396,9 @@ async def record_smart_clip(
         return dur if dur > 0 else (len(copied_files) * 2.0)
 
     finally:
+        if _active_recording_info.get("clip_id") == clip_id:
+            _active_recording_info["clip_id"] = None
+            _active_recording_info["extend_until"] = 0.0
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
@@ -531,6 +536,11 @@ async def ensure_thumbnail(clip_id: str, video_path: Optional[str] = None, prero
     the frame at preroll_seconds (the moment of detection) from the MP4 using FFmpeg
     so no clip ever has a black or gray missing thumbnail.
     """
+    # Check thumb in clips dir or snapshots dir first
+    thumb_path = settings.CLIPS_DIR / f"thumb_{clip_id}.jpg"
+    if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 1000:
+        return str(thumb_path)
+
     snapshot_path = str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg")
     if os.path.exists(snapshot_path) and os.path.getsize(snapshot_path) > 1000:
         return snapshot_path

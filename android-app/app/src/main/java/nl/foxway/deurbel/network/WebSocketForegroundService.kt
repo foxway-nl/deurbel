@@ -265,22 +265,34 @@ class WebSocketForegroundService : Service() {
         withContext(Dispatchers.IO) {
             try {
                 val resolved = endpointResolver.resolve()
-                val fullSnapshotUrl = if (event.snapshotUrl.startsWith("http")) {
+                val activeBaseUrl = resolved.apiBaseUrl.trimEnd('/')
+                val clipId = event.clipId.ifBlank { "" }
+                val targetThumbUrl = if (clipId.isNotBlank()) {
+                    "$activeBaseUrl/api/v1/clips/$clipId/thumbnail"
+                } else if (event.snapshotUrl.startsWith("http")) {
                     event.snapshotUrl
                 } else if (event.snapshotUrl.isNotBlank()) {
-                    "${resolved.apiBaseUrl}${event.snapshotUrl}"
+                    "$activeBaseUrl${event.snapshotUrl}"
                 } else null
 
-                val bitmap = fullSnapshotUrl?.let { urlStr ->
-                    try {
-                        val conn = URL(urlStr).openConnection() as HttpURLConnection
-                        conn.connectTimeout = 3000
-                        conn.readTimeout = 3000
-                        conn.inputStream.use { input ->
-                            BitmapFactory.decodeStream(input)
+                // Fetch bitmap with 1 retry after 500ms if needed (TAAK 3)
+                var bitmap: android.graphics.Bitmap? = null
+                if (targetThumbUrl != null) {
+                    for (attempt in 0..1) {
+                        try {
+                            val conn = URL(targetThumbUrl).openConnection() as HttpURLConnection
+                            conn.connectTimeout = 3000
+                            conn.readTimeout = 3000
+                            conn.inputStream.use { input ->
+                                bitmap = BitmapFactory.decodeStream(input)
+                            }
+                            if (bitmap != null) break
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Attempt $attempt failed to load thumbnail from $targetThumbUrl: ${e.message}")
                         }
-                    } catch (_: Exception) {
-                        null
+                        if (attempt == 0 && bitmap == null) {
+                            delay(500L)
+                        }
                     }
                 }
 
@@ -306,6 +318,8 @@ class WebSocketForegroundService : Service() {
                     .setContentIntent(pendingIntent)
 
                 if (bitmap != null) {
+                    // Set largeIcon for collapsed thumbnail on the right, and BigPictureStyle for expanded view (TAAK 3)
+                    notifBuilder.setLargeIcon(bitmap)
                     notifBuilder.setStyle(
                         NotificationCompat.BigPictureStyle()
                             .bigPicture(bitmap)

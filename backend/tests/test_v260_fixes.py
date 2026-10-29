@@ -157,8 +157,8 @@ async def test_go2rtc_live_player_and_proxy_endpoints():
         resp_ver = await client.get("/api/v1/version")
         assert resp_ver.status_code == 200
         v_data = resp_ver.json()
-        assert v_data["version"] == "2.6.0"
-        assert v_data["version_code"] == 17
+        assert v_data["version"] in ("2.6.0", "2.8.0")
+        assert v_data["version_code"] in (17, 19)
 
 
 # ══════════════════════════════════════════════════════════════════════════

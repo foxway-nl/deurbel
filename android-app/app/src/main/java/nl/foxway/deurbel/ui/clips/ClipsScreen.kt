@@ -93,19 +93,34 @@ fun ClipsScreen(
             if (found != null) {
                 selectedClip = found
                 onClipSelected()
-            } else if (!isLoading && baseUrl.isNotBlank() && selectedClip == null) {
-                // If not in the loaded list yet, construct placeholder and select immediately
-                selectedClip = ClipItem(
-                    id = initialClipId,
-                    timestamp = "",
-                    duration = 0.0,
-                    sizeBytes = 0L,
-                    snapshotUrl = "/api/v1/snapshots/$initialClipId.jpg",
-                    videoUrl = "/api/v1/clips/$initialClipId/stream",
-                    answeredBy = "Opname bekijken",
-                    starred = false
-                )
-                onClipSelected()
+            } else if (baseUrl.isNotBlank() && selectedClip == null) {
+                // Query server immediately for 2-phase lifecycle status
+                coroutineScope.launch {
+                    try {
+                        val api = ApiClientFactory.createApi(baseUrl)
+                        val resp = api.getClipDetail(initialClipId)
+                        if (resp.isSuccessful && resp.body() != null) {
+                            selectedClip = resp.body()
+                            onClipSelected()
+                            return@launch
+                        }
+                    } catch (_: Exception) {}
+                    if (selectedClip == null) {
+                        selectedClip = ClipItem(
+                            id = initialClipId,
+                            timestamp = java.time.Instant.now().toString(),
+                            duration = 0.0,
+                            sizeBytes = 0L,
+                            snapshotUrl = "/api/v1/clips/$initialClipId/thumbnail",
+                            videoUrl = "/api/v1/clips/$initialClipId/stream",
+                            answeredBy = "Opname bekijken",
+                            starred = false,
+                            status = "RECORDING",
+                            thumbnailUrl = "/api/v1/clips/$initialClipId/thumbnail"
+                        )
+                        onClipSelected()
+                    }
+                }
             }
         }
     }
@@ -450,15 +465,19 @@ private fun formatChipDate(ymd: String): String {
 }
 
 private fun formatDateHeader(isoTimestamp: String): String {
+    val amsterdamTz = TimeZone.getTimeZone("Europe/Amsterdam")
+    val now = Calendar.getInstance(amsterdamTz)
+    if (isoTimestamp.isBlank()) {
+        val dFormat = SimpleDateFormat("d MMM", Locale("nl", "NL")).apply { timeZone = amsterdamTz }
+        return "Vandaag (${dFormat.format(now.time)})"
+    }
     return try {
         val clean = isoTimestamp.replace("Z", "")
         val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
             timeZone = TimeZone.getTimeZone("UTC")
         }
-        val date = parser.parse(clean.take(19)) ?: return "Eerder"
+        val date = parser.parse(clean.take(19)) ?: now.time
 
-        val amsterdamTz = TimeZone.getTimeZone("Europe/Amsterdam")
-        val now = Calendar.getInstance(amsterdamTz)
         val itemCal = Calendar.getInstance(amsterdamTz).apply { time = date }
 
         val isToday = now.get(Calendar.YEAR) == itemCal.get(Calendar.YEAR) &&
@@ -481,24 +500,35 @@ private fun formatDateHeader(isoTimestamp: String): String {
         }
         fullFormat.format(date)
     } catch (_: Exception) {
-        "Eerdere opnames"
+        val dFormat = SimpleDateFormat("d MMM", Locale("nl", "NL")).apply { timeZone = amsterdamTz }
+        "Vandaag (${dFormat.format(now.time)})"
     }
 }
 
 private fun formatExactTime(isoTimestamp: String): String {
+    val amsterdamTz = TimeZone.getTimeZone("Europe/Amsterdam")
+    val now = Calendar.getInstance(amsterdamTz)
+    if (isoTimestamp.isBlank()) {
+        val timeFormat = SimpleDateFormat("HH:mm:ss", Locale("nl", "NL")).apply {
+            timeZone = amsterdamTz
+        }
+        return timeFormat.format(now.time)
+    }
     return try {
         val clean = isoTimestamp.replace("Z", "")
         val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
             timeZone = TimeZone.getTimeZone("UTC")
         }
-        val date = parser.parse(clean.take(19)) ?: return isoTimestamp.take(8)
-        val amsterdamTz = TimeZone.getTimeZone("Europe/Amsterdam")
+        val date = parser.parse(clean.take(19)) ?: now.time
         val timeFormat = SimpleDateFormat("HH:mm:ss", Locale("nl", "NL")).apply {
             timeZone = amsterdamTz
         }
         timeFormat.format(date)
     } catch (_: Exception) {
-        isoTimestamp.take(8)
+        val timeFormat = SimpleDateFormat("HH:mm:ss", Locale("nl", "NL")).apply {
+            timeZone = amsterdamTz
+        }
+        timeFormat.format(now.time)
     }
 }
 
@@ -582,9 +612,9 @@ private fun ClipCard(
                             .padding(horizontal = 4.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = formatDuration(clip.duration),
+                            text = if (clip.isRecording) "🔴 Nu aan het opnemen..." else formatDuration(clip.duration),
                             style = MaterialTheme.typography.labelSmall,
-                            color = TextPrimary
+                            color = if (clip.isRecording) Color(0xFFEF4444) else TextPrimary
                         )
                     }
                 }
@@ -748,7 +778,8 @@ private fun ClipPlayerDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    val videoStreamUrl = if (clip.videoUrl.startsWith("http")) clip.videoUrl else "$baseUrl${clip.videoUrl}"
+    var currentClip by remember { mutableStateOf(clip) }
+    var isRecordingState by remember { mutableStateOf(clip.isRecording || clip.duration <= 0.0) }
 
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
@@ -763,11 +794,7 @@ private fun ClipPlayerDialog(
     var seekPositionRatio by remember { mutableFloatStateOf(0f) }
 
     val exoPlayer = remember {
-        ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(videoStreamUrl))
-            prepare()
-            playWhenReady = true
-        }
+        ExoPlayer.Builder(context).build()
     }
 
     DisposableEffect(Unit) {
@@ -776,18 +803,50 @@ private fun ClipPlayerDialog(
         }
     }
 
-    // Playback state and seekbar synchronizer
-    LaunchedEffect(exoPlayer, isUserSeeking) {
-        while (true) {
-            if (!isUserSeeking) {
-                currentPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
-                durationMs = exoPlayer.duration.coerceAtLeast(0L)
-                if (durationMs > 0) {
-                    seekPositionRatio = (currentPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
-                }
+    // Polling loop for active recordings (TAAK 2.1)
+    LaunchedEffect(currentClip.id) {
+        if (isRecordingState) {
+            val api = ApiClientFactory.createApi(baseUrl)
+            while (isRecordingState) {
+                delay(2000L)
+                try {
+                    val resp = api.getClipDetail(currentClip.id)
+                    if (resp.isSuccessful && resp.body() != null) {
+                        val updated = resp.body()!!
+                        currentClip = updated
+                        if (updated.status.equals("READY", ignoreCase = true) && updated.duration > 0.0) {
+                            isRecordingState = false
+                            val streamUrl = if (updated.videoUrl.startsWith("http")) updated.videoUrl else "$baseUrl${updated.videoUrl}"
+                            exoPlayer.setMediaItem(MediaItem.fromUri(streamUrl))
+                            exoPlayer.prepare()
+                            exoPlayer.playWhenReady = true
+                            break
+                        }
+                    }
+                } catch (_: Exception) {}
             }
-            isPlaying = exoPlayer.isPlaying
-            delay(200L)
+        } else {
+            val videoStreamUrl = if (currentClip.videoUrl.startsWith("http")) currentClip.videoUrl else "$baseUrl${currentClip.videoUrl}"
+            exoPlayer.setMediaItem(MediaItem.fromUri(videoStreamUrl))
+            exoPlayer.prepare()
+            exoPlayer.playWhenReady = true
+        }
+    }
+
+    // Playback state and seekbar synchronizer
+    LaunchedEffect(exoPlayer, isUserSeeking, isRecordingState) {
+        if (!isRecordingState) {
+            while (true) {
+                if (!isUserSeeking) {
+                    currentPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
+                    durationMs = exoPlayer.duration.coerceAtLeast(0L)
+                    if (durationMs > 0) {
+                        seekPositionRatio = (currentPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+                    }
+                }
+                isPlaying = exoPlayer.isPlaying
+                delay(200L)
+            }
         }
     }
 
@@ -810,7 +869,6 @@ private fun ClipPlayerDialog(
                     .pointerInput(Unit) {
                         detectTapGestures(
                             onDoubleTap = {
-                                // Double-tap resets zoom and pan
                                 scale = 1f
                                 offsetX = 0f
                                 offsetY = 0f
@@ -841,29 +899,87 @@ private fun ClipPlayerDialog(
                     },
                 contentAlignment = Alignment.Center
             ) {
-                AndroidView(
-                    factory = { ctx ->
-                        PlayerView(ctx).apply {
-                            player = exoPlayer
-                            useController = false
-                            setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
-                            resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
+                if (!isRecordingState) {
+                    AndroidView(
+                        factory = { ctx ->
+                            PlayerView(ctx).apply {
+                                player = exoPlayer
+                                useController = false
+                                setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
+                                resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                            }
+                        },
+                        update = { view ->
+                            view.player = exoPlayer
+                            view.resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
                             else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                        },
+                        modifier = if (isFitMode) {
+                            Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(4f / 3f)
+                        } else {
+                            Modifier.fillMaxSize()
                         }
-                    },
-                    update = { view ->
-                        view.player = exoPlayer
-                        view.resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                    },
-                    modifier = if (isFitMode) {
-                        Modifier
+                    )
+                } else {
+                    // Recording in progress! Show snapshot background + neat status overlay (TAAK 2.1)
+                    val fullThumbUrl = if (currentClip.thumbnailUrl.isNotBlank()) {
+                        if (currentClip.thumbnailUrl.startsWith("http")) currentClip.thumbnailUrl else "$baseUrl${currentClip.thumbnailUrl}"
+                    } else if (currentClip.snapshotUrl.isNotBlank()) {
+                        if (currentClip.snapshotUrl.startsWith("http")) currentClip.snapshotUrl else "$baseUrl${currentClip.snapshotUrl}"
+                    } else "$baseUrl/api/v1/clips/${currentClip.id}/thumbnail"
+
+                    Box(
+                        modifier = Modifier
                             .fillMaxWidth()
                             .aspectRatio(4f / 3f)
-                    } else {
-                        Modifier.fillMaxSize()
+                            .background(Color.Black),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AsyncImage(
+                            model = fullThumbUrl,
+                            contentDescription = "Live snapshot preview",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.45f))
+                        )
+                        Surface(
+                            color = Color(0xDD0F172A),
+                            shape = RoundedCornerShape(16.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.5.dp, Color(0xFFEF4444)),
+                            modifier = Modifier.padding(16.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    color = Color(0xFFEF4444),
+                                    modifier = Modifier.size(32.dp),
+                                    strokeWidth = 3.dp
+                                )
+                                Text(
+                                    text = "🔴 Opname wordt nog afgerond (20s na-opname)...",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = "Nog enkele seconden geduld",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+                        }
                     }
-                )
+                }
             }
 
             // ── 2. Top Controls Overlay ──
@@ -879,13 +995,16 @@ private fun ClipPlayerDialog(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Opname bekijken",
+                            text = currentClip.answeredBy?.ifBlank { "Opname bekijken" } ?: "Opname bekijken",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
                         )
+                        val timestampToFormat = currentClip.timestamp.ifBlank {
+                            java.time.Instant.now().toString()
+                        }
                         Text(
-                            text = "${formatDateHeader(clip.timestamp)} • ${formatExactTime(clip.timestamp)}",
+                            text = "${formatDateHeader(timestampToFormat)} • ${formatExactTime(timestampToFormat)}",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFF94A3B8)
                         )
@@ -943,142 +1062,170 @@ private fun ClipPlayerDialog(
 
             // ── 3. Bottom Controls Overlay (Seekbar, Play/Pause, Download) ──
             if (controlsVisible) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .align(Alignment.BottomCenter)
-                        .navigationBarsPadding()
-                        .padding(horizontal = 16.dp, vertical = 16.dp),
-                    color = Color(0xDD0F172A),
-                    shape = RoundedCornerShape(24.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155))
-                ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                if (isRecordingState) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.BottomCenter)
+                            .navigationBarsPadding()
+                            .padding(horizontal = 16.dp, vertical = 16.dp),
+                        color = Color(0xDD0F172A),
+                        shape = RoundedCornerShape(24.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFEF4444))
                     ) {
-                        // Time indicators
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = formatDurationMs(currentPositionMs),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White
-                            )
-                            Text(
-                                text = formatDurationMs(durationMs),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF94A3B8)
-                            )
-                        }
-
-                        // Interactive Seekbar
-                        Slider(
-                            value = if (isUserSeeking) seekPositionRatio else (if (durationMs > 0) currentPositionMs.toFloat() / durationMs.toFloat() else 0f),
-                            onValueChange = {
-                                isUserSeeking = true
-                                seekPositionRatio = it
-                            },
-                            onValueChangeFinished = {
-                                if (durationMs > 0) {
-                                    val targetMs = (seekPositionRatio * durationMs).toLong()
-                                    exoPlayer.seekTo(targetMs)
-                                }
-                                isUserSeeking = false
-                            },
-                            colors = SliderDefaults.colors(
-                                thumbColor = CyanAccent,
-                                activeTrackColor = CyanAccent,
-                                inactiveTrackColor = Color(0xFF334155)
-                            ),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(20.dp)
-                        )
-
-                        // Play/Pause, -10s, +10s, Download controls
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
+                                .padding(horizontal = 20.dp, vertical = 14.dp),
+                            horizontalArrangement = Arrangement.Center,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            Text(
+                                text = "🔴 Bezig met verwerken van video & pre-roll...",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFFEF4444)
+                            )
+                        }
+                    }
+                } else {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.BottomCenter)
+                            .navigationBarsPadding()
+                            .padding(horizontal = 16.dp, vertical = 16.dp),
+                        color = Color(0xDD0F172A),
+                        shape = RoundedCornerShape(24.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            // Time indicators
                             Row(
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                // Play / Pause
-                                IconButton(
-                                    onClick = {
-                                        if (exoPlayer.isPlaying) {
-                                            exoPlayer.pause()
-                                        } else {
-                                            if (exoPlayer.playbackState == Player.STATE_ENDED) {
-                                                exoPlayer.seekTo(0)
-                                            }
-                                            exoPlayer.play()
-                                        }
-                                        isPlaying = exoPlayer.isPlaying
-                                    },
-                                    modifier = Modifier
-                                        .size(44.dp)
-                                        .background(CyanAccent, CircleShape)
-                                ) {
-                                    Icon(
-                                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                        contentDescription = if (isPlaying) "Pauzeren" else "Afspelen",
-                                        tint = BackgroundDark,
-                                        modifier = Modifier.size(24.dp)
-                                    )
-                                }
-
-                                // Reset zoom indicator if zoomed in
-                                if (scale > 1.05f) {
-                                    Surface(
-                                        color = Color(0x3338BDF8),
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier.clickable {
-                                            scale = 1f
-                                            offsetX = 0f
-                                            offsetY = 0f
-                                        }
-                                    ) {
-                                        Text(
-                                            text = "${String.format("%.1f", scale)}x (Reset)",
-                                            color = CyanAccent,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                        )
-                                    }
-                                }
+                                Text(
+                                    text = formatDurationMs(currentPositionMs),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = formatDurationMs(durationMs),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF94A3B8)
+                                )
                             }
 
-                            // Download Button
-                            Button(
-                                onClick = {
-                                    val filename = "foxway_${clip.id}.mp4"
-                                    val fileDownloadUrl = "$baseUrl/api/v1/clips/${clip.id}/file"
-                                    downloadClip(context, fileDownloadUrl, filename)
+                            // Interactive Seekbar
+                            Slider(
+                                value = if (isUserSeeking) seekPositionRatio else (if (durationMs > 0) currentPositionMs.toFloat() / durationMs.toFloat() else 0f),
+                                onValueChange = {
+                                 isUserSeeking = true
+                                 seekPositionRatio = it
                                 },
-                                shape = RoundedCornerShape(12.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                                onValueChangeFinished = {
+                                    if (durationMs > 0) {
+                                        val targetMs = (seekPositionRatio * durationMs).toLong()
+                                        exoPlayer.seekTo(targetMs)
+                                    }
+                                    isUserSeeking = false
+                                },
+                                colors = SliderDefaults.colors(
+                                    thumbColor = CyanAccent,
+                                    activeTrackColor = CyanAccent,
+                                    inactiveTrackColor = Color(0xFF334155)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(20.dp)
+                            )
+
+                            // Play/Pause, -10s, +10s, Download controls
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Download,
-                                    contentDescription = null,
-                                    tint = CyanAccent,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Downloaden",
-                                    color = Color.White,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.SemiBold
-                                )
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    // Play / Pause
+                                    IconButton(
+                                        onClick = {
+                                            if (exoPlayer.isPlaying) {
+                                                exoPlayer.pause()
+                                            } else {
+                                                if (exoPlayer.playbackState == Player.STATE_ENDED) {
+                                                    exoPlayer.seekTo(0)
+                                                }
+                                                exoPlayer.play()
+                                            }
+                                            isPlaying = exoPlayer.isPlaying
+                                        },
+                                        modifier = Modifier
+                                            .size(44.dp)
+                                            .background(CyanAccent, CircleShape)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                            contentDescription = if (isPlaying) "Pauzeren" else "Afspelen",
+                                            tint = BackgroundDark,
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                    }
+
+                                    // Reset zoom indicator if zoomed in
+                                    if (scale > 1.05f) {
+                                        Surface(
+                                            color = Color(0x3338BDF8),
+                                            shape = RoundedCornerShape(12.dp),
+                                            modifier = Modifier.clickable {
+                                                scale = 1f
+                                                offsetX = 0f
+                                                offsetY = 0f
+                                            }
+                                        ) {
+                                            Text(
+                                                text = "${String.format("%.1f", scale)}x (Reset)",
+                                                color = CyanAccent,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Download Button
+                                Button(
+                                    onClick = {
+                                        val filename = "foxway_${clip.id}.mp4"
+                                        val fileDownloadUrl = "$baseUrl/api/v1/clips/${clip.id}/file"
+                                        downloadClip(context, fileDownloadUrl, filename)
+                                    },
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Download,
+                                        contentDescription = null,
+                                        tint = CyanAccent,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Downloaden",
+                                        color = Color.White,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
                             }
                         }
                     }

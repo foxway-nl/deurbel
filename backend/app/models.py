@@ -163,6 +163,9 @@ class ClipInfo(BaseModel):
     video_url: str
     answered_by: Optional[str] = None
     starred: bool = False
+    status: str = "READY"
+    category: str = ""
+    size_bytes: int = 0
 
 
 class TrimRequest(BaseModel):
@@ -216,7 +219,10 @@ CREATE TABLE IF NOT EXISTS clips (
     snapshot_path TEXT,
     video_path    TEXT NOT NULL,
     answered_by   TEXT,
-    starred       INTEGER NOT NULL DEFAULT 0
+    starred       INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'READY',
+    category      TEXT DEFAULT '',
+    file_size     INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -281,6 +287,17 @@ async def init_db() -> None:
         ]:
             try:
                 await db.execute(f"ALTER TABLE devices ADD COLUMN {col_def}")
+            except Exception:
+                pass
+
+        # Migration: ensure status, category, file_size exist in clips table (v2.8.0 2-phase lifecycle)
+        for col_def in [
+            "status TEXT NOT NULL DEFAULT 'READY'",
+            "category TEXT DEFAULT ''",
+            "file_size INTEGER DEFAULT 0",
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE clips ADD COLUMN {col_def}")
             except Exception:
                 pass
 
@@ -586,18 +603,26 @@ async def save_clip(
     snapshot_path: str = "",
     answered_by: str = "",
     duration: float = 0.0,
+    status: str = "READY",
+    category: str = "",
+    file_size: int = 0,
+    created_at: Optional[str] = None,
 ) -> None:
+    now_iso = created_at or datetime.now(timezone.utc).isoformat()
     async with get_db(write=True) as db:
         await db.execute(
             """
-            INSERT INTO clips (clip_id, call_id, created_at, duration, snapshot_path, video_path, answered_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO clips (clip_id, call_id, created_at, duration, snapshot_path, video_path, answered_by, status, category, file_size)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(clip_id) DO UPDATE SET
                 duration = excluded.duration,
                 snapshot_path = COALESCE(NULLIF(excluded.snapshot_path, ''), clips.snapshot_path),
-                answered_by = COALESCE(NULLIF(excluded.answered_by, ''), clips.answered_by)
+                answered_by = COALESCE(NULLIF(excluded.answered_by, ''), clips.answered_by),
+                status = excluded.status,
+                category = COALESCE(NULLIF(excluded.category, ''), clips.category),
+                file_size = excluded.file_size
             """,
-            (clip_id, call_id, datetime.now(timezone.utc).isoformat(), duration, snapshot_path, video_path, answered_by),
+            (clip_id, call_id, now_iso, duration, snapshot_path, video_path, answered_by, status, category, file_size),
         )
 
 
@@ -685,6 +710,8 @@ async def save_event(
 ) -> dict:
     """Record an event (ring or confirmed motion) in the events table."""
     now_iso = datetime.now(timezone.utc).isoformat()
+    if not snapshot_url and clip_id:
+        snapshot_url = f"/api/v1/clips/{clip_id}/thumbnail"
     async with get_db(write=True) as db:
         cursor = await db.execute(
             """

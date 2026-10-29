@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell Architectuur (v2.6.0)
+# Foxway Smart Doorbell Architectuur (v2.8.0)
 
-Dit document beschrijft de technische opzet en datastromen van versie 2.6.0.
+Dit document beschrijft de technische opzet en datastromen van versie 2.8.0.
 
 ---
 
@@ -22,14 +22,17 @@ flowchart TD
         subgraph Backend ["FastAPI Backend (Docker :8090)"]
             WSProxy["WebSocket Proxy (/api/go2rtc/ws) & Player (/api/v1/live/player)"]
             TemporalAI["Temporal Pixel-Diff AI (YOLOv8n 5 FPS, 1.2s diff mask)"]
+            Lifecycle["2-Fasen Clip Lifecycle (RECORDING -> READY)"]
             AdminUI["Web Admin Dashboard (/admin - 25 FPS Preview)"]
             SQLite[("SQLite DB WAL Mode (database.py)")]
         end
     end
 
-    subgraph Client ["Android Toestel (v2.6.0)"]
+    subgraph Client ["Android Toestel (v2.8.0)"]
         Telecom["Telecom Framework (10s Deduplicated CallScreen)"]
         LiveView["LiveScreen / CallScreen (Hardware MSE + WebRTC Player, 72dp knoppen)"]
+        ClipPlayer["ClipPlayerDialog (Smart In-Progress Preview + 2s Polling)"]
+        NotifService["WebSocketForegroundService (LargeIcon + BigPicture Notification)"]
         SettingsUI["4-Kaarten SettingsScreen (Profiel, AI, Opslag, Systeem)"]
     end
 
@@ -43,9 +46,14 @@ flowchart TD
     CamMic <-->|SDK Audio| SDK
     SDK <-->|PCM Audio Bridge| LiveView
     
-    RingBuffer -->|20s Pre-roll & Gap Check| TemporalAI
-    TemporalAI -->|Event & Validated Clip| SQLite
-    TemporalAI -->|Push <1.5s| Telecom
+    RingBuffer -->|20s Pre-roll & Gap Check| Lifecycle
+    TemporalAI -->|1. Sync Snapshot >5KB| Lifecycle
+    Lifecycle -->|2. Status RECORDING| SQLite
+    Lifecycle -->|3. Push <1.5s + Thumbnail| NotifService
+    NotifService -->|Deeplink met Clip-ID| ClipPlayer
+    ClipPlayer -->|Poll 2.0s GET /clips/id| Lifecycle
+    Lifecycle -->|4. Status READY na 20s Post-Roll| SQLite
+    ClipPlayer -->|Auto-Start ExoPlayer| WSProxy
 ```
     
     CrashHandler -.->|POST crash| AdminUI

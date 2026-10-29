@@ -737,13 +737,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "2.6.0",
-        "version_code": 17,
-        "build_time": "2026-10-28T23:35:00Z",
+        "version": "2.8.0",
+        "version_code": 19,
+        "build_time": "2026-10-29T10:45:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v2.6.0: Native go2rtc MSE/WebRTC hardware streaming, temporal pixel-diff AI vehicle detection, 8s cooldown, and 0ms lag player",
+        "changelog": "v2.8.0: 2-stage clip lifecycle (RECORDING -> READY), instant pre-notification thumbnail, smart in-progress player with live preview, largeIcon push notification",
     }
 
 
@@ -957,55 +957,90 @@ async def quick_reply_active(body: QuickReplyRequest):
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  ROUTE: Snapshots
+#  ROUTE: Snapshots & Thumbnails
 # ══════════════════════════════════════════════════════════════════════
 
 @app.get("/api/v1/snapshots/{filename}")
 @app.get("/api/snapshots/{filename}")
 async def serve_snapshot(filename: str):
     """Serve a snapshot JPEG file. Generates dynamically from clip if missing."""
-    path = settings.SNAPSHOTS_DIR / filename
-    if not path.exists() or path.stat().st_size == 0:
-        clip_id = filename.rsplit(".", 1)[0]
-        ensured = await ensure_thumbnail(clip_id)
-        if ensured and os.path.exists(ensured):
-            path = Path(ensured)
-        else:
-            raise HTTPException(404, "Snapshot not found")
-    return FileResponse(str(path), media_type="image/jpeg")
+    clean_id = filename.rsplit(".", 1)[0].replace("thumb_", "")
+    candidates = [
+        settings.SNAPSHOTS_DIR / filename,
+        settings.CLIPS_DIR / filename,
+        settings.CLIPS_DIR / f"thumb_{clean_id}.jpg",
+        settings.SNAPSHOTS_DIR / f"{clean_id}.jpg",
+    ]
+    for p in candidates:
+        if p.exists() and p.stat().st_size > 0:
+            return FileResponse(str(p), media_type="image/jpeg")
+
+    ensured = await ensure_thumbnail(clean_id)
+    if ensured and os.path.exists(ensured):
+        return FileResponse(str(ensured), media_type="image/jpeg")
+    raise HTTPException(404, "Snapshot not found")
+
+
+@app.get("/api/v1/clips/{clip_id}/thumbnail")
+@app.get("/api/clips/{clip_id}/thumbnail")
+async def get_clip_thumbnail_endpoint(clip_id: str):
+    """Serve thumbnail for clip. Looks in clips/thumb_<id>.jpg and snapshots/<id>.jpg."""
+    clean_id = clip_id.replace(".jpg", "").replace("thumb_", "")
+    candidates = [
+        settings.CLIPS_DIR / f"thumb_{clean_id}.jpg",
+        settings.SNAPSHOTS_DIR / f"{clean_id}.jpg",
+        settings.SNAPSHOTS_DIR / f"thumb_{clean_id}.jpg",
+        settings.CLIPS_DIR / f"{clean_id}.jpg",
+    ]
+    for p in candidates:
+        if p.exists() and p.stat().st_size > 0:
+            return FileResponse(str(p), media_type="image/jpeg")
+
+    ensured = await ensure_thumbnail(clean_id)
+    if ensured and os.path.exists(ensured):
+        return FileResponse(str(ensured), media_type="image/jpeg")
+    raise HTTPException(404, "Thumbnail not found")
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  ROUTE: Clips
+#  ROUTE: Clips (2-Phase Lifecycle: RECORDING -> READY)
 # ══════════════════════════════════════════════════════════════════════
 
 @app.get("/api/v1/clips")
 @app.get("/api/clips")
-async def get_clips(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)):
+async def get_clips(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
     """List all clips sorted newest first with duration and file size."""
     clips = await list_clips(limit=limit, offset=offset)
     result = []
     for c in clips:
         clip_id = c["clip_id"]
+        status = c.get("status") or "READY"
+
         # Trigger thumbnail generation in background if missing
+        thumb_path = settings.CLIPS_DIR / f"thumb_{clip_id}.jpg"
         snap_path = settings.SNAPSHOTS_DIR / f"{clip_id}.jpg"
-        if not snap_path.exists() or snap_path.stat().st_size == 0:
+        if not (thumb_path.exists() and thumb_path.stat().st_size > 0) and not (snap_path.exists() and snap_path.stat().st_size > 0):
             asyncio.create_task(ensure_thumbnail(clip_id, c.get("video_path")))
 
-        size_bytes = 0
-        v_path = c.get("video_path") or str(settings.CLIPS_DIR / f"{clip_id}.mp4")
-        if os.path.exists(v_path):
-            try:
-                size_bytes = os.path.getsize(v_path)
-            except Exception:
-                pass
+        size_bytes = c.get("file_size") or 0
+        if size_bytes == 0:
+            v_path = c.get("video_path") or str(settings.CLIPS_DIR / f"{clip_id}.mp4")
+            if os.path.exists(v_path):
+                try:
+                    size_bytes = os.path.getsize(v_path)
+                except Exception:
+                    pass
 
         result.append({
             "id": clip_id,
+            "status": status,
             "timestamp": c["created_at"],
+            "created_at": c["created_at"],
             "duration": c.get("duration", 0.0),
             "size_bytes": size_bytes,
-            "snapshot_url": f"/api/v1/snapshots/{clip_id}.jpg",
+            "category": c.get("category", ""),
+            "thumbnail_url": f"/api/v1/clips/{clip_id}/thumbnail",
+            "snapshot_url": f"/api/v1/clips/{clip_id}/thumbnail",
             "video_url": f"/api/v1/clips/{clip_id}/stream",
             "answered_by": c.get("answered_by"),
             "starred": bool(c.get("starred", 0)),
@@ -1014,15 +1049,74 @@ async def get_clips(limit: int = Query(20, ge=1, le=100), offset: int = Query(0,
 
 
 @app.get("/api/v1/clips/{clip_id}")
+@app.get("/api/clips/{clip_id}")
+async def get_clip_detail(clip_id: str, request: Request):
+    """Retrieve metadata and status (RECORDING/READY) for a specific clip."""
+    clean_id = clip_id.replace(".mp4", "")
+    accept = request.headers.get("accept", "")
+    if clip_id.endswith(".mp4") or "video/" in accept:
+        return await stream_clip_endpoint(clean_id, request)
+
+    clip = await get_clip(clean_id)
+    if not clip:
+        alt_path = settings.CLIPS_DIR / f"{clean_id}.mp4"
+        if not alt_path.exists():
+            raise HTTPException(404, "Clip not found")
+        v_size = os.path.getsize(alt_path)
+        return {
+            "id": clean_id,
+            "clip_id": clean_id,
+            "status": "READY",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "duration": 0.0,
+            "size_bytes": v_size,
+            "category": "",
+            "thumbnail_url": f"/api/v1/clips/{clean_id}/thumbnail",
+            "snapshot_url": f"/api/v1/clips/{clean_id}/thumbnail",
+            "video_url": f"/api/v1/clips/{clean_id}/stream",
+            "answered_by": None,
+            "starred": False,
+        }
+
+    status = clip.get("status") or "READY"
+    size_bytes = clip.get("file_size") or 0
+    if size_bytes == 0:
+        v_path = clip.get("video_path") or str(settings.CLIPS_DIR / f"{clean_id}.mp4")
+        if os.path.exists(v_path):
+            try:
+                size_bytes = os.path.getsize(v_path)
+            except Exception:
+                pass
+
+    return {
+        "id": clean_id,
+        "clip_id": clean_id,
+        "status": status,
+        "created_at": clip["created_at"],
+        "timestamp": clip["created_at"],
+        "duration": clip.get("duration", 0.0),
+        "size_bytes": size_bytes,
+        "category": clip.get("category", ""),
+        "thumbnail_url": f"/api/v1/clips/{clean_id}/thumbnail",
+        "snapshot_url": f"/api/v1/clips/{clean_id}/thumbnail",
+        "video_url": f"/api/v1/clips/{clean_id}/stream",
+        "answered_by": clip.get("answered_by"),
+        "starred": bool(clip.get("starred", 0)),
+    }
+
+
 @app.get("/api/v1/clips/{clip_id}/stream")
 @app.get("/api/v1/clips/{clip_id}/file")
-@app.get("/api/clips/{clip_id}")
 @app.get("/api/clips/{clip_id}/stream")
 @app.get("/api/clips/{clip_id}/file")
 async def stream_clip_endpoint(clip_id: str, request: Request):
     """Stream a clip with HTTP Range support (206 Partial Content) via FileResponse."""
     clean_id = clip_id.replace(".mp4", "")
     clip = await get_clip(clean_id)
+    if clip and clip.get("status") == "RECORDING":
+        raise HTTPException(404, "Opname wordt nog opgenomen (status: RECORDING)")
+
     file_path = clip.get("video_path") if clip else str(settings.CLIPS_DIR / f"{clean_id}.mp4")
     if not os.path.exists(file_path):
         alt_path = str(settings.CLIPS_DIR / f"{clean_id}.mp4")

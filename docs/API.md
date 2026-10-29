@@ -1,10 +1,49 @@
-# Foxway Smart Doorbell API Documentatie (v2.6.0)
+# Foxway Smart Doorbell API Documentatie (v2.8.0)
 
 De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8090`, WAN: `https://deurbel.foxway.nl`).
 
 ---
 
-## 1. go2rtc Native Hardware Streaming Endpoints (`v2.6.0`)
+## 1. Clips & 2-Fasen Clip Lifecycle (`v2.8.0`)
+
+### `GET /api/v1/clips`
+- **Beschrijving:** Haalt alle opgeslagen en momenteel lopende clips op.
+- **Query Parameters:** `limit` (standaard 50), `offset` (standaard 0).
+- **Output:**
+```json
+[
+  {
+    "id": "e6745183-b789-4a41-b856-11f48622c81d",
+    "status": "RECORDING",
+    "timestamp": "2026-10-29T10:19:02.123456Z",
+    "created_at": "2026-10-29T10:19:02.123456Z",
+    "duration": 0.0,
+    "size_bytes": 0,
+    "category": "vehicle",
+    "thumbnail_url": "/api/v1/clips/e6745183-b789-4a41-b856-11f48622c81d/thumbnail",
+    "snapshot_url": "/api/v1/clips/e6745183-b789-4a41-b856-11f48622c81d/thumbnail",
+    "video_url": "/api/v1/clips/e6745183-b789-4a41-b856-11f48622c81d/stream",
+    "answered_by": "AI: Voertuig gedetecteerd (Auto)",
+    "starred": false
+  }
+]
+```
+
+### `GET /api/v1/clips/{clip_id}`
+- **Beschrijving:** Haalt de realtime status (`status: "RECORDING"` of `"READY"`) en metadata op voor een specifieke clip.
+- **Gebruik:** Wordt elke 2 seconden gepolld door de Android videospeler wanneer een opname nog bezig is.
+
+### `GET /api/v1/clips/{clip_id}/thumbnail`
+- **Beschrijving:** Levert direct het JPEG snapshot beeld op het moment van de AI-detectie $T_0$.
+- **Beschikbaarheid:** Gegarandeerd beschikbaar en `> 5 KB` vóórdat de push-notificatie de server verlaat.
+
+### `GET /api/v1/clips/{clip_id}/stream` (en `/file`)
+- **Beschrijving:** HTTP Range (206 Partial Content) video stream van het voltooide `.mp4` bestand.
+- **Status:** Geeft `HTTP 404` zolang de clip nog de status `RECORDING` heeft, en `HTTP 200/206` zodra `status == "READY"`.
+
+---
+
+## 2. go2rtc Native Hardware Streaming Endpoints (`v2.6.0+`)
 
 ### `GET /api/v1/live/player` (en `/live/player`)
 - **Beschrijving:** Minimal fullscreen 4:3 HTML5 speler (MSE + WebRTC) die direct verbindt met de WebSocket proxy.
@@ -128,4 +167,4 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
 - **Beschrijving:** Lijst van opgeslagen clips met thumbnails, duur en AI-gebeurtenislabels.
 
 ### `GET /api/v1/app/version`
-- **Beschrijving:** Geeft huidige server-versie (`2.5.0`), build code (`16`) en download link voor de Android APK.
+- **Beschrijving:** Geeft huidige server-versie (`2.8.0`), build code (`19`) en download link voor de Android APK.
