@@ -1,10 +1,37 @@
-# Foxway Smart Doorbell API Documentatie (v2.9.0)
+# Foxway Smart Doorbell API Documentatie (v3.0.0)
 
 De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8090`, WAN: `https://deurbel.foxway.nl`).
 
+> **HARDWARE SPECIFICATIE:** De EZVIZ DB1 Pro (`192.168.2.31`) heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT naar Poort 80 verbonden. Alle camera-interacties verlopen strikt via Poort 554 (RTSP) en Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`).
+
 ---
 
-## 1. Zero-UI Live Player & Streaming (`v2.9.0`)
+## 1. Poort 8000 C-SDK Hardware Alarm Listener (`v3.0.0`)
+
+### `GET /api/v1/admin/sdk-alarm-events` (en `/api/v1/sdk-alarm-events`)
+- **Beschrijving:** Exposeert de real-time hardware events die via Poort 8000 C-SDK (`NET_DVR_SetupAlarmChan_V41`) binnenkomen.
+- **Output:**
+  ```json
+  {
+    "connected": true,
+    "events": [
+      {
+        "timestamp": "2026-10-30 12:15:20.123",
+        "command_id": 4402,
+        "command_hex": "0x1132",
+        "command_name": "COMM_UPLOAD_VIDEO_INTERCOM_EVENT",
+        "event_type": 1,
+        "event_name": "Visitor Call (Drukknop Deurbel)",
+        "details": "EventType=1 (Visitor Call (Drukknop Deurbel))",
+        "action_taken": "Triggered Doorbell Ringing"
+      }
+    ]
+  }
+  ```
+
+---
+
+## 2. Zero-UI Live Player & Streaming (`v3.0.0`)
 
 ### `GET /api/v1/live/player` (en `/live/player`)
 - **Beschrijving:** Schone Zero-UI fullscreen 4:3 HTML5 hardware-speler (MSE + WebRTC).
@@ -14,6 +41,7 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
   - Verbergt alle go2rtc badges ("MSE", overlay div's) via CSS.
   - Beschikt over een actieve freeze-watchdog die elke 1500ms `video.currentTime` controleert en na 2.5s stilstand automatisch herverbindt.
   - Exposeert `window.reconnectStream = function() { ... }` voor de Android app (`Sync Live`).
+  - Wordt in de Android app tussen tab-wissels warm in het geheugen behouden (`MainActivity.kt`).
 
 ### `GET /api/go2rtc/ws` (en `/api/v1/go2rtc/ws`)
 - **Type:** WebSocket
@@ -22,7 +50,7 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
 
 ---
 
-## 2. Shelly Deurbel & Ring Webhooks (`v2.9.0`)
+## 3. Shelly Deurbel & Ring Webhooks (`v3.0.0`)
 
 ### `POST /api/v1/webhook/shelly-ring?force=true` (en `/api/v1/ring`)
 - **Query Parameter:** `force=true`

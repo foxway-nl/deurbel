@@ -58,6 +58,7 @@ class DoorbellRingDetector:
         self._cooldown = 0.0
         self._tone1_detected_ts = 0.0
         self._tone1_peak = 0.0
+        self.chime_fallback_enabled = True
 
     async def start(self) -> None:
         """Start the background acoustic chime detector."""
@@ -83,6 +84,9 @@ class DoorbellRingDetector:
         Analyze audio window with sequential dual-tone validation.
         Returns True if a valid Ding-Dong sequence triggered a ring.
         """
+        if not self.chime_fallback_enabled:
+            return False
+
         if len(audio_data) < 500:
             return False
 
@@ -155,8 +159,16 @@ class DoorbellRingDetector:
         rtsp_url = settings.GO2RTC_RTSP_URL
 
         while self._running:
-            proc: Optional[subprocess.Popen] = None
             try:
+                from app.models import get_setting
+                fallback_enabled = (await get_setting("audio_chime_fallback_enabled", "false")).lower() in ("true", "1")
+                self.chime_fallback_enabled = fallback_enabled
+
+                if not fallback_enabled:
+                    await asyncio.sleep(5.0)
+                    continue
+
+                proc: Optional[subprocess.Popen] = None
                 cmd = [
                     "nice", "-n", "15",
                     "ffmpeg", "-y", "-nostdin",

@@ -134,6 +134,7 @@ fun LiveScreen() {
 
     LaunchedEffect(isSpeakerMuted) {
         liveStream.setAudioMuted(isSpeakerMuted)
+        webViewRef?.evaluateJavascript("window.setAudioMuted && window.setAudioMuted($isSpeakerMuted);", null)
     }
 
     // Timer effect while recording is active
@@ -295,7 +296,12 @@ fun LiveScreen() {
                             settings.useWideViewPort = true
                             settings.loadWithOverviewMode = true
                             setLayerType(View.LAYER_TYPE_HARDWARE, null)
-                            webViewClient = object : WebViewClient() {}
+                            webViewClient = object : WebViewClient() {
+                                override fun onPageFinished(view: WebView?, url: String?) {
+                                    super.onPageFinished(view, url)
+                                    view?.evaluateJavascript("window.setAudioMuted && window.setAudioMuted($isSpeakerMuted);", null)
+                                }
+                            }
                             webChromeClient = object : android.webkit.WebChromeClient() {
                                 override fun getDefaultVideoPoster(): android.graphics.Bitmap {
                                     return android.graphics.Bitmap.createBitmap(1, 1, android.graphics.Bitmap.Config.ARGB_8888)
@@ -465,7 +471,11 @@ fun LiveScreen() {
                     color = if (isSpeakerMuted) CoralDecline.copy(alpha = 0.3f) else SurfaceGlass,
                     shape = RoundedCornerShape(20.dp),
                     border = androidx.compose.foundation.BorderStroke(1.dp, if (isSpeakerMuted) CoralDecline else DividerDark),
-                    modifier = Modifier.clickable { isSpeakerMuted = !isSpeakerMuted }
+                    modifier = Modifier.clickable {
+                        val next = !isSpeakerMuted
+                        isSpeakerMuted = next
+                        webViewRef?.evaluateJavascript("window.setAudioMuted && window.setAudioMuted($next);", null)
+                    }
                 ) {
                     Box(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
                         Icon(

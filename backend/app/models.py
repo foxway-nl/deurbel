@@ -345,6 +345,7 @@ async def init_db() -> None:
             ("quiet_hours_enabled", "true", "Stille uren inschakelen (geen pushmeldingen voor beweging)"),
             ("quiet_hours_start", "23:30", "Begintijd stille uren (HH:MM)"),
             ("quiet_hours_end", "07:30", "Eindtijd stille uren (HH:MM)"),
+            ("audio_chime_fallback_enabled", "false", "Optionele microfoon chime-verificatie inschakelen (standaard uit bij Poort 8000)"),
         ]
         for k, v, desc in default_settings:
             try:
@@ -374,6 +375,10 @@ async def init_db() -> None:
             )
             await db.execute(
                 "INSERT OR IGNORE INTO system_settings (key, value, description, updated_at) VALUES ('quiet_hours_end', '07:30', 'Eindtijd stille uren (HH:MM)', ?)",
+                (now_iso,),
+            )
+            await db.execute(
+                "INSERT OR IGNORE INTO system_settings (key, value, description, updated_at) VALUES ('audio_chime_fallback_enabled', 'false', 'Optionele microfoon chime-verificatie inschakelen (standaard uit bij Poort 8000)', ?)",
                 (now_iso,),
             )
             await db.execute("ALTER TABLE events ADD COLUMN silent INTEGER DEFAULT 0")

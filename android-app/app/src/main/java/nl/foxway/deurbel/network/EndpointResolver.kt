@@ -62,11 +62,9 @@ class EndpointResolver(
         val cm = appCtx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         val network = cm?.activeNetwork
         val caps = cm?.getNetworkCapabilities(network)
-        val isCellularOnly = caps != null &&
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
-                !caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        val isWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
 
-        if (isCellularOnly) {
+        if (!isWifi) {
             _connectionType.value = ConnectionType.WAN
             val baseUrl = config.wanApiUrl.ifBlank { "https://deurbel.foxway.nl" }.trimEnd('/')
             _activeApiUrl.value = baseUrl

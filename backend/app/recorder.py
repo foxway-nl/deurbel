@@ -160,7 +160,7 @@ class RamRingBuffer:
                 "-rtsp_transport", "tcp",
                 "-i", rtsp_url,
                 "-c:v", "copy",
-                "-an",
+                "-c:a", "aac",
                 "-f", "segment",
                 "-segment_time", "2",
                 "-strftime", "1",
@@ -381,6 +381,7 @@ async def record_smart_clip(
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-b:a", "64k",
+            "-af", "aresample=async=1000",
             "-movflags", "+faststart",
             clip_path,
         ]
@@ -502,6 +503,7 @@ async def _record(call_id: str, clip_path: str) -> None:
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-b:a", "64k",
+            "-af", "aresample=async=1000",
             "-movflags", "+faststart",
             clip_path,
         ]

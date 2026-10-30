@@ -67,6 +67,7 @@ fun CallScreen(
         val base = activeBaseUrl.ifEmpty { "http://192.168.2.1:8090" }
         "$base/api/v1/live/player"
     }
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
     val frame by liveStream.currentBitmap.collectAsState()
     val isConnected by liveStream.isConnected.collectAsState()
 
@@ -78,7 +79,9 @@ fun CallScreen(
 
     // Automatically manage audio mute: muted when ringing (so beltoon is clear), unmuted when answered or speaker on
     LaunchedEffect(isActive, isSpeakerOn) {
-        liveStream.setAudioMuted(!isActive || !isSpeakerOn)
+        val shouldMute = !isActive || !isSpeakerOn
+        liveStream.setAudioMuted(shouldMute)
+        webViewRef?.evaluateJavascript("window.setAudioMuted && window.setAudioMuted($shouldMute);", null)
         if (isActive && isSpeakerOn) {
             try {
                 val audioManager = context.getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager
@@ -124,14 +127,24 @@ fun CallScreen(
                             settings.useWideViewPort = true
                             settings.loadWithOverviewMode = true
                             setLayerType(View.LAYER_TYPE_HARDWARE, null)
-                            webViewClient = object : WebViewClient() {}
+                            webViewClient = object : WebViewClient() {
+                                override fun onPageFinished(view: WebView?, url: String?) {
+                                    super.onPageFinished(view, url)
+                                    val shouldMute = !isActive || !isSpeakerOn
+                                    view?.evaluateJavascript("window.setAudioMuted && window.setAudioMuted($shouldMute);", null)
+                                }
+                            }
                             webChromeClient = object : android.webkit.WebChromeClient() {
                                 override fun getDefaultVideoPoster(): android.graphics.Bitmap {
                                     return android.graphics.Bitmap.createBitmap(1, 1, android.graphics.Bitmap.Config.ARGB_8888)
                                 }
                             }
                             loadUrl(playerUrl)
+                            webViewRef = this
                         }
+                    },
+                    update = { view ->
+                        webViewRef = view
                     },
                     modifier = Modifier.fillMaxSize()
                 )

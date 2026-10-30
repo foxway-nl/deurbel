@@ -816,9 +816,9 @@ class SmartDetector:
                     size_ratio = min(bw, lbw) / max(1.0, max(bw, lbw))
 
                     if category == "vehicle":
-                        # TAAK 4: Moving car in 5 FPS stream cannot jump >12% screen width in 0.2s, and must have continuous IoU overlap >= 0.15
+                        # TAAK 5: Moving car in 5 FPS stream cannot jump >12% or <2% screen width in 0.2s, and must have continuous IoU overlap >= 0.15
                         # This strictly prevents car swap bugs between adjacent parked cars (e.g. cx=0.42 to cx=0.62)
-                        if step_disp_x > 0.12 or iou < 0.15:
+                        if not (0.02 <= step_disp_x <= 0.12) or iou < 0.15:
                             continue
                         if iou > best_iou:
                             best_iou = iou
@@ -872,23 +872,27 @@ class SmartDetector:
                 if track.category == "vehicle":
                     is_parked_spot = is_parked_vehicle(last_box, self.parked_vehicle_boxes, threshold=0.50)
 
-                    # Manier 1 (Nieuw in beeld verschenen):
-                    # Niet op een geparkeerde plek 2s geleden, gezien in 2 frames met changed_pixel_ratio >= 0.15
-                    # En alle opeenvolgende stappen moeten voldoen aan: step_dx <= 0.12 en IoU >= 0.15
+                    # Manier 1 (Nieuw in beeld verschenen rijdende auto):
+                    # Niet op een geparkeerde plek 2s geleden, gezien in minstens 3 frames met changed_pixel_ratio >= 0.15
+                    # En alle opeenvolgende stappen moeten voldoen aan: 0.02*w <= step_dx <= 0.12*w en IoU >= 0.15,
+                    # tot totale verplaatsing >= 14% van schermbreedte (of min_vehicle_disp)
                     valid_steps = True
-                    for idx in range(1, len(track.frames)):
-                        pb = track.frames[idx - 1][1]
-                        cb = track.frames[idx][1]
-                        sdx = abs(((cb[0] + cb[2]) / 2.0) - ((pb[0] + pb[2]) / 2.0)) / float(w)
-                        siou = compute_iou(pb, cb)
-                        if sdx > 0.12 or siou < 0.15:
-                            valid_steps = False
-                            break
+                    if len(track.frames) < 3:
+                        valid_steps = False
+                    else:
+                        for idx in range(1, len(track.frames)):
+                            pb = track.frames[idx - 1][1]
+                            cb = track.frames[idx][1]
+                            sdx = abs(((cb[0] + cb[2]) / 2.0) - ((pb[0] + pb[2]) / 2.0)) / float(w)
+                            siou = compute_iou(pb, cb)
+                            if not (0.02 <= sdx <= 0.12) or siou < 0.15:
+                                valid_steps = False
+                                break
 
-                    if (not is_parked_spot) and max_pixel_ratio >= 0.15 and len(track.frames) >= 2 and valid_steps:
+                    if (not is_parked_spot) and max_pixel_ratio >= 0.15 and len(track.frames) >= 3 and valid_steps and delta_d >= 0.14:
                         is_valid_object = True
-                        verified_disp_pct = max(delta_d_pct, 5.0)
-                        logger.info("Vehicle Manier 1 (New Moving Vehicle): %s ratio=%.2f, frames=%d", track.label, max_pixel_ratio, len(track.frames))
+                        verified_disp_pct = max(delta_d_pct, 14.0)
+                        logger.info("Vehicle Manier 1 (New Moving Vehicle): %s ratio=%.2f, frames=%d, disp=%.1f%%", track.label, max_pixel_ratio, len(track.frames), delta_d_pct)
 
                     # Manier 2 (Wegrijdende of inparkerende auto):
                     # Overlapt geparkeerde plek, ratio >= 0.25 én centroid shift >= 5% van schermbreedte

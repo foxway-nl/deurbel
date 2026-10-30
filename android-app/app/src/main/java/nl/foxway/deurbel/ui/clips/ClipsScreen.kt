@@ -870,6 +870,16 @@ private fun ClipPlayerDialog(
         onDismiss()
     }
 
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                exoPlayer.stop()
+                exoPlayer.clearMediaItems()
+                exoPlayer.release()
+            } catch (_: Exception) {}
+        }
+    }
+
     Dialog(
         onDismissRequest = handleDismiss,
         properties = DialogProperties(

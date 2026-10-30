@@ -302,6 +302,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not start ring detector: %s", e)
 
+    # Start Hikvision Port 8000 C-SDK hardware doorbell pushbutton listener
+    try:
+        from app.sdk_alarm_listener import sdk_alarm_listener
+        await sdk_alarm_listener.start()
+    except Exception as e:
+        logger.warning("Could not start SDK Alarm Listener: %s", e)
+
     # Start RAM Ring Buffer for continuous smart pre-roll
     try:
         await ring_buffer.start()
@@ -339,6 +346,11 @@ async def lifespan(app: FastAPI):
         await ring_detector.stop()
     except Exception:
         pass
+    try:
+        from app.sdk_alarm_listener import sdk_alarm_listener
+        await sdk_alarm_listener.stop()
+    except Exception:
+        pass
     await mdns_service.stop()
     logger.info("👋 Goodbye")
 
@@ -358,7 +370,7 @@ openapi_tags = [
 
 app = FastAPI(
     title="Foxway Smart Doorbell API",
-    version="2.9.0",
+    version="3.0.0",
     description="Signaling, state management, media proxy, and clip API for the Foxway Doorbell system.",
     openapi_tags=openapi_tags,
     lifespan=lifespan,
@@ -737,13 +749,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "2.9.0",
-        "version_code": 20,
-        "build_time": "2026-10-29T23:00:00Z",
+        "version": "3.0.0",
+        "version_code": 21,
+        "build_time": "2026-10-30T12:00:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v2.9.0: Zero-UI live player, infinite repeated ring triggers, quiet hours 23:30-07:30, parked cars swap fix, clip overlay dismiss fix, cellular WAN lock",
+        "changelog": "v3.0.0: Port 8000 C-SDK hardware doorbell push button detection, zero ISAPI/port 80 reliance, warm live stream retention, unlimited ring triggers, anti-car swap filter, quiet hours 23:30-07:30",
     }
 
 
@@ -792,6 +804,17 @@ async def shelly_ring_status():
         "webhook_url_lan": f"http://{local_ip}:{settings.HOST_PORT}/api/v1/webhook/shelly-ring",
         "webhook_url_wan": f"{wan_url}/api/v1/webhook/shelly-ring",
         "instruction": "Configureer in Shelly Plus Uni Web UI -> Input 0 -> Actions -> Button Pressed URL",
+    }
+
+
+@app.get("/api/v1/admin/sdk-alarm-events", tags=["Health & Diagnostics"])
+@app.get("/api/v1/sdk-alarm-events", tags=["Health & Diagnostics"])
+async def get_sdk_alarm_events():
+    """Retrieve real-time Port 8000 C-SDK hardware doorbell events."""
+    from app.sdk_alarm_listener import sdk_alarm_listener
+    return {
+        "connected": sdk_alarm_listener.is_connected,
+        "events": sdk_alarm_listener.get_recent_events(),
     }
 
 
@@ -1411,11 +1434,13 @@ async def proxy_go2rtc_asset(asset_name: str):
 
 @app.get("/api/v1/live/player", response_class=HTMLResponse)
 @app.get("/live/player", response_class=HTMLResponse)
-async def get_live_player(src: str = Query("deurbel")):
+async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(False)):
     """
     Clean Zero-UI fullscreen 4:3 HTML5 player for native go2rtc hardware streaming (MSE + WebRTC).
-    Zero controls, instant snapshot poster at millisecond 0, automatic freeze watchdog & JS reconnect.
+    Zero controls, instant snapshot poster at millisecond 0, live audio support, automatic freeze watchdog & JS reconnect.
     """
+    is_muted_attr = "muted" if muted else ""
+    default_muted = "true" if muted else "false"
     html = f"""<!DOCTYPE html>
 <html lang="nl">
 <head>
@@ -1467,7 +1492,7 @@ async def get_live_player(src: str = Query("deurbel")):
 </head>
 <body>
   <div class="video-container" id="container">
-    <zero-player id="player" src="" mode="webrtc,mse,mp4" playsinline autoplay muted disablepictureinpicture></zero-player>
+    <zero-player id="player" src="" mode="webrtc,mse,mp4" playsinline autoplay {is_muted_attr} disablepictureinpicture></zero-player>
   </div>
   <script type="module">
     import {{ VideoRTC }} from '/api/go2rtc/video-rtc.js';
@@ -1483,6 +1508,11 @@ async def get_live_player(src: str = Query("deurbel")):
           this.video.setAttribute('disablepictureinpicture', '');
           this.video.poster = '/api/v1/live/instant.jpg?t=' + Date.now();
           this.video.style.objectFit = 'cover';
+          const initMuted = {default_muted};
+          this.video.muted = initMuted;
+          if (!initMuted) {{
+            this.video.volume = 1.0;
+          }}
         }}
       }}
     }}
@@ -1497,6 +1527,35 @@ async def get_live_player(src: str = Query("deurbel")):
     container.style.backgroundImage = `url('/api/v1/live/instant.jpg?t=${{Date.now()}}')`;
 
     player.src = wsUrl;
+
+    // Audio mute control
+    window._audioMuted = {default_muted};
+    window.setAudioMuted = function(muted) {{
+      window._audioMuted = !!muted;
+      console.log('[ZeroPlayer] setAudioMuted:', window._audioMuted);
+      const v = player.querySelector('video') || player.video;
+      if (v) {{
+        v.muted = window._audioMuted;
+        if (!window._audioMuted) {{
+          v.volume = 1.0;
+          v.play().catch(() => {{}});
+        }}
+      }}
+      if (window._audioMuted) {{
+        player.setAttribute('muted', '');
+      }} else {{
+        player.removeAttribute('muted');
+      }}
+    }};
+
+    // Ensure audio unmutes when stream starts playing if not muted
+    player.addEventListener('play', () => {{
+      const v = player.querySelector('video') || player.video;
+      if (v && !window._audioMuted) {{
+        v.muted = false;
+        v.volume = 1.0;
+      }}
+    }}, {{ passive: true }});
 
     // MutationObserver to enforce no controls
     const observer = new MutationObserver(() => {{
@@ -1740,6 +1799,7 @@ class DetectionSettingsModel(BaseModel):
     quiet_hours_enabled: bool = True
     quiet_hours_start: str = "23:30"
     quiet_hours_end: str = "07:30"
+    audio_chime_fallback_enabled: bool = False
     activity_zone_top_ignore_percent: int = 20
     motion_sensitivity: float = 1.5
 

@@ -812,6 +812,11 @@ fun SettingsScreen(
                                     val resp = api.triggerShellyWebhook(force = true)
                                     if (resp.isSuccessful) {
                                         shellyTriggerResult = "✅ Drukknop-oproep verzonden naar backend!"
+                                        val body = resp.body()
+                                        val cid = (body?.get("call_id") as? String) ?: "test_${System.currentTimeMillis()}"
+                                        val snap = (body?.get("snapshot_url") as? String) ?: ""
+                                        nl.foxway.deurbel.telecom.DoorbellConnectionService.resetDeduplication()
+                                        nl.foxway.deurbel.telecom.DoorbellConnectionService.launchCallActivity(context, cid, snap, false)
                                     } else {
                                         shellyTriggerResult = "⚠️ Reactie: HTTP ${resp.code()}"
                                     }

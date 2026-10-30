@@ -116,24 +116,20 @@ class ConnectionManager private constructor(private val context: Context) {
             val network = cm?.activeNetwork
             val caps = cm?.getNetworkCapabilities(network)
 
-            val isCellularOnly = caps != null &&
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
-                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-
             val currentWan = _wanUrl.value.ifBlank { "https://deurbel.foxway.nl" }.trimEnd('/')
             val currentLan = _lanUrl.value.trimEnd('/')
 
-            if (isCellularOnly) {
-                // Permanently lock to WAN when on cellular without WiFi, no LAN ping attempts! (Taak 6)
+            val isWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            if (!isWifi) {
+                // If there is NO Wi-Fi active (4G/5G Cellular), lock immediately and permanently to WAN! (Taak 7)
                 if (!_isWanMode.value || _activeBaseUrl.value != currentWan) {
-                    Log.i(TAG, "Cellular/5G detected: Locking route to WAN ($currentWan)")
+                    Log.i(TAG, "No Wi-Fi active (Cellular/5G): Locking route to WAN ($currentWan)")
                     _isWanMode.value = true
                     _activeBaseUrl.value = currentWan
                 }
                 return@launch
             }
 
-            val isWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
             var useLan = false
             if (isWifi && currentLan.isNotBlank()) {
                 useLan = pingLanHost(currentLan)

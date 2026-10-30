@@ -339,6 +339,23 @@
                             ℹ️ Muteert 's nachts pushmeldingen voor beweging. Opnames blijven 100% actief. Deurbel rinkelt altijd.
                         </div>
                     </div>
+
+                    <!-- Hardware Aanbel & Toonbel Fallback -->
+                    <div class="space-y-4 p-4 rounded-xl bg-dark-800/40 border border-dark-700/50">
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-xs font-bold text-emerald-400 uppercase tracking-wider">🔔 Hardware Aanbel &amp; Toonbel</h3>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="setting-audio_chime_fallback_enabled" class="sr-only peer">
+                                <div class="w-9 h-5 bg-dark-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
+                            </label>
+                        </div>
+                        <p class="text-xs text-gray-300">
+                            Optionele microfoon chime-verificatie (728 Hz &rarr; 580 Hz sequentie). Standaard uitgeschakeld omdat Poort 8000 C-SDK hardware alarmen en Shelly Plus Uni primair en 100% betrouwbaar zijn zonder valse meldingen.
+                        </p>
+                        <div class="p-2.5 rounded-lg bg-dark-900/60 border border-dark-700 text-[11px] text-gray-400">
+                            ⚡ Poort 8000 C-SDK hardware alarmkanaal (<code>NET_DVR_SetupAlarmChan_V41</code>) is permanent actief.
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Interactive Exclusion Zone Canvas -->
@@ -445,6 +462,40 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Hikvision Port 8000 Hardware Alarm Channel Logs -->
+            <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4">
+                <div class="flex items-center justify-between pb-3 border-b border-dark-800">
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <h3 class="font-bold text-white text-sm">Hikvision Poort 8000 C-SDK Hardware Alarmkanaal</h3>
+                            <span id="sdk-alarm-status" class="px-2 py-0.5 rounded text-[10px] font-bold bg-dark-800 text-gray-400">Controleren...</span>
+                        </div>
+                        <p class="text-xs text-gray-400">Binnenkomende hardware drukknop events (NET_DVR_SetupAlarmChan_V41 op 192.168.2.31:8000)</p>
+                    </div>
+                    <button onclick="loadSdkAlarmLogs()" class="px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs text-gray-300">
+                        Verversen
+                    </button>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs">
+                        <thead class="bg-dark-800/60 text-gray-400 uppercase text-[10px] tracking-wider">
+                            <tr>
+                                <th class="p-3">Tijdstip</th>
+                                <th class="p-3">Commando</th>
+                                <th class="p-3">Code</th>
+                                <th class="p-3">Details</th>
+                                <th class="p-3">Actie</th>
+                            </tr>
+                        </thead>
+                        <tbody id="sdk-alarm-table-body" class="divide-y divide-dark-800 text-gray-300">
+                            <tr>
+                                <td colspan="5" class="p-4 text-center text-gray-500">Laden van hardware alarm logs...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </section>
     </main>
 
@@ -476,7 +527,7 @@
 
             if (tabId === 'tab-inspector') loadAuditLogs();
             if (tabId === 'tab-settings') loadSystemSettings();
-            if (tabId === 'tab-logs') { loadBackendLogs(); loadCrashLogs(); }
+            if (tabId === 'tab-logs') { loadBackendLogs(); loadCrashLogs(); loadSdkAlarmLogs(); }
         }
 
         // Live HUD clock & frame refresh
@@ -612,7 +663,7 @@
                 'person_conf_threshold', 'vehicle_conf_threshold', 'animal_conf_threshold',
                 'min_person_displacement_pct', 'min_vehicle_displacement_pct', 'verify_frames_required',
                 'pre_roll_seconds', 'post_roll_seconds', 'max_active_motion_seconds', 'max_clip_seconds', 'event_cooldown_seconds',
-                'quiet_hours_enabled', 'quiet_hours_start', 'quiet_hours_end'
+                'quiet_hours_enabled', 'quiet_hours_start', 'quiet_hours_end', 'audio_chime_fallback_enabled'
             ];
             for (const k of keys) {
                 const el = document.getElementById('setting-' + k);
@@ -755,6 +806,45 @@
                 });
             } catch (e) {
                 tbody.innerHTML = '<tr><td colspan="7" class="p-4 text-center text-red-400">Fout bij laden van inspectielogs.</td></tr>';
+            }
+        }
+
+        async function loadSdkAlarmLogs() {
+            const tbody = document.getElementById('sdk-alarm-table-body');
+            const statusEl = document.getElementById('sdk-alarm-status');
+            try {
+                const res = await fetch('/api/v1/admin/sdk-alarm-events');
+                if (!res.ok) return;
+                const d = await res.json();
+                if (statusEl) {
+                    if (d.connected) {
+                        statusEl.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
+                        statusEl.innerText = '🟢 Verbonden (Poort 8000)';
+                    } else {
+                        statusEl.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/30';
+                        statusEl.innerText = '🔴 Verbroken';
+                    }
+                }
+                tbody.innerHTML = '';
+                if (d.events && d.events.length > 0) {
+                    d.events.forEach(ev => {
+                        const tr = document.createElement('tr');
+                        const isRing = ev.action_taken.includes('Triggered Doorbell');
+                        const actClass = isRing ? 'text-emerald-400 font-bold' : 'text-gray-400';
+                        tr.innerHTML = `
+                            <td class="p-3 text-gray-400 font-mono text-[11px]">${ev.timestamp}</td>
+                            <td class="p-3 font-semibold text-white">${ev.command_name}</td>
+                            <td class="p-3 text-cyan-400 font-mono">${ev.command_hex}</td>
+                            <td class="p-3 text-gray-300 max-w-sm truncate" title="${ev.details}">${ev.details}</td>
+                            <td class="p-3 ${actClass}">${ev.action_taken}</td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="5" class="p-4 text-center text-gray-500">Nog geen hardware alarm events ontvangen van Poort 8000.</td></tr>';
+                }
+            } catch (e) {
+                tbody.innerHTML = '<tr><td colspan="5" class="p-4 text-center text-red-400">Fout bij laden van hardware alarm logs.</td></tr>';
             }
         }
 

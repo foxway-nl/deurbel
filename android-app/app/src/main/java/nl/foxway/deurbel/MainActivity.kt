@@ -13,6 +13,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -224,19 +225,38 @@ fun MainAppScaffold(
             }
 
             Box(modifier = Modifier.fillMaxSize()) {
-                when (selectedTab) {
-                    MainTab.LIVE -> LiveScreen()
-                    MainTab.CLIPS -> ClipsScreen(
-                        initialClipId = activeTargetClipId,
-                        onClipSelected = {
-                            activeTargetClipId = null
-                            (context as? android.app.Activity)?.intent?.apply {
-                                removeExtra("clip_id")
-                                removeExtra("screen")
+                // Keep LiveScreen warm and alive so switching tabs doesn't re-buffer for 4 seconds
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .then(
+                            if (selectedTab == MainTab.LIVE) Modifier
+                            else Modifier.graphicsLayer {
+                                alpha = 0f
+                                translationX = -10000f
                             }
-                        }
-                    )
-                    MainTab.SETTINGS -> SettingsScreen(onUnpair = onUnpair)
+                        )
+                ) {
+                    LiveScreen()
+                }
+
+                if (selectedTab == MainTab.CLIPS) {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        ClipsScreen(
+                            initialClipId = activeTargetClipId,
+                            onClipSelected = {
+                                activeTargetClipId = null
+                                (context as? android.app.Activity)?.intent?.apply {
+                                    removeExtra("clip_id")
+                                    removeExtra("screen")
+                                }
+                            }
+                        )
+                    }
+                } else if (selectedTab == MainTab.SETTINGS) {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        SettingsScreen(onUnpair = onUnpair)
+                    }
                 }
             }
         }

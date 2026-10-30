@@ -259,6 +259,7 @@ class CallActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         isCallActivityVisible = false
+        DoorbellConnectionService.resetDeduplication()
         audioStreamer.stopStreaming()
         DoorbellConnectionService.silenceRingtone()
         DoorbellConnectionService.cancelCallNotification(this)

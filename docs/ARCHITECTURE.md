@@ -1,6 +1,8 @@
-# Foxway Smart Doorbell Architectuur (v2.9.0)
+# Foxway Smart Doorbell Architectuur (v3.0.0)
 
-Dit document beschrijft de technische opzet en datastromen van versie 2.9.0.
+Dit document beschrijft de technische opzet en datastromen van versie 3.0.0.
+
+> **HARDWARE SPECIFICATIE:** De EZVIZ DB1 Pro (`192.168.2.31`) heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT naar Poort 80 verbonden. Alle camera-interacties verlopen strikt via Poort 554 (RTSP) en Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`).
 
 ---
 
@@ -8,10 +10,11 @@ Dit document beschrijft de technische opzet en datastromen van versie 2.9.0.
 
 ```mermaid
 flowchart TD
-    subgraph Camera ["EZVIZ DB1 Deurbel (192.168.2.31)"]
+    subgraph Camera ["EZVIZ DB1 Pro Deurbel (192.168.2.31)"]
         CamSensor["4:3 Sensor (960x720 / 768x576)"]
         CamMic["Microfoon"]
         CamSpk["Luidspreker"]
+        CamBtn["Hardware Drukknop"]
     end
 
     subgraph Server ["Foxway Server (192.168.2.1)"]
@@ -20,25 +23,28 @@ flowchart TD
         RingBuffer["RAM Ring-Buffer (/dev/shm/deurbel_ring - Unix TS seg_%s.ts)"]
         
         subgraph Backend ["FastAPI Backend (Docker :8090)"]
+            SDKAlarm["Port 8000 SDK Alarm Listener (NET_DVR_SetupAlarmChan_V41)"]
             WSProxy["WebSocket Proxy (/api/go2rtc/ws) & Zero-UI Player (/api/v1/live/player)"]
             TemporalAI["Temporal Pixel-Diff AI & Anti-Car Swap (parked_spots pre-filter)"]
             Lifecycle["2-Fasen Clip Lifecycle (RECORDING -> READY)"]
             QuietHours["Stille Uren Scheduler (23:30 - 07:30 Europe/Amsterdam)"]
-            AdminUI["Web Admin Dashboard (/admin - 25 FPS Preview & Stille Uren)"]
+            AdminUI["Web Admin Dashboard (/admin - 25 FPS Preview & Hardware Alarm Logs)"]
             SQLite[("SQLite DB WAL Mode (database.py)")]
         end
     end
 
-    subgraph Client ["Android Toestel (v2.9.0 Build 20)"]
+    subgraph Client ["Android Toestel (v3.0.0 Build 21)"]
         Telecom["Telecom Framework (Instant Deduplication Reset on Hangup)"]
-        LiveView["LiveScreen / CallScreen (Zero-UI WebChromeClient, 0% Gray Play-Button)"]
+        LiveView["LiveScreen / CallScreen (Warm Retention across Tab Switches)"]
         ClipPlayer["ClipPlayerDialog (Clean ExoPlayer Dismiss & Release)"]
         ConnMgr["ConnectionManager (Cellular-Only WAN Lock, 0ms Ping-Pong)"]
         NotifService["WebSocketForegroundService (LargeIcon + BigPicture Notification)"]
-        SettingsUI["4-Kaarten SettingsScreen (Profiel, AI & Stille Uren, Opslag, Systeem)"]
+        SettingsUI["SettingsScreen (Dynamic Quiet Hours, Unlimited Test Trigger)"]
     end
 
-    CamSensor -->|RTSP| RTSP
+    CamSensor -->|RTSP Poort 554| RTSP
+    CamBtn -->|SDK Alarm Poort 8000| SDKAlarm
+    SDKAlarm -->|Direct Ring Event| Telecom
     RTSP -->|FFmpeg| RingBuffer
     RTSP <-->|WebSocket Stream| WSProxy
     WSProxy -->|Native 25 FPS MSE/WebRTC| LiveView

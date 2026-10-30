@@ -1,32 +1,36 @@
-# Foxway Smart Doorbell System Specification (v2.9.0)
+# Foxway Smart Doorbell System Specification (v3.0.0)
 
-**Versie:** `v2.9.0` (`versionCode = 20`)  
-**Datum:** 29 Oktober 2026  
+**Versie:** `v3.0.0` (`versionCode = 21`)  
+**Datum:** 30 Oktober 2026  
 **Productie-omgeving:** `foxway` (`192.168.2.1`), WAN: `https://deurbel.foxway.nl`  
-**Camera:** EZVIZ DB1 (`192.168.2.31`), native **4:3 aspect ratio** (`768x576` / `960x720`)
+**Camera:** EZVIZ DB1 Pro (`192.168.2.31`), native **4:3 aspect ratio** (`768x576` / `960x720`)
 
 ---
 
 ## 1. Systeemoverzicht & Architectuur
 Het Foxway Deurbelsysteem is een end-to-end, privacy-vriendelijk en ultra-low-latency videodeurbelsysteem bestaande uit:
-1. **EZVIZ DB1 Camera (Poort 8000 C-SDK & RTSP):**
+1. **EZVIZ DB1 Pro Camera (Alleen Poort 8000 C-SDK & Poort 554 RTSP):**
+   - **BELANGRIJK:** Poort 80 (HTTP / ISAPI / ONVIF) is **NIET AANWEZIG** op de camera. Er wordt NOOIT verbonden met poort 80 of `/ISAPI/...`.
    - Native 4:3 beeldsensor met microfoon en luidspreker.
    - Tweeweg-audio gestuurd via `libhcnetsdk.so` C-SDK (`app/audio_bridge.py`) over TCP poort 8000.
+   - **Hardware Drukknop-Detectie:** `NET_DVR_SetupAlarmChan_V41` op poort 8000 vangt hardware intercom- en alarm-events (`COMM_UPLOAD_VIDEO_INTERCOM_EVENT` 0x1132 byEventType=1: Visitor Call) synchroon op (`app/sdk_alarm_listener.py`).
 2. **FastAPI & Python Media Server (`backend` in Docker):**
    - Draait op poort 8090 met `network_mode: host`.
-   - **Zero-UI Live Player op `/api/v1/live/player`:** Eigen lichtgewicht speler gebaseerd op `<zero-player>` en `/api/go2rtc/video-rtc.js`. Toont direct op milliseconde 0 het laatste snapshot (`/api/v1/live/instant.jpg`) als achtergrond/poster, verwijdert alle controls via MutationObserver, verbergt go2rtc overlays via CSS en beschikt over een 1500ms freeze watchdog die bij stilstand direct herverbindt.
+   - **Zero-UI Live Player op `/api/v1/live/player`:** Eigen minimalistische speler gebaseerd op `<zero-player>` en `/api/go2rtc/video-rtc.js`. Toont direct op milliseconde 0 het laatste snapshot (`/api/v1/live/instant.jpg`) als achtergrond/poster, verwijdert alle controls via MutationObserver, verbergt go2rtc badges via CSS en beschikt over een 1500ms freeze watchdog die bij stilstand direct herverbindt.
    - **Onbeperkt Opeenvolgend Deurbel Testen:** `POST /api/v1/webhook/shelly-ring?force=true` omzeilt alle debounces en reset eerdere gespreksstatussen direct om telkens een nieuwe oproep met unieke call_id uit te zenden.
    - **Stille Uren (23:30 - 07:30 Europe/Amsterdam):** AI bewegingsclips worden 's nachts stil opgenomen (`silent = True`, geen pushmelding/FCM), terwijl deurbeloproepen altijd met hoogste prioriteit doorkomen. Instelbaar via `/admin` en de Android app.
-   - **Anti-Car Swap Filter (`app/ai_detector.py`):** `parked_spots` pre-filtering (`IoU >= 0.55` en `changed_pixel_ratio < 0.30` direct afgekeurd) en stap-verplaatsing validatie (`0.02*w <= step_disp <= 0.12*w` met `IoU >= 0.15` tussen opeenvolgende 5 FPS frames) voorkomen dat de detector tussen stilstaande auto's verspringt.
+   - **Anti-Car Swap Filter (`app/ai_detector.py`):** `parked_spots` pre-filtering (`IoU >= 0.55` en `changed_pixel_ratio < 0.30` direct afgekeurd) en strikte stap-verplaatsing validatie over $\ge 3$ opeenvolgende frames (`0.02*w <= step_disp <= 0.12*w` met `IoU >= 0.15` en totale verplaatsing $\ge 14\%$) voorkomen dat de detector tussen stilstaande auto's verspringt.
+   - **Optionele Chime Fallback (`audio_chime_fallback_enabled`):** Standaard uitgeschakeld (`false`) in `system_settings` en `/admin` omdat Poort 8000 C-SDK hardware alarmen en Shelly Plus Uni primair zijn. Bij inschakeling strikt tweefasig 728 Hz -> 580 Hz met 15s cooldown.
    - **2-Fasen Clip Lifecycle (`RECORDING` -> `READY`):** Bij detectie $T_0$ wordt direct synchroon de geverifieerde miniatuurfoto opgeslagen naar `/mnt/opslag/deurbel/clips/thumb_<clip_id>.jpg` (>5 KB). Meteen daarna wordt de clip-rij met `status = "RECORDING"` aangemaakt en pas daarna gaat de push-melding uit. Pas na afronding van de 20s Post-Roll en concat (`.mp4 > 100 KB`, `duration >= 5s`) wordt de status geüpdatet naar `READY`.
    - **Gecentraliseerde SQLite WAL Database (`app/database.py`):** WAL mode met `PRAGMA synchronous=NORMAL;`, `PRAGMA busy_timeout=60000;`, timeout=60.0s en async write lock serialisatie.
-   - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met 25 FPS live preview player, dynamische variabelen, stille uren configuratie, uitsluitingszones canvas en AI inspectie.
+   - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met 25 FPS live preview player, dynamische variabelen, stille uren configuratie, uitsluitingszones canvas, real-time Poort 8000 SDK hardware events viewer en AI inspectie.
 3. **Android Client App (`android-app`):**
-   - Native Jetpack Compose, Kotlin coroutines, versie 2.9.0 (`versionCode = 20`).
+   - Native Jetpack Compose, Kotlin coroutines, versie 3.0.0 (`versionCode = 21`).
    - `WebChromeClient.getDefaultVideoPoster()` retourneert een 1x1 transparante bitmap (0% grijze play-knop).
    - "🔄 Sync Live" knop herlaadt en roept direct `window.reconnectStream()` aan.
-   - Cellular-only WAN lock in `ConnectionManager.kt` en `EndpointResolver.kt` voorkomt LAN ping-pong op mobiele data.
-   - Sluiten van clips in `ClipsScreen.kt` stopt en released ExoPlayer direct en wist deeplink parameters.
+   - **Warm Live Stream Retention:** `LiveScreen` blijft warm bewaard tussen tab-wissels (`MainActivity.kt`), waardoor terugkeren naar Live Kijken 0,0s vertraging geeft.
+   - Cellular-only WAN lock in `ConnectionManager.kt` en `EndpointResolver.kt` voorkomt LAN ping-pong op mobiele data (bij geen Wi-Fi direct en permanent WAN).
+   - Sluiten van clips in `ClipsScreen.kt` stopt en released ExoPlayer direct en wist selectie.
 
 ---
 
