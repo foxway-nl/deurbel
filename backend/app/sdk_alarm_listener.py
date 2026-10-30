@@ -102,7 +102,8 @@ class SDKAlarmListener:
         self._running: bool = False
         self._supervisor_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._lock = threading.Lock()
+        self._channel_lock = threading.Lock()
+        self._events_lock = threading.Lock()
         self._recent_events: Deque[SDKAlarmEvent] = collections.deque(maxlen=100)
         self._last_trigger_ts: float = 0.0
 
@@ -111,7 +112,7 @@ class SDKAlarmListener:
         return self._alarm_handle >= 0 and self._user_id >= 0
 
     def get_recent_events(self) -> List[Dict[str, Any]]:
-        with self._lock:
+        with self._events_lock:
             return [ev.to_dict() for ev in reversed(self._recent_events)]
 
     def _record_event(
@@ -131,7 +132,7 @@ class SDKAlarmListener:
             details=details,
             action_taken=action_taken,
         )
-        with self._lock:
+        with self._events_lock:
             self._recent_events.append(ev)
         return ev
 
@@ -210,7 +211,7 @@ class SDKAlarmListener:
 
     def _setup_channel_sync(self) -> bool:
         """Synchronously log in and open alarm channel via HCNetSDK."""
-        with self._lock:
+        with self._channel_lock:
             try:
                 from app.audio_bridge import _get_sdk, _get_credentials
                 from HCNetSDK.SDK_Struct import NET_DVR_SETUPALARM_PARAM
@@ -344,7 +345,7 @@ class SDKAlarmListener:
         logger.info("Hikvision Port 8000 Hardware Alarm Listener stopped")
 
     def _close_channel_sync(self) -> None:
-        with self._lock:
+        with self._channel_lock:
             if self._sdk is not None:
                 if self._alarm_handle >= 0:
                     try:
