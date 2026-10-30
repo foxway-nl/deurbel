@@ -370,7 +370,7 @@ openapi_tags = [
 
 app = FastAPI(
     title="Foxway Smart Doorbell API",
-    version="3.0.0",
+    version="3.1.2",
     description="Signaling, state management, media proxy, and clip API for the Foxway Doorbell system.",
     openapi_tags=openapi_tags,
     lifespan=lifespan,
@@ -749,13 +749,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "3.0.0",
-        "version_code": 21,
-        "build_time": "2026-10-30T12:00:00Z",
+        "version": "3.1.2",
+        "version_code": 24,
+        "build_time": "2026-10-30T13:55:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.0.0: Port 8000 C-SDK hardware doorbell push button detection, zero ISAPI/port 80 reliance, warm live stream retention, unlimited ring triggers, anti-car swap filter, quiet hours 23:30-07:30",
+        "changelog": "v3.1.2: Strictly verified visitor call hardware alarm (COMM_UPLOAD_VIDEO_INTERCOM_EVENT byEventType==1), generic alarms (0x4000) logged as debug without ghost rings, raw byte hex logging, Zero-UI live player with no MSE badge or controls, unlimited test rings, quiet hours 23:30-07:30, anti-car-swap filter, and WAN-first cellular lock.",
     }
 
 

@@ -139,10 +139,23 @@ class SDKAlarmListener:
     def _c_alarm_callback(self, lCommand: int, pAlarmer: Any, pAlarmInfo: Any, dwBufLen: int, pUser: Any) -> bool:
         """
         Native C callback executed by HCNetSDK worker thread upon hardware event.
+        Strict v3.1.2 logic:
+        - ONLY COMM_UPLOAD_VIDEO_INTERCOM_EVENT with byEventType == 1 triggers a doorbell ring.
+        - COMM_ALARM_V30 (0x4000) and other hardware alarms are generic motion/status alarms and NEVER trigger a ring.
+        - Full hex value of lCommand and first 16 bytes of buffer are logged and recorded.
         """
         try:
             cmd_name = COMMAND_NAMES.get(lCommand, f"0x{lCommand:04x}")
-            logger.info("🔔 [Port 8000 SDK Alarm] Received lCommand=0x%04x (%s), bufLen=%d", lCommand, cmd_name, dwBufLen)
+            raw_bytes = b""
+            if pAlarmInfo and dwBufLen > 0:
+                try:
+                    raw_bytes = ctypes.string_at(pAlarmInfo, min(dwBufLen, 64))
+                except Exception as ex:
+                    logger.debug("Failed reading alarm buffer: %s", ex)
+
+            payload_hex = raw_bytes[:16].hex() if raw_bytes else ""
+            logger.info("🔔 [Port 8000 SDK Alarm] Received lCommand=0x%04x (%s), dwBufLen=%d, payload_hex_16=%s",
+                        lCommand, cmd_name, dwBufLen, payload_hex)
 
             event_type: Optional[int] = None
             event_name: Optional[str] = None
@@ -152,40 +165,46 @@ class SDKAlarmListener:
             # Inspect payload according to command type
             if lCommand == COMM_UPLOAD_VIDEO_INTERCOM_EVENT:
                 # NET_DVR_VIDEO_INTERCOM_EVENT: offset 12 is byEventType
-                if pAlarmInfo and dwBufLen >= 13:
+                if len(raw_bytes) >= 13:
                     try:
-                        raw_bytes = ctypes.string_at(pAlarmInfo, min(dwBufLen, 64))
                         event_type = int(raw_bytes[12])
                         event_name = INTERCOM_EVENT_TYPES.get(event_type, f"IntercomEvent_{event_type}")
-                        details = f"EventType={event_type} ({event_name}), payload_hex={raw_bytes[:16].hex()}"
-                        # byEventType == 1 is Visitor Call (doorbell button pressed)
+                        # byEventType == 1 is strictly Visitor Call (doorbell button pressed)
                         if event_type == 1:
                             is_doorbell_ring = True
+                            details = f"Visitor Call (byEventType=1), payload_hex={payload_hex}"
+                            logger.info("🚨 [Port 8000 SDK Alarm] MATCHED VISITOR CALL! event_type=1 payload_hex=%s", payload_hex)
+                        else:
+                            details = f"Intercom Event (byEventType={event_type} {event_name}), payload_hex={payload_hex} (Not visitor call)"
+                            logger.info("ℹ️ [Port 8000 SDK Alarm] Intercom event_type=%d (%s) - not visitor call", event_type, event_name)
                     except Exception as ex:
-                        details = f"Parsing error: {ex}"
+                        details = f"Parsing error for intercom event: {ex}, payload_hex={payload_hex}"
                 else:
-                    details = f"Video Intercom Event (bufLen={dwBufLen})"
-                    is_doorbell_ring = True
+                    details = f"Video Intercom Event buffer too short (len={len(raw_bytes)}), payload_hex={payload_hex}"
+                    logger.warning("⚠️ [Port 8000 SDK Alarm] COMM_UPLOAD_VIDEO_INTERCOM_EVENT buffer too short (<13 bytes)")
 
             elif lCommand == COMM_ALARM_VIDEO_INTERCOM:
-                details = f"Video Intercom Alarm (bufLen={dwBufLen})"
-                is_doorbell_ring = True
+                # Generic video intercom alarm (e.g. tamper/door status) - NOT a doorbell ring
+                details = f"Video Intercom Alarm (bufLen={dwBufLen}), payload_hex={payload_hex} (Generic Intercom Alarm - Not Ring Trigger)"
+                logger.info("ℹ️ [Port 8000 SDK Alarm] 0x1133 COMM_ALARM_VIDEO_INTERCOM: %s", details)
 
-            elif lCommand in (COMM_ALARM_V30, COMM_ALARM):
-                details = f"Hardware Alarm (bufLen={dwBufLen})"
-                is_doorbell_ring = True
+            elif lCommand in (COMM_ALARM_V30, COMM_ALARM, COMM_ALARM_V40, COMM_ISAPI_ALARM):
+                # Generic hardware / motion / status alarm - NOT a doorbell ring
+                details = f"Hardware Alarm 0x{lCommand:04x} ({cmd_name}, bufLen={dwBufLen}), payload_hex={payload_hex} (Generic Alarm - Not Ring Trigger)"
+                logger.debug("ℹ️ [Port 8000 SDK Alarm] Generic alarm 0x%04x: %s", lCommand, details)
 
             else:
-                details = f"Raw hardware command 0x{lCommand:04x} (bufLen={dwBufLen})"
+                details = f"Raw hardware command 0x{lCommand:04x} (bufLen={dwBufLen}), payload_hex={payload_hex} (Unmapped Command)"
+                logger.debug("ℹ️ [Port 8000 SDK Alarm] Raw hardware command 0x%04x: %s", lCommand, details)
 
-            action = "Logged"
+            action = "Logged (Generic Hardware Alarm, Not Doorbell Ring)"
             if is_doorbell_ring:
                 now = time.time()
                 # 5s debounce on hardware level
                 if (now - self._last_trigger_ts) >= 5.0:
                     self._last_trigger_ts = now
                     action = "Triggered Doorbell Ringing"
-                    logger.info("🚨 [Port 8000 SDK Alarm] DOORBELL PUSHBUTTON DETECTED! Triggering Call State Machine...")
+                    logger.info("🚨 [Port 8000 SDK Alarm] LEGITIMATE DOORBELL PUSHBUTTON DETECTED! Triggering Call State Machine...")
                     if self._loop and self._loop.is_running():
                         try:
                             from app.main import call_sm

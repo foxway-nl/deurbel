@@ -187,7 +187,7 @@ async def test_app_version_v280():
         resp = await client.get("/api/v1/app/version")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["version"] in ("2.8.0", "2.9.0", "3.0.0")
-        assert data["version_code"] in (19, 20, 21)
-        assert ("RECORDING -> READY" in data["changelog"] or "v2.9.0" in data["changelog"] or "v3.0.0" in data["changelog"])
+        assert data["version"] in ("2.8.0", "2.9.0", "3.0.0", "3.1.2")
+        assert data["version_code"] in (19, 20, 21, 24)
+        assert ("RECORDING -> READY" in data["changelog"] or "v2.9.0" in data["changelog"] or "v3.0.0" in data["changelog"] or "v3.1.2" in data["changelog"])
 

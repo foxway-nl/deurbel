@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell Architectuur (v3.0.0)
+# Foxway Smart Doorbell Architectuur (v3.1.2)
 
-Dit document beschrijft de technische opzet en datastromen van versie 3.0.0.
+Dit document beschrijft de technische opzet en datastromen van versie 3.1.2.
 
 > **HARDWARE SPECIFICATIE:** De EZVIZ DB1 Pro (`192.168.2.31`) heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT naar Poort 80 verbonden. Alle camera-interacties verlopen strikt via Poort 554 (RTSP) en Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`).
 
@@ -23,7 +23,7 @@ flowchart TD
         RingBuffer["RAM Ring-Buffer (/dev/shm/deurbel_ring - Unix TS seg_%s.ts)"]
         
         subgraph Backend ["FastAPI Backend (Docker :8090)"]
-            SDKAlarm["Port 8000 SDK Alarm Listener (NET_DVR_SetupAlarmChan_V41)"]
+            SDKAlarm["Port 8000 SDK Alarm Listener (COMM_UPLOAD_VIDEO_INTERCOM_EVENT byEventType==1)"]
             WSProxy["WebSocket Proxy (/api/go2rtc/ws) & Zero-UI Player (/api/v1/live/player)"]
             TemporalAI["Temporal Pixel-Diff AI & Anti-Car Swap (parked_spots pre-filter)"]
             Lifecycle["2-Fasen Clip Lifecycle (RECORDING -> READY)"]
@@ -33,7 +33,7 @@ flowchart TD
         end
     end
 
-    subgraph Client ["Android Toestel (v3.0.0 Build 21)"]
+    subgraph Client ["Android Toestel (v3.1.2 Build 24)"]
         Telecom["Telecom Framework (Instant Deduplication Reset on Hangup)"]
         LiveView["LiveScreen / CallScreen (Warm Retention across Tab Switches)"]
         ClipPlayer["ClipPlayerDialog (Clean ExoPlayer Dismiss & Release)"]

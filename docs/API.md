@@ -1,4 +1,4 @@
-# Foxway Smart Doorbell API Documentatie (v3.0.0)
+# Foxway Smart Doorbell API Documentatie (v3.1.2)
 
 De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8090`, WAN: `https://deurbel.foxway.nl`).
 
@@ -6,10 +6,11 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
 
 ---
 
-## 1. Poort 8000 C-SDK Hardware Alarm Listener (`v3.0.0`)
+## 1. Poort 8000 C-SDK Hardware Alarm Listener (`v3.1.2`)
 
 ### `GET /api/v1/admin/sdk-alarm-events` (en `/api/v1/sdk-alarm-events`)
 - **Beschrijving:** Exposeert de real-time hardware events die via Poort 8000 C-SDK (`NET_DVR_SetupAlarmChan_V41`) binnenkomen.
+- **Filtering:** Alleen `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` (0x1132) met `byEventType == 1` triggert een deurbel-ring. Algemene hardware alarmen (`COMM_ALARM_V30` 0x4000 en `COMM_ALARM_VIDEO_INTERCOM` 0x1133) worden gelogd als diagnostische data en veroorzaken géén valse oproepen.
 - **Output:**
   ```json
   {
@@ -22,7 +23,7 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
         "command_name": "COMM_UPLOAD_VIDEO_INTERCOM_EVENT",
         "event_type": 1,
         "event_name": "Visitor Call (Drukknop Deurbel)",
-        "details": "EventType=1 (Visitor Call (Drukknop Deurbel))",
+        "details": "Visitor Call (byEventType=1), payload_hex=01000000000000000000000001000000",
         "action_taken": "Triggered Doorbell Ringing"
       }
     ]

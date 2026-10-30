@@ -7,12 +7,12 @@ Welkom in het Foxway Smart Doorbell project. Lees deze regels zorgvuldig voordat
 ## 🚨 HARDE ANTI-REGRESSIE REGELS
 
 1. **NOOIT OUDE SPECS GEBRUIKEN:**
-   - De codebase bevindt zich op versie **v3.0.0** (`versionCode = 21`).
-   - Oude documenten over v1.0 / v2.0 / v2.3 / v2.4 / v2.5 / v2.6 / v2.8 / v2.9 mogen nooit leidend zijn.
+   - De codebase bevindt zich op versie **v3.1.2** (`versionCode = 24`).
+   - Oude documenten over v1.0 / v2.0 / v2.3 / v2.4 / v2.5 / v2.6 / v2.8 / v2.9 / v3.0 mogen nooit leidend zijn.
 
 2. **BESCHERMDE KERN-COMPONENTEN & HARDWARE-FEITEN (NIET AANRAKEN):**
    - **Hardware-Feiten EZVIZ DB1 Pro (192.168.2.31):** Poort 80 (HTTP / ISAPI / ONVIF) is **NIET BESCHIKBAAR**! Verbind **NOOIT** met poort 80 of `/ISAPI/...`. De enige open poorten zijn **Poort 554 (RTSP)** en **Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`)**.
-   - **Hardware Drukknop-Detectie (`backend/app/sdk_alarm_listener.py`):** `NET_DVR_SetupAlarmChan_V41` op Poort 8000 vangt hardware intercom/alarm events (`COMM_UPLOAD_VIDEO_INTERCOM_EVENT` 0x1132 byEventType=1, `COMM_ALARM_VIDEO_INTERCOM` 0x1133, `COMM_ALARM_V30` 0x4000) synchroon op en logt elk event.
+   - **Hardware Drukknop-Detectie (`backend/app/sdk_alarm_listener.py`):** `NET_DVR_SetupAlarmChan_V41` op Poort 8000 vangt hardware intercom/alarm events op en logt de exacte command HEX en payload bytes. **Alleen** `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` (0x1132) met `byEventType == 1` triggert een legitieme deurbel-ring. `COMM_ALARM_V30` (0x4000) en `COMM_ALARM_VIDEO_INTERCOM` (0x1133) zijn algemene status/bewegings-alarmeringen en worden uitsluitend als debug gelogd (geen spook-oproepen!).
    - **Tweeweg-Audio (`backend/app/audio_bridge.py`):** De Hikvision Poort 8000 C-SDK (`libhcnetsdk.so`) met pre-warmed login sessies en 1000 Hz loopback FFT test werkt foutloos. Wijzig deze logica NIET.
    - **4:3 Beeldverhouding:** De EZVIZ DB1 heeft een native 4:3 sensor. Alle videostreams, opnames en Android UI-containers (`LiveScreen.kt`, `CallScreen.kt`, `ClipsScreen.kt`, `/admin`) moeten 4:3 blijven.
    - **Zero-UI Live Player & Native Hardware Streaming (go2rtc):** Live streaming verloopt via `/api/v1/live/player` (Zero-UI `<zero-player>` met snapshot-poster op milliseconde 0, geobserveerde controle-vrije weergave, live camera-audio met `window.setAudioMuted()`, automatische freeze-watchdog en JS `reconnectStream()`).

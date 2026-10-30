@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell System Specification (v3.0.0)
+# Foxway Smart Doorbell System Specification (v3.1.2)
 
-**Versie:** `v3.0.0` (`versionCode = 21`)  
+**Versie:** `v3.1.2` (`versionCode = 24`)  
 **Datum:** 30 Oktober 2026  
 **Productie-omgeving:** `foxway` (`192.168.2.1`), WAN: `https://deurbel.foxway.nl`  
 **Camera:** EZVIZ DB1 Pro (`192.168.2.31`), native **4:3 aspect ratio** (`768x576` / `960x720`)
@@ -13,7 +13,7 @@ Het Foxway Deurbelsysteem is een end-to-end, privacy-vriendelijk en ultra-low-la
    - **BELANGRIJK:** Poort 80 (HTTP / ISAPI / ONVIF) is **NIET AANWEZIG** op de camera. Er wordt NOOIT verbonden met poort 80 of `/ISAPI/...`.
    - Native 4:3 beeldsensor met microfoon en luidspreker.
    - Tweeweg-audio gestuurd via `libhcnetsdk.so` C-SDK (`app/audio_bridge.py`) over TCP poort 8000.
-   - **Hardware Drukknop-Detectie:** `NET_DVR_SetupAlarmChan_V41` op poort 8000 vangt hardware intercom- en alarm-events (`COMM_UPLOAD_VIDEO_INTERCOM_EVENT` 0x1132 byEventType=1: Visitor Call) synchroon op (`app/sdk_alarm_listener.py`).
+   - **Hardware Drukknop-Detectie:** `NET_DVR_SetupAlarmChan_V41` op poort 8000 vangt hardware intercom- en alarm-events synchroon op (`app/sdk_alarm_listener.py`). Alleen zuivere `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` (0x1132) met `byEventType == 1` triggert een deurbel-oproep. Algemene alarmen zoals `COMM_ALARM_V30` (0x4000) en `COMM_ALARM_VIDEO_INTERCOM` (0x1133) worden gelogd als diagnostische debug-data en veroorzaken géén spook-oproepen. Raw HEX payloads en commando-codes worden real-time geregistreerd.
 2. **FastAPI & Python Media Server (`backend` in Docker):**
    - Draait op poort 8090 met `network_mode: host`.
    - **Zero-UI Live Player op `/api/v1/live/player`:** Eigen minimalistische speler gebaseerd op `<zero-player>` en `/api/go2rtc/video-rtc.js`. Toont direct op milliseconde 0 het laatste snapshot (`/api/v1/live/instant.jpg`) als achtergrond/poster, verwijdert alle controls via MutationObserver, verbergt go2rtc badges via CSS en beschikt over een 1500ms freeze watchdog die bij stilstand direct herverbindt.
@@ -25,7 +25,7 @@ Het Foxway Deurbelsysteem is een end-to-end, privacy-vriendelijk en ultra-low-la
    - **Gecentraliseerde SQLite WAL Database (`app/database.py`):** WAL mode met `PRAGMA synchronous=NORMAL;`, `PRAGMA busy_timeout=60000;`, timeout=60.0s en async write lock serialisatie.
    - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met 25 FPS live preview player, dynamische variabelen, stille uren configuratie, uitsluitingszones canvas, real-time Poort 8000 SDK hardware events viewer en AI inspectie.
 3. **Android Client App (`android-app`):**
-   - Native Jetpack Compose, Kotlin coroutines, versie 3.0.0 (`versionCode = 21`).
+   - Native Jetpack Compose, Kotlin coroutines, versie 3.1.2 (`versionCode = 24`).
    - `WebChromeClient.getDefaultVideoPoster()` retourneert een 1x1 transparante bitmap (0% grijze play-knop).
    - "🔄 Sync Live" knop herlaadt en roept direct `window.reconnectStream()` aan.
    - **Warm Live Stream Retention:** `LiveScreen` blijft warm bewaard tussen tab-wissels (`MainActivity.kt`), waardoor terugkeren naar Live Kijken 0,0s vertraging geeft.
