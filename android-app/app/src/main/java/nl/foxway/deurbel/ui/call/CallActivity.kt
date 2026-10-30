@@ -170,6 +170,13 @@ class CallActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         isCallActivityVisible = false
+        audioStreamer.stopStreaming()
+        LiveStreamController.getInstance(this).hardKillAudio()
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            audioManager?.mode = AudioManager.MODE_NORMAL
+            audioManager?.isSpeakerphoneOn = false
+        } catch (_: Exception) {}
     }
 
     /**
@@ -226,6 +233,12 @@ class CallActivity : ComponentActivity() {
         DoorbellConnectionService.resetDeduplication()
         DoorbellConnectionService.notifyDisconnected()
         audioStreamer.stopStreaming()
+        LiveStreamController.getInstance(this).hardKillAudio()
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            audioManager?.mode = AudioManager.MODE_NORMAL
+            audioManager?.isSpeakerphoneOn = false
+        } catch (_: Exception) {}
 
         // Line 2: Background network cleanup
         val cid = callId
@@ -261,6 +274,7 @@ class CallActivity : ComponentActivity() {
         isCallActivityVisible = false
         DoorbellConnectionService.resetDeduplication()
         audioStreamer.stopStreaming()
+        LiveStreamController.getInstance(this).hardKillAudio()
         DoorbellConnectionService.silenceRingtone()
         DoorbellConnectionService.cancelCallNotification(this)
 

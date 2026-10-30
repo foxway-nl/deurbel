@@ -1,5 +1,7 @@
 package nl.foxway.deurbel.ui.live
 
+import android.content.Context
+import android.media.AudioManager
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -24,9 +26,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -98,7 +102,6 @@ fun LiveScreen() {
     val audioStreamer = remember { DoorbellAudioStreamer() }
 
     var isPttActive by remember { mutableStateOf(false) }
-    var isFitMode by remember { mutableStateOf(true) }
     var isSpeakerMuted by remember { mutableStateOf(false) }
 
     // Manual recording state
@@ -174,7 +177,7 @@ fun LiveScreen() {
         }
     }
 
-    // Lifecycle binding
+    // Lifecycle binding: Synchronous Hard Kill for all audio on pause/stop/exit
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -183,9 +186,16 @@ fun LiveScreen() {
                         isRecording = false
                     }
                     audioStreamer.stopStreaming()
+                    liveStream.hardKillAudio()
+                    try {
+                        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                        audioManager?.mode = AudioManager.MODE_NORMAL
+                        audioManager?.isSpeakerphoneOn = false
+                    } catch (_: Exception) {}
                 }
                 Lifecycle.Event.ON_RESUME -> {
                     liveStream.start()
+                    liveStream.setAudioMuted(isSpeakerMuted)
                 }
                 else -> {}
             }
@@ -194,6 +204,12 @@ fun LiveScreen() {
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
             audioStreamer.stopStreaming()
+            liveStream.hardKillAudio()
+            try {
+                val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                audioManager?.mode = AudioManager.MODE_NORMAL
+                audioManager?.isSpeakerphoneOn = false
+            } catch (_: Exception) {}
         }
     }
 
@@ -202,18 +218,12 @@ fun LiveScreen() {
     var panOffsetX by remember { mutableFloatStateOf(0f) }
     var panOffsetY by remember { mutableFloatStateOf(0f) }
 
-    LaunchedEffect(isFitMode) {
-        zoomScale = 1f
-        panOffsetX = 0f
-        panOffsetY = 0f
-    }
-
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(BackgroundDark)
     ) {
-        // ── 1. Video Container (Native 4:3 Fit / Fill) ──
+        // ── 1. Video Container (Strict Fixed 4:3 Aspect Ratio) ──
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -221,13 +231,10 @@ fun LiveScreen() {
             contentAlignment = Alignment.Center
         ) {
             Box(
-                modifier = (if (isFitMode) {
-                    Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(4f / 3f)
-                } else {
-                    Modifier.fillMaxSize()
-                })
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(4f / 3f)
+                    .clip(RectangleShape)
                     .graphicsLayer {
                         scaleX = zoomScale
                         scaleY = zoomScale
@@ -474,6 +481,12 @@ fun LiveScreen() {
                     modifier = Modifier.clickable {
                         val next = !isSpeakerMuted
                         isSpeakerMuted = next
+                        try {
+                            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                            audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
+                            audioManager?.isSpeakerphoneOn = !next
+                        } catch (_: Exception) {}
+                        liveStream.setAudioMuted(next)
                         webViewRef?.evaluateJavascript("window.setAudioMuted && window.setAudioMuted($next);", null)
                     }
                 ) {
@@ -483,32 +496,6 @@ fun LiveScreen() {
                             contentDescription = "Deurbel Geluid",
                             tint = if (isSpeakerMuted) CoralDecline else EmeraldPrimary,
                             modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
-
-                // Fit / Fill Toggle
-                Surface(
-                    color = SurfaceGlass,
-                    shape = RoundedCornerShape(20.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, DividerDark),
-                    modifier = Modifier.clickable { isFitMode = !isFitMode }
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (isFitMode) Icons.Default.AspectRatio else Icons.Default.FitScreen,
-                            contentDescription = "Beeldverhouding",
-                            tint = CyanAccent,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = if (isFitMode) "4:3 Fit" else "Fill",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = TextPrimary
                         )
                     }
                 }

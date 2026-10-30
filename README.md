@@ -1,16 +1,16 @@
-# Foxway Smart Doorbell (v3.1.2)
+# Foxway Smart Doorbell (v3.1.4)
 
-[![Version](https://img.shields.io/badge/version-3.1.2-emerald.svg)](https://github.com/foxway-nl/deurbel)
+[![Version](https://img.shields.io/badge/version-3.1.4-emerald.svg)](https://github.com/foxway-nl/deurbel)
 [![Platform](https://img.shields.io/badge/platform-Android%20%7C%20FastAPI%20%7C%20Docker-blue.svg)](https://github.com/foxway-nl/deurbel)
 [![Aspect Ratio](https://img.shields.io/badge/aspect_ratio-4%3A3_native-orange.svg)](https://github.com/foxway-nl/deurbel)
 
-Productie-oplossing voor de **EZVIZ DB1 Pro** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, synchrone hardware drukknop-detectie via Poort 8000 C-SDK (`NET_DVR_SetupAlarmChan_V41`), strikte eliminatie van spook-alarmen (`COMM_ALARM_V30` 0x4000 en 0x1133 uitsluitend als debug gelogd, alleen `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` 0x1132 byEventType=1 triggert bel-actie), Zero-UI live speler met milliseconde 0 snapshot-poster, onbeperkte opeenvolgende deurbeltriggers, stille uren (23:30 - 07:30 Europe/Amsterdam), anti-parked-car swap AI-bescherming, 2-fasen clip lifecycle (`RECORDING` -> `READY`), directe push-notificatie miniatuurfoto's, native go2rtc hardware-streaming (MSE + WebRTC) over LAN en 5G/Cloudflare WSS (0ms lag, 25 FPS), warm live stream retention tussen tab-wissels, SQLite WAL database concurrency, en het snelle YOLOv8n Temporal Pixel-Diff Masking AI-detectie model (5 FPS, <45ms).
+Productie-oplossing voor de **EZVIZ DB1 Pro** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, synchrone hardware drukknop-detectie via Poort 8000 C-SDK (`NET_DVR_SetupAlarmChan_V41`), strikte eliminatie van spook-alarmen (`COMM_ALARM_V30` 0x4000 en 0x1133 uitsluitend als debug gelogd, alleen `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` 0x1132 byEventType=1 triggert bel-actie), volledige uitfasering van akoestische chime-detectie (puur hardware-only), synchrone audio hard-kill bij verlaten van schermen, Zero-UI live speler met milliseconde 0 snapshot-poster, onbeperkte opeenvolgende deurbeltriggers, stille uren (23:30 - 07:30 Europe/Amsterdam), anti-parked-car swap AI-bescherming, 2-fasen clip lifecycle (`RECORDING` -> `READY`), directe push-notificatie miniatuurfoto's, native go2rtc hardware-streaming (MSE + WebRTC) over LAN en 5G/Cloudflare WSS (0ms lag, 25 FPS), warm live stream retention tussen tab-wissels, SQLite WAL database concurrency, en het snelle YOLOv8n Temporal Pixel-Diff Masking AI-detectie model (5 FPS, <45ms).
 
 > **BELANGRIJK:** De EZVIZ DB1 Pro heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT met poort 80 of `/ISAPI/...` verbonden. De enige open hardware-poorten zijn **Poort 554 (RTSP)** en **Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`)**.
 
 ---
 
-## ⚡ Kernfunctionaliteiten in v3.1.2
+## ⚡ Kernfunctionaliteiten in v3.1.4
 
 1. **Poort 8000 C-SDK Hardware Drukknop-Detectie (`sdk_alarm_listener.py`):**
    - Registreert een C-callback (`NET_DVR_SetDVRMessageCallBack_V31`) en opent het alarmkanaal (`NET_DVR_SetupAlarmChan_V41`) over Poort 8000.
@@ -18,9 +18,17 @@ Productie-oplossing voor de **EZVIZ DB1 Pro** deurbel met native 4:3 beeldsensor
    - Algemene hardware alarmen zoals `COMM_ALARM_V30` (0x4000) en `COMM_ALARM_VIDEO_INTERCOM` (0x1133) worden gelogd als debug-melding en triggeren NOOIT een deurbel-ring (100% vrij van spook-oproepen!).
    - Logt élke byte van binnenkomende commando's en eerste 16 bytes hex payload in real-time in logs en `/admin`.
    - Secundaire fysieke Shelly Plus Uni webhook (`/api/v1/webhook/shelly-ring?force=true`) blijft 100% actief.
-   - Optionele akoestische chime fallback (`audio_chime_fallback_enabled`) staat standaard uit en kan in `/admin` geactiveerd worden.
+   - Akoestische chime-detectie is volledig en definitief uit de codebase gesloopt: 100% hardware betrouwbaarheid.
 
-2. **Warm Live Stream Retention tussen Tab-Wissels (`MainActivity.kt` & `LiveScreen.kt`):**
+2. **Synchrone Audio Hard-Kill & Speaker Beheer (`LiveScreen.kt`, `CallScreen.kt`, `CallActivity.kt`):**
+   - Bij het verlaten van het belscherm, wisselen van tab of minimaliseren van de app (`onStop()`, `onPause()`, `onDestroy()`) wordt alle camera-audio via `hardKillAudio()` direct synchroon afgebroken.
+   - Luidsprekerknop stuurt nu direct `AudioManager.isSpeakerphoneOn` aan voor directe audio-routing controle.
+
+3. **Strikte 4:3 Aspect Ratio Container (`LiveScreen.kt` & `CallScreen.kt`):**
+   - Alle video-oppervlakken in de app zijn vastgezet op de native 4:3 beeldsensorverhouding via `.fillMaxWidth().aspectRatio(4f / 3f).clip(RectangleShape)`.
+   - Alle uitrek- en pasmodi knoppen zijn verwijderd om beeldvervorming permanent te voorkomen.
+
+4. **Warm Live Stream Retention tussen Tab-Wissels (`MainActivity.kt` & `LiveScreen.kt`):**
    - De `WebView` instance blijft op de achtergrond warm behouden bij het wisselen tussen tabbladen (Live Kijken, Opnames, Instellingen).
    - Terugkeren naar Live Kijken geeft 0,0s vertraging (geen 4 seconden her-buffering meer).
 

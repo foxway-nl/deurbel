@@ -337,15 +337,11 @@ async def init_db() -> None:
             ("max_active_motion_seconds", "30", "Maximale actieve bewegingsduur tijdens opname (sec)"),
             ("max_clip_seconds", "70", "Totale maximale clipduur (sec)"),
             ("event_cooldown_seconds", "8", "Afkoelperiode tussen opeenvolgende meldingen (sec)"),
-            ("ring_ding_hz", "728", "Frequentie Ding toonbel (Hz)"),
-            ("ring_dong_hz", "580", "Frequentie Dong toonbel (Hz)"),
-            ("ring_sharpness", "4.5", "Scherpte / resonantiefactor toonbel"),
             ("exclusion_zones", "[]", "JSON lijst van gemaskeerde zones [x1, y1, x2, y2]"),
             ("admin_password", "foxway2024", "Beheerderswachtwoord voor /admin"),
             ("quiet_hours_enabled", "true", "Stille uren inschakelen (geen pushmeldingen voor beweging)"),
             ("quiet_hours_start", "23:30", "Begintijd stille uren (HH:MM)"),
             ("quiet_hours_end", "07:30", "Eindtijd stille uren (HH:MM)"),
-            ("audio_chime_fallback_enabled", "false", "Optionele microfoon chime-verificatie inschakelen (standaard uit bij Poort 8000)"),
         ]
         for k, v, desc in default_settings:
             try:
@@ -356,8 +352,9 @@ async def init_db() -> None:
             except Exception:
                 pass
 
-        # Migration to v2.6.0 & v2.9.0: update defaults
+        # Migration to v2.6.0, v2.9.0 & v3.1.4: update defaults and purge acoustic chime
         try:
+            await db.execute("DELETE FROM system_settings WHERE key IN ('audio_chime_fallback_enabled', 'ring_ding_hz', 'ring_dong_hz', 'ring_sharpness')")
             await db.execute("UPDATE system_settings SET value = '20' WHERE key = 'pre_roll_seconds' AND value = '6'")
             await db.execute("UPDATE system_settings SET value = '20' WHERE key = 'post_roll_seconds' AND value = '5'")
             await db.execute("UPDATE system_settings SET value = '2' WHERE key = 'verify_frames_required'")
@@ -375,10 +372,6 @@ async def init_db() -> None:
             )
             await db.execute(
                 "INSERT OR IGNORE INTO system_settings (key, value, description, updated_at) VALUES ('quiet_hours_end', '07:30', 'Eindtijd stille uren (HH:MM)', ?)",
-                (now_iso,),
-            )
-            await db.execute(
-                "INSERT OR IGNORE INTO system_settings (key, value, description, updated_at) VALUES ('audio_chime_fallback_enabled', 'false', 'Optionele microfoon chime-verificatie inschakelen (standaard uit bij Poort 8000)', ?)",
                 (now_iso,),
             )
             await db.execute("ALTER TABLE events ADD COLUMN silent INTEGER DEFAULT 0")

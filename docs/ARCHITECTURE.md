@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell Architectuur (v3.1.2)
+# Foxway Smart Doorbell Architectuur (v3.1.4)
 
-Dit document beschrijft de technische opzet en datastromen van versie 3.1.2.
+Dit document beschrijft de technische opzet en datastromen van versie 3.1.4.
 
 > **HARDWARE SPECIFICATIE:** De EZVIZ DB1 Pro (`192.168.2.31`) heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT naar Poort 80 verbonden. Alle camera-interacties verlopen strikt via Poort 554 (RTSP) en Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`).
 
@@ -33,9 +33,9 @@ flowchart TD
         end
     end
 
-    subgraph Client ["Android Toestel (v3.1.2 Build 24)"]
+    subgraph Client ["Android Toestel (v3.1.4 Build 26)"]
         Telecom["Telecom Framework (Instant Deduplication Reset on Hangup)"]
-        LiveView["LiveScreen / CallScreen (Warm Retention across Tab Switches)"]
+        LiveView["LiveScreen / CallScreen (Strict 4:3 Container & Sync Audio Hard-Kill)"]
         ClipPlayer["ClipPlayerDialog (Clean ExoPlayer Dismiss & Release)"]
         ConnMgr["ConnectionManager (Cellular-Only WAN Lock, 0ms Ping-Pong)"]
         NotifService["WebSocketForegroundService (LargeIcon + BigPicture Notification)"]

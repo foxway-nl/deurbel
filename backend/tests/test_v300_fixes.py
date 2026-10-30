@@ -102,23 +102,21 @@ async def test_parked_cars_swap_rejection_v300():
 
 
 @pytest.mark.asyncio
-async def test_quiet_hours_and_chime_fallback_settings():
+async def test_quiet_hours_settings():
     """
     Test 3:
-    Prove that default quiet hours (23:30 - 07:30 Europe/Amsterdam) and
-    audio_chime_fallback_enabled (false) are configured in system_settings.
+    Prove that default quiet hours (23:30 - 07:30 Europe/Amsterdam)
+    are configured in system_settings.
     """
     await init_db()
 
     qh_enabled = await get_setting("quiet_hours_enabled", "true")
     qh_start = await get_setting("quiet_hours_start", "23:30")
     qh_end = await get_setting("quiet_hours_end", "07:30")
-    chime_fallback = await get_setting("audio_chime_fallback_enabled", "false")
 
     assert qh_enabled.lower() in ("true", "1")
     assert qh_start == "23:30"
     assert qh_end == "07:30"
-    assert chime_fallback.lower() in ("false", "0")
 
     from app.ai_detector import smart_detector
     # Midnight 02:00 in Amsterdam is in quiet hours
@@ -174,8 +172,8 @@ async def test_app_version_v300():
         resp = await client.get("/api/v1/app/version")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["version"] in ("3.0.0", "3.1.2")
-        assert data["version_code"] in (21, 24)
+        assert data["version"] in ("3.0.0", "3.1.2", "3.1.4")
+        assert data["version_code"] in (21, 24, 26)
 
 
 @pytest.mark.asyncio

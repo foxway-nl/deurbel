@@ -53,7 +53,6 @@ from app.audio_bridge import (
 )
 
 from app.ai_detector import smart_detector, DetectionSettings
-from app.ring_detector import ring_detector
 from app.live_hub import live_hub
 from app.config import settings
 from app.mdns_service import mdns_service
@@ -296,12 +295,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not start smart detector: %s", e)
 
-    # Start native 728 Hz software ring detector
-    try:
-        await ring_detector.start()
-    except Exception as e:
-        logger.warning("Could not start ring detector: %s", e)
-
     # Start Hikvision Port 8000 C-SDK hardware doorbell pushbutton listener
     try:
         from app.sdk_alarm_listener import sdk_alarm_listener
@@ -343,10 +336,6 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     try:
-        await ring_detector.stop()
-    except Exception:
-        pass
-    try:
         from app.sdk_alarm_listener import sdk_alarm_listener
         await sdk_alarm_listener.stop()
     except Exception:
@@ -370,7 +359,7 @@ openapi_tags = [
 
 app = FastAPI(
     title="Foxway Smart Doorbell API",
-    version="3.1.2",
+    version="3.1.4",
     description="Signaling, state management, media proxy, and clip API for the Foxway Doorbell system.",
     openapi_tags=openapi_tags,
     lifespan=lifespan,
@@ -749,13 +738,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "3.1.2",
-        "version_code": 24,
-        "build_time": "2026-10-30T13:55:00Z",
+        "version": "3.1.4",
+        "version_code": 26,
+        "build_time": "2026-10-30T14:40:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.1.2: Strictly verified visitor call hardware alarm (COMM_UPLOAD_VIDEO_INTERCOM_EVENT byEventType==1), generic alarms (0x4000) logged as debug without ghost rings, raw byte hex logging, Zero-UI live player with no MSE badge or controls, unlimited test rings, quiet hours 23:30-07:30, anti-car-swap filter, and WAN-first cellular lock.",
+        "changelog": "v3.1.4: Permanent eradication of acoustic chime detection, pure hardware triggers (Port 8000 C-SDK and Shelly webhook), synchronous audio hard kill on screen exit, and strict unyielding 4:3 aspect ratio container.",
     }
 
 
@@ -800,7 +789,7 @@ async def shelly_ring_status():
     wan_url = await get_dynamic_wan_url()
     return {
         "status": "active",
-        "detector": "Aanbel-script actief (Luistert naar 728 Hz chime signature)",
+        "detector": "Hardware Interrupt actief (Poort 8000 C-SDK COMM_UPLOAD_VIDEO_INTERCOM_EVENT + Shelly Webhook)",
         "webhook_url_lan": f"http://{local_ip}:{settings.HOST_PORT}/api/v1/webhook/shelly-ring",
         "webhook_url_wan": f"{wan_url}/api/v1/webhook/shelly-ring",
         "instruction": "Configureer in Shelly Plus Uni Web UI -> Input 0 -> Actions -> Button Pressed URL",
@@ -1799,7 +1788,6 @@ class DetectionSettingsModel(BaseModel):
     quiet_hours_enabled: bool = True
     quiet_hours_start: str = "23:30"
     quiet_hours_end: str = "07:30"
-    audio_chime_fallback_enabled: bool = False
     activity_zone_top_ignore_percent: int = 20
     motion_sensitivity: float = 1.5
 

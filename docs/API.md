@@ -1,4 +1,4 @@
-# Foxway Smart Doorbell API Documentatie (v3.1.2)
+# Foxway Smart Doorbell API Documentatie (v3.1.4)
 
 De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8090`, WAN: `https://deurbel.foxway.nl`).
 
@@ -6,7 +6,7 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
 
 ---
 
-## 1. Poort 8000 C-SDK Hardware Alarm Listener (`v3.1.2`)
+## 1. Poort 8000 C-SDK Hardware Alarm Listener (`v3.1.4`)
 
 ### `GET /api/v1/admin/sdk-alarm-events` (en `/api/v1/sdk-alarm-events`)
 - **Beschrijving:** Exposeert de real-time hardware events die via Poort 8000 C-SDK (`NET_DVR_SetupAlarmChan_V41`) binnenkomen.

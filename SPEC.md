@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell System Specification (v3.1.2)
+# Foxway Smart Doorbell System Specification (v3.1.4)
 
-**Versie:** `v3.1.2` (`versionCode = 24`)  
+**Versie:** `v3.1.4` (`versionCode = 26`)  
 **Datum:** 30 Oktober 2026  
 **Productie-omgeving:** `foxway` (`192.168.2.1`), WAN: `https://deurbel.foxway.nl`  
 **Camera:** EZVIZ DB1 Pro (`192.168.2.31`), native **4:3 aspect ratio** (`768x576` / `960x720`)
@@ -20,12 +20,14 @@ Het Foxway Deurbelsysteem is een end-to-end, privacy-vriendelijk en ultra-low-la
    - **Onbeperkt Opeenvolgend Deurbel Testen:** `POST /api/v1/webhook/shelly-ring?force=true` omzeilt alle debounces en reset eerdere gespreksstatussen direct om telkens een nieuwe oproep met unieke call_id uit te zenden.
    - **Stille Uren (23:30 - 07:30 Europe/Amsterdam):** AI bewegingsclips worden 's nachts stil opgenomen (`silent = True`, geen pushmelding/FCM), terwijl deurbeloproepen altijd met hoogste prioriteit doorkomen. Instelbaar via `/admin` en de Android app.
    - **Anti-Car Swap Filter (`app/ai_detector.py`):** `parked_spots` pre-filtering (`IoU >= 0.55` en `changed_pixel_ratio < 0.30` direct afgekeurd) en strikte stap-verplaatsing validatie over $\ge 3$ opeenvolgende frames (`0.02*w <= step_disp <= 0.12*w` met `IoU >= 0.15` en totale verplaatsing $\ge 14\%$) voorkomen dat de detector tussen stilstaande auto's verspringt.
-   - **Optionele Chime Fallback (`audio_chime_fallback_enabled`):** Standaard uitgeschakeld (`false`) in `system_settings` en `/admin` omdat Poort 8000 C-SDK hardware alarmen en Shelly Plus Uni primair zijn. Bij inschakeling strikt tweefasig 728 Hz -> 580 Hz met 15s cooldown.
+   - **Geen Akoestische Chime (Hardware-Only):** Akoestische / FFT-gebaseerde chime-detectie (`ring_detector.py`) is definitief en volledig verwijderd. Alleen hardware triggers (Poort 8000 C-SDK `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` met `byEventType == 1` en Shelly Plus Uni webhook) zijn actief.
    - **2-Fasen Clip Lifecycle (`RECORDING` -> `READY`):** Bij detectie $T_0$ wordt direct synchroon de geverifieerde miniatuurfoto opgeslagen naar `/mnt/opslag/deurbel/clips/thumb_<clip_id>.jpg` (>5 KB). Meteen daarna wordt de clip-rij met `status = "RECORDING"` aangemaakt en pas daarna gaat de push-melding uit. Pas na afronding van de 20s Post-Roll en concat (`.mp4 > 100 KB`, `duration >= 5s`) wordt de status geüpdatet naar `READY`.
    - **Gecentraliseerde SQLite WAL Database (`app/database.py`):** WAL mode met `PRAGMA synchronous=NORMAL;`, `PRAGMA busy_timeout=60000;`, timeout=60.0s en async write lock serialisatie.
    - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met 25 FPS live preview player, dynamische variabelen, stille uren configuratie, uitsluitingszones canvas, real-time Poort 8000 SDK hardware events viewer en AI inspectie.
 3. **Android Client App (`android-app`):**
-   - Native Jetpack Compose, Kotlin coroutines, versie 3.1.2 (`versionCode = 24`).
+   - Native Jetpack Compose, Kotlin coroutines, versie 3.1.4 (`versionCode = 26`).
+   - **Strikte 4:3 Aspect Ratio Container:** `LiveScreen.kt` en `CallScreen.kt` hanteren een harde, onwrikbare `.fillMaxWidth().aspectRatio(4f / 3f).clip(RectangleShape)` container zonder vervormende rekking of uitrek-toggles.
+   - **Synchrone Hard-Kill voor Audio:** Bij schermwissels, minimaliseren (`onStop()`, `onPause()`, `onDestroy()`) of ophangen stopt alle audio onmiddellijk via `hardKillAudio()`, en wordt de luidsprekerstatus direct gesynchroniseerd via `AudioManager.isSpeakerphoneOn`.
    - `WebChromeClient.getDefaultVideoPoster()` retourneert een 1x1 transparante bitmap (0% grijze play-knop).
    - "🔄 Sync Live" knop herlaadt en roept direct `window.reconnectStream()` aan.
    - **Warm Live Stream Retention:** `LiveScreen` blijft warm bewaard tussen tab-wissels (`MainActivity.kt`), waardoor terugkeren naar Live Kijken 0,0s vertraging geeft.

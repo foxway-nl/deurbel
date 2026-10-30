@@ -249,6 +249,10 @@ class LiveStreamController private constructor(private val context: Context) {
         }
     }
 
+    fun hardKillAudio() {
+        stop()
+    }
+
     fun setAudioMuted(muted: Boolean) {
         _isAudioMuted.value = muted
         if (!muted) {

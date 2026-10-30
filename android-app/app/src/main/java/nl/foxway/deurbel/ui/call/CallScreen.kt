@@ -22,6 +22,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -71,10 +72,11 @@ fun CallScreen(
     val frame by liveStream.currentBitmap.collectAsState()
     val isConnected by liveStream.isConnected.collectAsState()
 
-    var isFitMode by remember { mutableStateOf(true) }
-
-    LaunchedEffect(Unit) {
+    DisposableEffect(Unit) {
         liveStream.start()
+        onDispose {
+            liveStream.hardKillAudio()
+        }
     }
 
     // Automatically manage audio mute: muted when ringing (so beltoon is clear), unmuted when answered or speaker on
@@ -96,21 +98,17 @@ fun CallScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // ── 1. Live Video Stream Container (4:3 Native Aspect Ratio) ──
+        // ── 1. Live Video Stream Container (Strict Fixed 4:3 Aspect Ratio) ──
         Box(
             modifier = Modifier
                 .fillMaxSize(),
             contentAlignment = Alignment.Center
         ) {
             Box(
-                modifier = if (isFitMode) {
-                    Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(4f / 3f)
-                        .clipToBounds()
-                } else {
-                    Modifier.fillMaxSize()
-                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(4f / 3f)
+                    .clip(RectangleShape),
                 contentAlignment = Alignment.Center
             ) {
                 AndroidView(
@@ -201,31 +199,6 @@ fun CallScreen(
                         else "Aanbellen • Live beeld",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold,
-                        color = Color.White
-                    )
-                }
-            }
-
-            Surface(
-                color = Color(0xCC1E293B),
-                shape = RoundedCornerShape(20.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
-                modifier = Modifier.clickable { isFitMode = !isFitMode }
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Icon(
-                        imageVector = if (isFitMode) Icons.Default.AspectRatio else Icons.Default.FitScreen,
-                        contentDescription = "Beeldverhouding",
-                        tint = Color(0xFF38BDF8),
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Text(
-                        text = if (isFitMode) "4:3 Fit" else "Fill",
-                        style = MaterialTheme.typography.labelSmall,
                         color = Color.White
                     )
                 }

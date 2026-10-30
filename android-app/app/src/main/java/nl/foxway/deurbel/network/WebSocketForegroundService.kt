@@ -104,6 +104,9 @@ class WebSocketForegroundService : Service() {
         eventCollectorJob?.cancel()
         pollJob?.cancel()
         persistentWebSocket.stop()
+        try {
+            LiveStreamController.getInstance(applicationContext).hardKillAudio()
+        } catch (_: Exception) {}
         serviceScope.cancel()
         Log.i(TAG, "Service destroyed")
     }
