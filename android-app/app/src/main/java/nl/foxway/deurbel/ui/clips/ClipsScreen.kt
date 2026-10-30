@@ -23,6 +23,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -795,7 +796,6 @@ private fun ClipPlayerDialog(
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
-    var isFitMode by remember { mutableStateOf(true) }
     var controlsVisible by remember { mutableStateOf(true) }
 
     var isPlaying by remember { mutableStateOf(true) }
@@ -870,8 +870,20 @@ private fun ClipPlayerDialog(
         onDismiss()
     }
 
-    DisposableEffect(Unit) {
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE || event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
+                try {
+                    exoPlayer.stop()
+                    exoPlayer.clearMediaItems()
+                    exoPlayer.release()
+                } catch (_: Exception) {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
             try {
                 exoPlayer.stop()
                 exoPlayer.clearMediaItems()
@@ -892,123 +904,154 @@ private fun ClipPlayerDialog(
                 .fillMaxSize()
                 .background(Color.Black)
         ) {
-            // ── 1. Video Container with Pinch-to-Zoom (up to 5x), Pan & Double-tap Reset ──
+            // ── 1. Video Container (Strict Fixed 4:3 Aspect Ratio with Hardware Surface Zoom & Pan) ──
+            var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
+
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .pointerInput(Unit) {
-                        detectTapGestures(
-                            onDoubleTap = {
-                                scale = 1f
-                                offsetX = 0f
-                                offsetY = 0f
-                            },
-                            onTap = {
-                                controlsVisible = !controlsVisible
-                            }
-                        )
-                    }
-                    .pointerInput(Unit) {
-                        detectTransformGestures { _, pan, zoom, _ ->
-                            val newScale = (scale * zoom).coerceIn(1f, 5f)
-                            scale = newScale
-                            if (newScale > 1f) {
-                                offsetX = (offsetX + pan.x).coerceIn(-1200f * (newScale - 1f), 1200f * (newScale - 1f))
-                                offsetY = (offsetY + pan.y).coerceIn(-1200f * (newScale - 1f), 1200f * (newScale - 1f))
-                            } else {
-                                offsetX = 0f
-                                offsetY = 0f
-                            }
-                        }
-                    }
-                    .graphicsLayer {
-                        scaleX = scale
-                        scaleY = scale
-                        translationX = offsetX
-                        translationY = offsetY
-                    },
+                    .fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
-                if (!isRecordingState) {
-                    AndroidView(
-                        factory = { ctx ->
-                            PlayerView(ctx).apply {
-                                player = exoPlayer
-                                useController = false
-                                setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
-                                resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
-                                else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                            }
-                        },
-                        update = { view ->
-                            view.player = exoPlayer
-                            view.resizeMode = if (isFitMode) AspectRatioFrameLayout.RESIZE_MODE_FIT
-                            else AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                        },
-                        modifier = if (isFitMode) {
-                            Modifier
-                                .fillMaxWidth()
-                                .aspectRatio(4f / 3f)
-                        } else {
-                            Modifier.fillMaxSize()
-                        }
-                    )
-                } else {
-                    // Recording in progress! Show snapshot background + neat status overlay (TAAK 2.1)
-                    val fullThumbUrl = if (currentClip.thumbnailUrl.isNotBlank()) {
-                        if (currentClip.thumbnailUrl.startsWith("http")) currentClip.thumbnailUrl else "$baseUrl${currentClip.thumbnailUrl}"
-                    } else if (currentClip.snapshotUrl.isNotBlank()) {
-                        if (currentClip.snapshotUrl.startsWith("http")) currentClip.snapshotUrl else "$baseUrl${currentClip.snapshotUrl}"
-                    } else "$baseUrl/api/v1/clips/${currentClip.id}/thumbnail"
-
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(4f / 3f)
-                            .background(Color.Black),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        AsyncImage(
-                            model = fullThumbUrl,
-                            contentDescription = "Live snapshot preview",
-                            contentScale = ContentScale.Fit,
-                            modifier = Modifier.fillMaxSize()
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(4f / 3f)
+                        .background(Color.Black)
+                        .clipToBounds(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (!isRecordingState) {
+                        AndroidView(
+                            factory = { ctx ->
+                                PlayerView(ctx).apply {
+                                    player = exoPlayer
+                                    useController = false
+                                    setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
+                                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                    playerViewRef = this
+                                }
+                            },
+                            update = { view ->
+                                view.player = exoPlayer
+                                view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                playerViewRef = view
+                                try {
+                                    view.videoSurfaceView?.scaleX = scale
+                                    view.videoSurfaceView?.scaleY = scale
+                                    view.videoSurfaceView?.translationX = offsetX
+                                    view.videoSurfaceView?.translationY = offsetY
+                                } catch (_: Exception) {}
+                            },
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    scaleX = scale
+                                    scaleY = scale
+                                    translationX = offsetX
+                                    translationY = offsetY
+                                }
                         )
+                    } else {
+                        // Recording in progress! Show snapshot background + neat status overlay
+                        val fullThumbUrl = if (currentClip.thumbnailUrl.isNotBlank()) {
+                            if (currentClip.thumbnailUrl.startsWith("http")) currentClip.thumbnailUrl else "$baseUrl${currentClip.thumbnailUrl}"
+                        } else if (currentClip.snapshotUrl.isNotBlank()) {
+                            if (currentClip.snapshotUrl.startsWith("http")) currentClip.snapshotUrl else "$baseUrl${currentClip.snapshotUrl}"
+                        } else "$baseUrl/api/v1/clips/${currentClip.id}/thumbnail"
+
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .background(Color.Black.copy(alpha = 0.45f))
-                        )
-                        Surface(
-                            color = Color(0xDD0F172A),
-                            shape = RoundedCornerShape(16.dp),
-                            border = androidx.compose.foundation.BorderStroke(1.5.dp, Color(0xFFEF4444)),
-                            modifier = Modifier.padding(16.dp)
+                                .background(Color.Black),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Column(
-                                modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            AsyncImage(
+                                model = fullThumbUrl,
+                                contentDescription = "Live snapshot preview",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black.copy(alpha = 0.45f))
+                            )
+                            Surface(
+                                color = Color(0xDD0F172A),
+                                shape = RoundedCornerShape(16.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.5.dp, Color(0xFFEF4444)),
+                                modifier = Modifier.padding(16.dp)
                             ) {
-                                CircularProgressIndicator(
-                                    color = Color(0xFFEF4444),
-                                    modifier = Modifier.size(32.dp),
-                                    strokeWidth = 3.dp
-                                )
-                                Text(
-                                    text = "🔴 Opname wordt nog afgerond (20s na-opname)...",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White
-                                )
-                                Text(
-                                    text = "Nog enkele seconden geduld",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFF94A3B8)
-                                )
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    CircularProgressIndicator(
+                                        color = Color(0xFFEF4444),
+                                        modifier = Modifier.size(32.dp),
+                                        strokeWidth = 3.dp
+                                    )
+                                    Text(
+                                        text = "🔴 Opname wordt nog afgerond (20s na-opname)...",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = "Nog enkele seconden geduld",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                }
                             }
                         }
                     }
+
+                    // Transparent Gesture Overlay on top of PlayerView
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .pointerInput(Unit) {
+                                detectTapGestures(
+                                    onDoubleTap = {
+                                        scale = 1f
+                                        offsetX = 0f
+                                        offsetY = 0f
+                                        try {
+                                            playerViewRef?.videoSurfaceView?.scaleX = 1f
+                                            playerViewRef?.videoSurfaceView?.scaleY = 1f
+                                            playerViewRef?.videoSurfaceView?.translationX = 0f
+                                            playerViewRef?.videoSurfaceView?.translationY = 0f
+                                        } catch (_: Exception) {}
+                                    },
+                                    onTap = {
+                                        controlsVisible = !controlsVisible
+                                    }
+                                )
+                            }
+                            .pointerInput(Unit) {
+                                detectTransformGestures { _, pan, zoom, _ ->
+                                    val newScale = (scale * zoom).coerceIn(1f, 5f)
+                                    scale = newScale
+                                    if (newScale > 1f) {
+                                        val maxPanX = (size.width * (newScale - 1f)) / 2f
+                                        val maxPanY = (size.height * (newScale - 1f)) / 2f
+                                        offsetX = (offsetX + pan.x).coerceIn(-maxPanX, maxPanX)
+                                        offsetY = (offsetY + pan.y).coerceIn(-maxPanY, maxPanY)
+                                    } else {
+                                        offsetX = 0f
+                                        offsetY = 0f
+                                    }
+                                    try {
+                                        playerViewRef?.videoSurfaceView?.scaleX = scale
+                                        playerViewRef?.videoSurfaceView?.scaleY = scale
+                                        playerViewRef?.videoSurfaceView?.translationX = offsetX
+                                        playerViewRef?.videoSurfaceView?.translationY = offsetY
+                                    } catch (_: Exception) {}
+                                }
+                            }
+                    )
                 }
             }
 
@@ -1044,33 +1087,6 @@ private fun ClipPlayerDialog(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Fit / Fill toggle button
-                        Surface(
-                            color = Color(0xCC1E293B),
-                            shape = RoundedCornerShape(18.dp),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
-                            modifier = Modifier.clickable {
-                                isFitMode = !isFitMode
-                            }
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Icon(
-                                    imageVector = if (isFitMode) Icons.Default.AspectRatio else Icons.Default.FitScreen,
-                                    contentDescription = "Beeldverhouding",
-                                    tint = CyanAccent,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Text(
-                                    text = if (isFitMode) "Fit" else "Fill",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color.White
-                                )
-                            }
-                        }
 
                         // Close (X) button
                         IconButton(

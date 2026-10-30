@@ -738,13 +738,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "3.1.4",
-        "version_code": 26,
-        "build_time": "2026-10-30T14:40:00Z",
+        "version": "3.2.0",
+        "version_code": 27,
+        "build_time": "2026-10-30T16:00:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.1.4: Permanent eradication of acoustic chime detection, pure hardware triggers (Port 8000 C-SDK and Shelly webhook), synchronous audio hard kill on screen exit, and strict unyielding 4:3 aspect ratio container.",
+        "changelog": "v3.2.0: Port 8000 C-SDK hardware doorbell pushbutton detection (0x1132 & 0x1133 byte 44), audio hard-kill on all screen/app exits, pinch-to-zoom & pan in live & clips, elimination of background instant.jpg polling, strict 4:3 object-fit fill player.",
     }
 
 
@@ -1426,7 +1426,7 @@ async def proxy_go2rtc_asset(asset_name: str):
 async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(False)):
     """
     Clean Zero-UI fullscreen 4:3 HTML5 player for native go2rtc hardware streaming (MSE + WebRTC).
-    Zero controls, instant snapshot poster at millisecond 0, live audio support, automatic freeze watchdog & JS reconnect.
+    Zero controls, object-fit fill, buffer lag compensation, audio mute toggle, killStream & setVideoZoom.
     """
     is_muted_attr = "muted" if muted else ""
     default_muted = "true" if muted else "false"
@@ -1437,38 +1437,30 @@ async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(False
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>Foxway Live Stream</title>
   <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; overflow: hidden; }}
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     html, body {{
-      width: 100%;
-      height: 100%;
-      background: #000000;
+      width: 100vw;
+      height: 100vh;
+      background: #000;
       overflow: hidden;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }}
-    .video-container {{
-      width: 100%;
-      height: 100%;
-      position: relative;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background-size: cover;
-      background-position: center;
-      background-repeat: no-repeat;
+      touch-action: none;
     }}
     zero-player {{
-      width: 100%;
-      height: 100%;
+      width: 100vw !important;
+      height: 100vh !important;
       display: block;
-      background: transparent;
+      background: #000;
     }}
-    zero-player video, video {{
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      background: transparent;
+    #v, video {{
+      width: 100vw !important;
+      height: 100vh !important;
+      object-fit: fill !important;
+      background: #000;
+      display: block;
+      transform-origin: center center;
+    }}
+    video::-webkit-media-controls, video::-webkit-media-controls-enclosure {{
+      display: none !important;
     }}
     /* Strict kill for any status badges, mse overlays, or injected controls */
     .status, .mse, [class*="status"], [class*="controls"], [class*="badge"], .info, .mode {{
@@ -1480,31 +1472,68 @@ async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(False
   </style>
 </head>
 <body>
-  <div class="video-container" id="container">
-    <zero-player id="player" src="" mode="webrtc,mse,mp4" playsinline autoplay {is_muted_attr} disablepictureinpicture></zero-player>
-  </div>
+  <zero-player id="player" src="" mode="webrtc,mse,mp4" playsinline autoplay {is_muted_attr} disablepictureinpicture></zero-player>
   <script type="module">
     import {{ VideoRTC }} from '/api/go2rtc/video-rtc.js';
+
+    window._killed = false;
 
     class ZeroPlayer extends VideoRTC {{
       oninit() {{
         super.oninit();
         if (this.video) {{
+          this.video.id = 'v';
           this.video.controls = false;
           this.video.removeAttribute('controls');
           this.video.playsInline = true;
           this.video.setAttribute('playsinline', '');
           this.video.setAttribute('disablepictureinpicture', '');
-          this.video.poster = '/api/v1/live/instant.jpg?t=' + Date.now();
-          this.video.style.objectFit = 'cover';
+          this.video.style.objectFit = 'fill';
           const initMuted = {default_muted};
           this.video.muted = initMuted;
-          if (!initMuted) {{
-            this.video.volume = 1.0;
-          }}
+          this.video.volume = initMuted ? 0.0 : 1.0;
+
+          const v = this.video;
+          v.ontimeupdate = function() {{
+            if (v.buffered.length > 0) {{
+              const lag = v.buffered.end(v.buffered.length - 1) - v.currentTime;
+              if (lag > 1.5) v.currentTime = v.buffered.end(v.buffered.length - 1) - 0.2;
+            }}
+          }};
         }}
       }}
+
+      onconnect() {{
+        const res = super.onconnect();
+        if (this.ws) {{
+          window.ws = this.ws;
+          this.ws.addEventListener('error', () => {{
+            try {{ if (this.ws) this.ws.close(); }} catch(e) {{}}
+          }});
+        }}
+        if (this.pc) window.pc = this.pc;
+        return res;
+      }}
+
+      onopen() {{
+        const modes = super.onopen();
+        window.ws = this.ws;
+        if (this.pc) window.pc = this.pc;
+        return modes;
+      }}
+
+      onclose() {{
+        window.ws = null;
+        if (window._killed) return false;
+        setTimeout(() => {{
+          if (!window._killed && this.isConnected) {{
+            this.onconnect();
+          }}
+        }}, 2000);
+        return true;
+      }}
     }}
+
     if (!customElements.get('zero-player')) {{
       customElements.define('zero-player', ZeroPlayer);
     }}
@@ -1512,54 +1541,41 @@ async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(False
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${{proto}}//${{location.host}}/api/go2rtc/ws?src={src}`;
     const player = document.getElementById('player');
-    const container = document.getElementById('container');
-    container.style.backgroundImage = `url('/api/v1/live/instant.jpg?t=${{Date.now()}}')`;
-
     player.src = wsUrl;
 
-    // Audio mute control
     window._audioMuted = {default_muted};
     window.setAudioMuted = function(muted) {{
       window._audioMuted = !!muted;
-      console.log('[ZeroPlayer] setAudioMuted:', window._audioMuted);
-      const v = player.querySelector('video') || player.video;
+      var v = document.getElementById('v');
       if (v) {{
-        v.muted = window._audioMuted;
-        if (!window._audioMuted) {{
-          v.volume = 1.0;
+        v.muted = !!muted;
+        v.volume = muted ? 0.0 : 1.0;
+        if (!muted) {{
           v.play().catch(() => {{}});
         }}
       }}
-      if (window._audioMuted) {{
-        player.setAttribute('muted', '');
-      }} else {{
-        player.removeAttribute('muted');
+    }};
+
+    window.killStream = function() {{
+      window._killed = true;
+      try {{
+        if (window.ws) {{ window.ws.onclose = null; window.ws.onerror = null; window.ws.close(); window.ws = null; }}
+        if (window.pc) {{ window.pc.close(); window.pc = null; }}
+        var v = document.getElementById('v');
+        if (v) {{ v.muted = true; v.pause(); v.removeAttribute('src'); v.srcObject = null; v.load(); }}
+        if (player && player.ondisconnect) {{ player.ondisconnect(); }}
+      }} catch(e) {{}}
+    }};
+
+    window.setVideoZoom = function(scale, tx, ty) {{
+      var v = document.getElementById('v');
+      if (v) {{
+        v.style.transform = 'translate(' + tx + 'px, ' + ty + 'px) scale(' + scale + ')';
       }}
     }};
 
-    // Ensure audio unmutes when stream starts playing if not muted
-    player.addEventListener('play', () => {{
-      const v = player.querySelector('video') || player.video;
-      if (v && !window._audioMuted) {{
-        v.muted = false;
-        v.volume = 1.0;
-      }}
-    }}, {{ passive: true }});
-
-    // MutationObserver to enforce no controls
-    const observer = new MutationObserver(() => {{
-      const v = player.querySelector('video') || player.video;
-      if (v) {{
-        if (v.hasAttribute('controls')) v.removeAttribute('controls');
-        if (v.controls) v.controls = false;
-      }}
-    }});
-    observer.observe(player, {{ attributes: true, subtree: true, childList: true }});
-
-    // Global reconnect function for Android Sync Live
     window.reconnectStream = function() {{
-      console.log('[ZeroPlayer] Reconnecting live stream...');
-      container.style.backgroundImage = `url('/api/v1/live/instant.jpg?t=${{Date.now()}}')`;
+      window._killed = false;
       try {{
         if (player.ondisconnect) player.ondisconnect();
         if (player.onconnect) player.onconnect();
@@ -1568,27 +1584,15 @@ async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(False
       }}
     }};
 
-    // Watchdog: check currentTime every 1500ms; auto-reconnect if frozen >= 2.5s
-    let lastTime = -1;
-    let freezeTicks = 0;
-    setInterval(() => {{
-      const v = player.querySelector('video') || player.video;
-      if (!v) return;
-      if (v.currentTime > 0) {{
-        if (v.currentTime === lastTime) {{
-          freezeTicks++;
-          if (freezeTicks >= 2) {{
-            console.warn('[ZeroPlayer] Freeze detected (>2.5s), auto-reconnecting...');
-            window.reconnectStream();
-            freezeTicks = 0;
-          }}
-        }} else {{
-          lastTime = v.currentTime;
-          freezeTicks = 0;
-          container.style.backgroundImage = 'none';
-        }}
+    // MutationObserver to enforce no controls
+    const observer = new MutationObserver(() => {{
+      const v = document.getElementById('v') || player.querySelector('video') || player.video;
+      if (v) {{
+        if (v.hasAttribute('controls')) v.removeAttribute('controls');
+        if (v.controls) v.controls = false;
       }}
-    }}, 1500);
+    }});
+    observer.observe(player, {{ attributes: true, subtree: true, childList: true }});
   </script>
 </body>
 </html>"""

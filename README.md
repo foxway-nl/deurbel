@@ -1,44 +1,40 @@
-# Foxway Smart Doorbell (v3.1.4)
+# Foxway Smart Doorbell (v3.2.0)
 
-[![Version](https://img.shields.io/badge/version-3.1.4-emerald.svg)](https://github.com/foxway-nl/deurbel)
+[![Version](https://img.shields.io/badge/version-3.2.0-emerald.svg)](https://github.com/foxway-nl/deurbel)
 [![Platform](https://img.shields.io/badge/platform-Android%20%7C%20FastAPI%20%7C%20Docker-blue.svg)](https://github.com/foxway-nl/deurbel)
 [![Aspect Ratio](https://img.shields.io/badge/aspect_ratio-4%3A3_native-orange.svg)](https://github.com/foxway-nl/deurbel)
 
-Productie-oplossing voor de **EZVIZ DB1 Pro** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, synchrone hardware drukknop-detectie via Poort 8000 C-SDK (`NET_DVR_SetupAlarmChan_V41`), strikte eliminatie van spook-alarmen (`COMM_ALARM_V30` 0x4000 en 0x1133 uitsluitend als debug gelogd, alleen `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` 0x1132 byEventType=1 triggert bel-actie), volledige uitfasering van akoestische chime-detectie (puur hardware-only), synchrone audio hard-kill bij verlaten van schermen, Zero-UI live speler met milliseconde 0 snapshot-poster, onbeperkte opeenvolgende deurbeltriggers, stille uren (23:30 - 07:30 Europe/Amsterdam), anti-parked-car swap AI-bescherming, 2-fasen clip lifecycle (`RECORDING` -> `READY`), directe push-notificatie miniatuurfoto's, native go2rtc hardware-streaming (MSE + WebRTC) over LAN en 5G/Cloudflare WSS (0ms lag, 25 FPS), warm live stream retention tussen tab-wissels, SQLite WAL database concurrency, en het snelle YOLOv8n Temporal Pixel-Diff Masking AI-detectie model (5 FPS, <45ms).
+Productie-oplossing voor de **EZVIZ DB1 Pro** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, synchrone hardware drukknop-detectie via Poort 8000 C-SDK (`NET_DVR_SetupAlarmChan_V41`), strikte eliminatie van spook-alarmen (`COMM_ALARM_V30` 0x4000 met motion `dwAlarmType == 3` 100% genegeerd, 0x1132 byte 44 == 1 en 0x1133 byte 44 in (1, 14) triggeren bel-actie, niet-motion 0x4000 triggert bel-actie), volledige uitfasering van akoestische chime-detectie (puur hardware-only), synchrone audio en stream hard-kill bij verlaten van schermen (geen verborgen background WebViews), standaard gedempt live geluid, pinch-to-zoom en pan gebaren (1x-5x), Zero-UI live speler zonder enige instant.jpg polling, onbeperkte opeenvolgende deurbeltriggers, stille uren (23:30 - 07:30 Europe/Amsterdam), anti-parked-car swap AI-bescherming, 2-fasen clip lifecycle (`RECORDING` -> `READY`), directe push-notificatie miniatuurfoto's, native go2rtc hardware-streaming (MSE + WebRTC) over LAN en 5G/Cloudflare WSS (0ms lag, 25 FPS), SQLite WAL database concurrency, en het snelle YOLOv8n Temporal Pixel-Diff Masking AI-detectie model (5 FPS, <45ms).
 
 > **BELANGRIJK:** De EZVIZ DB1 Pro heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT met poort 80 of `/ISAPI/...` verbonden. De enige open hardware-poorten zijn **Poort 554 (RTSP)** en **Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`)**.
 
 ---
 
-## ⚡ Kernfunctionaliteiten in v3.1.4
+## ⚡ Kernfunctionaliteiten in v3.2.0
 
 1. **Poort 8000 C-SDK Hardware Drukknop-Detectie (`sdk_alarm_listener.py`):**
-   - Registreert een C-callback (`NET_DVR_SetDVRMessageCallBack_V31`) en opent het alarmkanaal (`NET_DVR_SetupAlarmChan_V41`) over Poort 8000.
-   - Vangt hardware events op en filtert strikt: **alleen** `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` (0x1132) met `byEventType == 1` (Visitor Call / Doorbell Button) triggert een deurbel-ring.
-   - Algemene hardware alarmen zoals `COMM_ALARM_V30` (0x4000) en `COMM_ALARM_VIDEO_INTERCOM` (0x1133) worden gelogd als debug-melding en triggeren NOOIT een deurbel-ring (100% vrij van spook-oproepen!).
-   - Logt élke byte van binnenkomende commando's en eerste 16 bytes hex payload in real-time in logs en `/admin`.
+   - Registreert een C-callback (`NET_DVR_SetDVRMessageCallBack_V31`) met persistente referentie (`self._callback_ref` tegen GC) en opent het alarmkanaal (`NET_DVR_SetupAlarmChan_V41`) over Poort 8000.
+   - Vangt hardware events op en filtert strikt:
+     - `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` (0x1132) met byte 44 == 1 (Visitor Call / Doorbell Button) triggert direct een deurbel-ring.
+     - `COMM_ALARM_VIDEO_INTERCOM` (0x1133) met byte 44 in (1, 14) triggert direct een deurbel-ring.
+     - `COMM_ALARM_V30` (0x4000) en `0x4007`: `dwAlarmType == 3` (Motion) wordt 100% genegeerd en niet opgeslagen; elk ander `dwAlarmType` (bijv. 0) triggert direct een ring.
+   - Logt élke byte van binnenkomende commando's en eerste 64 bytes hex payload in real-time in logs en `/admin`.
    - Secundaire fysieke Shelly Plus Uni webhook (`/api/v1/webhook/shelly-ring?force=true`) blijft 100% actief.
    - Akoestische chime-detectie is volledig en definitief uit de codebase gesloopt: 100% hardware betrouwbaarheid.
 
-2. **Synchrone Audio Hard-Kill & Speaker Beheer (`LiveScreen.kt`, `CallScreen.kt`, `CallActivity.kt`):**
-   - Bij het verlaten van het belscherm, wisselen van tab of minimaliseren van de app (`onStop()`, `onPause()`, `onDestroy()`) wordt alle camera-audio via `hardKillAudio()` direct synchroon afgebroken.
-   - Luidsprekerknop stuurt nu direct `AudioManager.isSpeakerphoneOn` aan voor directe audio-routing controle.
+2. **Synchrone Hard-Kill voor Audio & Streams, Geen Achtergrond Retention (`MainActivity.kt`, `LiveScreen.kt`, `CallScreen.kt`, `ClipsScreen.kt`):**
+   - Geen verborgen offscreen WebViews meer via translationX in `MainActivity.kt`. Schermen worden uitsluitend voorwaardelijk gerenderd via `when (selectedTab)`.
+   - `LiveScreen` start standaard gedempt (`isSpeakerMuted = true`), speaker toggle stuurt zowel `window.setAudioMuted` als `AudioManager.isSpeakerphoneOn` aan.
+   - Bij verlaten van een scherm (`ON_PAUSE`, `ON_STOP`, `onDispose`) of ophangen worden streams en audio onmiddellijk synchroon hard beëindigd (`window.killStream()`, `onPause()`, `pauseTimers()`, in `onDispose` `loadUrl("about:blank")` + `destroy()`, en `hardKillAudio()`).
 
-3. **Strikte 4:3 Aspect Ratio Container (`LiveScreen.kt` & `CallScreen.kt`):**
-   - Alle video-oppervlakken in de app zijn vastgezet op de native 4:3 beeldsensorverhouding via `.fillMaxWidth().aspectRatio(4f / 3f).clip(RectangleShape)`.
-   - Alle uitrek- en pasmodi knoppen zijn verwijderd om beeldvervorming permanent te voorkomen.
+3. **Pinch-to-Zoom & Pan Gebaren-Overlay (Live, Call, Clips):**
+   - Uniforme Compose gebaren-overlay met `detectTransformGestures` (schaal 1x tot 5x, pan) en `detectTapGestures` dubbeltik-reset over alle videoschermen.
+   - Live & Call sturen synchroon `window.setVideoZoom(scale, tx, ty)` naar de Zero-UI webview. Clips stuurt de transformatie naar ExoPlayer Surface.
 
-4. **Warm Live Stream Retention tussen Tab-Wissels (`MainActivity.kt` & `LiveScreen.kt`):**
-   - De `WebView` instance blijft op de achtergrond warm behouden bij het wisselen tussen tabbladen (Live Kijken, Opnames, Instellingen).
-   - Terugkeren naar Live Kijken geeft 0,0s vertraging (geen 4 seconden her-buffering meer).
-
-3. **Zero-UI Live Player & Geen Vertraging (`/api/v1/live/player`, `LiveScreen.kt`, `CallScreen.kt`):**
+4. **Zero-UI Live Speler Zonder Instant.jpg Polling (`/api/v1/live/player`, `LiveStreamController.kt`):**
    - Volledig controle-vrije speler gebaseerd op `<zero-player>` en `/api/go2rtc/video-rtc.js`.
-   - Toont op milliseconde 0 direct de meest recente snapshot (`/api/v1/live/instant.jpg`) als achtergrond/poster, zodat gebruikers nooit een zwart laadscherm zien.
-   - Verbergt alle go2rtc badges ("MSE", status-overlays) via CSS en forceert `video.controls = false` via MutationObserver.
-   - Bevat een 1500ms freeze watchdog die de verbinding direct herstelt bij stilstand (>2.5s).
-   - In Android retourneert `WebChromeClient.getDefaultVideoPoster()` een 1x1 transparante bitmap (0% grijze play-knop).
-   - Knop `"🔄 Sync Live"` roept `window.reconnectStream()` aan en herlaadt de speler.
+   - Bevat **0 referenties** naar `instant.jpg` (geen achtergrond, geen interval poller, geen fallback watchers).
+   - `object-fit: fill !important`, automatische buffer-lag herstel op 0.8s via `ontimeupdate`, en herverbinding uitsluitend op `ws.onclose`/`onerror`.
 
 4. **Onbeperkte Opeenvolgende Deurbel Triggers (`main.py`, `DoorbellConnectionService.kt`, `SettingsScreen.kt`):**
    - `POST /api/v1/webhook/shelly-ring?force=true` omzeilt alle debounces en reset actieve oproep-states direct.

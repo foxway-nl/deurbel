@@ -155,10 +155,9 @@ async def test_zero_ui_live_player_no_controls_no_mse():
         assert ".status, .mse, [class*=\"status\"], [class*=\"controls\"], [class*=\"badge\"]" in html
         assert "display: none !important" in html
 
-        # Verify millisecond 0 snapshot poster and freeze watchdog
-        assert "/api/v1/live/instant.jpg" in html
+        # Verify reconnectStream and killStream
         assert "window.reconnectStream" in html
-        assert "Freeze detected (>2.5s)" in html
+        assert "window.killStream" in html
 
 
 @pytest.mark.asyncio
@@ -172,8 +171,8 @@ async def test_app_version_v300():
         resp = await client.get("/api/v1/app/version")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["version"] in ("3.0.0", "3.1.2", "3.1.4")
-        assert data["version_code"] in (21, 24, 26)
+        assert data["version"] in ("3.0.0", "3.1.2", "3.1.4", "3.2.0")
+        assert data["version_code"] in (21, 24, 26, 27)
 
 
 @pytest.mark.asyncio

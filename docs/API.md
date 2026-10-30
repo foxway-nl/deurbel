@@ -1,4 +1,4 @@
-# Foxway Smart Doorbell API Documentatie (v3.1.4)
+# Foxway Smart Doorbell API Documentatie (v3.2.0)
 
 De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8090`, WAN: `https://deurbel.foxway.nl`).
 
@@ -6,24 +6,28 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
 
 ---
 
-## 1. Poort 8000 C-SDK Hardware Alarm Listener (`v3.1.4`)
+## 1. Poort 8000 C-SDK Hardware Alarm Listener (`v3.2.0`)
 
 ### `GET /api/v1/admin/sdk-alarm-events` (en `/api/v1/sdk-alarm-events`)
 - **Beschrijving:** Exposeert de real-time hardware events die via Poort 8000 C-SDK (`NET_DVR_SetupAlarmChan_V41`) binnenkomen.
-- **Filtering:** Alleen `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` (0x1132) met `byEventType == 1` triggert een deurbel-ring. Algemene hardware alarmen (`COMM_ALARM_V30` 0x4000 en `COMM_ALARM_VIDEO_INTERCOM` 0x1133) worden gelogd als diagnostische data en veroorzaken géén valse oproepen.
+- **Filtering & Triggers:**
+  - `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` (0x1132) met byte 44 == 1 triggert direct een deurbel-ring (Visitor Call).
+  - `COMM_ALARM_VIDEO_INTERCOM` (0x1133) met byte 44 in (1, 14) triggert direct een deurbel-ring.
+  - `COMM_ALARM_V30` (0x4000) en `0x4007`: `dwAlarmType == 3` (Motion) wordt 100% genegeerd en niet weggeschreven; elk ander `dwAlarmType` triggert een deurbel-ring.
+  - Logt de eerste 64 bytes hex payload van elk event.
 - **Output:**
   ```json
   {
     "connected": true,
     "events": [
       {
-        "timestamp": "2026-10-30 12:15:20.123",
+        "timestamp": "2026-10-30 15:45:20.123",
         "command_id": 4402,
         "command_hex": "0x1132",
         "command_name": "COMM_UPLOAD_VIDEO_INTERCOM_EVENT",
         "event_type": 1,
         "event_name": "Visitor Call (Drukknop Deurbel)",
-        "details": "Visitor Call (byEventType=1), payload_hex=01000000000000000000000001000000",
+        "details": "Visitor Call (byEventType=1 at byte 44), payload_hex=...",
         "action_taken": "Triggered Doorbell Ringing"
       }
     ]
@@ -32,17 +36,17 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
 
 ---
 
-## 2. Zero-UI Live Player & Streaming (`v3.0.0`)
+## 2. Zero-UI Live Player & Streaming (`v3.2.0`)
 
 ### `GET /api/v1/live/player` (en `/live/player`)
 - **Beschrijving:** Schone Zero-UI fullscreen 4:3 HTML5 hardware-speler (MSE + WebRTC).
 - **Kenmerken:**
-  - Toont op milliseconde 0 direct `/api/v1/live/instant.jpg` als snapshot-poster, zodat er nooit een zwart laadscherm ontstaat.
-  - Verwijdert dynamisch eventuele video controls via MutationObserver.
-  - Verbergt alle go2rtc badges ("MSE", overlay div's) via CSS.
-  - Beschikt over een actieve freeze-watchdog die elke 1500ms `video.currentTime` controleert en na 2.5s stilstand automatisch herverbindt.
-  - Exposeert `window.reconnectStream = function() { ... }` voor de Android app (`Sync Live`).
-  - Wordt in de Android app tussen tab-wissels warm in het geheugen behouden (`MainActivity.kt`).
+  - Bevat **0 instant.jpg referenties** (geen achtergrond, geen interval poller).
+  - CSS styling: `#v { width: 100vw !important; height: 100vh !important; object-fit: fill !important; }`.
+  - Verwijdert dynamisch video controls en go2rtc badges via MutationObserver en CSS.
+  - Automatische buffer-lag recovery op 0.8s via `ontimeupdate` (`video.currentTime = video.buffered.end(0) - 0.1`).
+  - Herverbinding uitsluitend via `ws.onclose` en `ws.onerror` (met 2000ms delay).
+  - Exposeert `window.setAudioMuted(muted)`, `window.killStream()`, `window.setVideoZoom(scale, tx, ty)` en `window.reconnectStream()` voor de Android Compose laag.
 
 ### `GET /api/go2rtc/ws` (en `/api/v1/go2rtc/ws`)
 - **Type:** WebSocket

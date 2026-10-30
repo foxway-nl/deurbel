@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell Architectuur (v3.1.4)
+# Foxway Smart Doorbell Architectuur (v3.2.0)
 
-Dit document beschrijft de technische opzet en datastromen van versie 3.1.4.
+Dit document beschrijft de technische opzet en datastromen van versie 3.2.0.
 
 > **HARDWARE SPECIFICATIE:** De EZVIZ DB1 Pro (`192.168.2.31`) heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT naar Poort 80 verbonden. Alle camera-interacties verlopen strikt via Poort 554 (RTSP) en Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`).
 
@@ -23,8 +23,8 @@ flowchart TD
         RingBuffer["RAM Ring-Buffer (/dev/shm/deurbel_ring - Unix TS seg_%s.ts)"]
         
         subgraph Backend ["FastAPI Backend (Docker :8090)"]
-            SDKAlarm["Port 8000 SDK Alarm Listener (COMM_UPLOAD_VIDEO_INTERCOM_EVENT byEventType==1)"]
-            WSProxy["WebSocket Proxy (/api/go2rtc/ws) & Zero-UI Player (/api/v1/live/player)"]
+            SDKAlarm["Port 8000 SDK Alarm Listener (0x1132 b44==1, 0x1133 b44 in 1,14, 0x4000 non-motion)"]
+            WSProxy["WebSocket Proxy (/api/go2rtc/ws) & Zero-UI Player (/api/v1/live/player, no instant.jpg)"]
             TemporalAI["Temporal Pixel-Diff AI & Anti-Car Swap (parked_spots pre-filter)"]
             Lifecycle["2-Fasen Clip Lifecycle (RECORDING -> READY)"]
             QuietHours["Stille Uren Scheduler (23:30 - 07:30 Europe/Amsterdam)"]
@@ -33,10 +33,10 @@ flowchart TD
         end
     end
 
-    subgraph Client ["Android Toestel (v3.1.4 Build 26)"]
+    subgraph Client ["Android Toestel (v3.2.0 Build 27)"]
         Telecom["Telecom Framework (Instant Deduplication Reset on Hangup)"]
-        LiveView["LiveScreen / CallScreen (Strict 4:3 Container & Sync Audio Hard-Kill)"]
-        ClipPlayer["ClipPlayerDialog (Clean ExoPlayer Dismiss & Release)"]
+        LiveView["LiveScreen / CallScreen (Strict 4:3, Pinch-Zoom-Pan, Lifecycle Hard-Kill Audio/Stream)"]
+        ClipPlayer["ClipsScreen (Strict 4:3, Pinch-Zoom-Pan, Clean ExoPlayer Dismiss)"]
         ConnMgr["ConnectionManager (Cellular-Only WAN Lock, 0ms Ping-Pong)"]
         NotifService["WebSocketForegroundService (LargeIcon + BigPicture Notification)"]
         SettingsUI["SettingsScreen (Dynamic Quiet Hours, Unlimited Test Trigger)"]

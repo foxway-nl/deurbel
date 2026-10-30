@@ -85,7 +85,6 @@ fun LiveScreen() {
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
     val liveStream = remember { LiveStreamController.getInstance(context) }
-    val frame by liveStream.currentBitmap.collectAsState()
     val isConnected by liveStream.isConnected.collectAsState()
     val isFrozen by liveStream.isFrozen.collectAsState()
     val lastNewFrameMs by liveStream.lastNewFrameMs.collectAsState()
@@ -102,7 +101,7 @@ fun LiveScreen() {
     val audioStreamer = remember { DoorbellAudioStreamer() }
 
     var isPttActive by remember { mutableStateOf(false) }
-    var isSpeakerMuted by remember { mutableStateOf(false) }
+    var isSpeakerMuted by remember { mutableStateOf(true) }
 
     // Manual recording state
     var isRecording by remember { mutableStateOf(false) }
@@ -177,7 +176,7 @@ fun LiveScreen() {
         }
     }
 
-    // Lifecycle binding: Synchronous Hard Kill for all audio on pause/stop/exit
+    // Lifecycle binding: Synchronous Hard Kill for all audio and stream on pause/stop/exit
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -185,6 +184,11 @@ fun LiveScreen() {
                     if (isRecording) {
                         isRecording = false
                     }
+                    try {
+                        webViewRef?.evaluateJavascript("window.killStream && window.killStream();", null)
+                        webViewRef?.onPause()
+                        webViewRef?.pauseTimers()
+                    } catch (_: Exception) {}
                     audioStreamer.stopStreaming()
                     liveStream.hardKillAudio()
                     try {
@@ -194,6 +198,11 @@ fun LiveScreen() {
                     } catch (_: Exception) {}
                 }
                 Lifecycle.Event.ON_RESUME -> {
+                    try {
+                        webViewRef?.onResume()
+                        webViewRef?.resumeTimers()
+                        webViewRef?.evaluateJavascript("window.reconnectStream && window.reconnectStream();", null)
+                    } catch (_: Exception) {}
                     liveStream.start()
                     liveStream.setAudioMuted(isSpeakerMuted)
                 }
@@ -203,6 +212,13 @@ fun LiveScreen() {
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+            try {
+                webViewRef?.evaluateJavascript("window.killStream && window.killStream();", null)
+                webViewRef?.loadUrl("about:blank")
+                webViewRef?.stopLoading()
+                webViewRef?.destroy()
+                webViewRef = null
+            } catch (_: Exception) {}
             audioStreamer.stopStreaming()
             liveStream.hardKillAudio()
             try {
@@ -234,59 +250,8 @@ fun LiveScreen() {
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(4f / 3f)
-                    .clip(RectangleShape)
-                    .graphicsLayer {
-                        scaleX = zoomScale
-                        scaleY = zoomScale
-                        translationX = panOffsetX
-                        translationY = panOffsetY
-                    }
-                    .pointerInput(Unit) {
-                        detectTapGestures(
-                            onDoubleTap = {
-                                if (zoomScale > 1.05f) {
-                                    zoomScale = 1f
-                                    panOffsetX = 0f
-                                    panOffsetY = 0f
-                                } else {
-                                    zoomScale = 2.5f
-                                }
-                            }
-                        )
-                    }
-                    .pointerInput(Unit) {
-                        detectTransformGestures { _, pan, zoom, _ ->
-                            val newScale = (zoomScale * zoom).coerceIn(1f, 5f)
-                            zoomScale = newScale
-                            if (newScale > 1f) {
-                                val maxPanX = (size.width * (newScale - 1f)) / 2f
-                                val maxPanY = (size.height * (newScale - 1f)) / 2f
-                                panOffsetX = (panOffsetX + pan.x).coerceIn(-maxPanX, maxPanX)
-                                panOffsetY = (panOffsetY + pan.y).coerceIn(-maxPanY, maxPanY)
-                            } else {
-                                panOffsetX = 0f
-                                panOffsetY = 0f
-                            }
-                        }
-                    }
-                    .pointerInput(Unit) {
-                        var totalDragY = 0f
-                        detectVerticalDragGestures(
-                            onDragStart = { totalDragY = 0f },
-                            onVerticalDrag = { _, dragAmount ->
-                                if (dragAmount > 0) totalDragY += dragAmount
-                            },
-                            onDragEnd = {
-                                if (totalDragY > 120f) {
-                                    liveStream.restartStream(forceServerRestart = true)
-                                    webViewRef?.evaluateJavascript("window.reconnectStream && window.reconnectStream();", null)
-                                    webViewRef?.reload()
-                                    Toast.makeText(context, "Beeld vernieuwd (Pull-to-Refresh)", Toast.LENGTH_SHORT).show()
-                                }
-                                totalDragY = 0f
-                            }
-                        )
-                    },
+                    .background(Color.Black)
+                    .clipToBounds(),
                 contentAlignment = Alignment.Center
             ) {
                 AndroidView(
@@ -321,7 +286,50 @@ fun LiveScreen() {
                     update = { view ->
                         webViewRef = view
                     },
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            scaleX = zoomScale
+                            scaleY = zoomScale
+                            translationX = panOffsetX
+                            translationY = panOffsetY
+                        }
+                )
+
+                // Transparent Gesture Overlay on top of WebView
+                val density = androidx.compose.ui.platform.LocalDensity.current.density
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onDoubleTap = {
+                                    zoomScale = 1f
+                                    panOffsetX = 0f
+                                    panOffsetY = 0f
+                                    webViewRef?.evaluateJavascript("window.setVideoZoom && window.setVideoZoom(1.0, 0, 0);", null)
+                                }
+                            )
+                        }
+                        .pointerInput(Unit) {
+                            detectTransformGestures { _, pan, zoom, _ ->
+                                val newScale = (zoomScale * zoom).coerceIn(1f, 5f)
+                                zoomScale = newScale
+                                if (newScale > 1f) {
+                                    val maxPanX = (size.width * (newScale - 1f)) / 2f
+                                    val maxPanY = (size.height * (newScale - 1f)) / 2f
+                                    panOffsetX = (panOffsetX + pan.x).coerceIn(-maxPanX, maxPanX)
+                                    panOffsetY = (panOffsetY + pan.y).coerceIn(-maxPanY, maxPanY)
+                                } else {
+                                    panOffsetX = 0f
+                                    panOffsetY = 0f
+                                }
+                                webViewRef?.evaluateJavascript(
+                                    "window.setVideoZoom && window.setVideoZoom($zoomScale, ${panOffsetX / density}, ${panOffsetY / density});",
+                                    null
+                                )
+                            }
+                        }
                 )
             }
 

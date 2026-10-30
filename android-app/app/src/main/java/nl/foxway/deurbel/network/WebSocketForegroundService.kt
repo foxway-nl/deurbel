@@ -258,8 +258,7 @@ class WebSocketForegroundService : Service() {
         nl.foxway.deurbel.data.AppLogger.getInstance(this)
             .call("Inkomende oproep van deurbel (ID: ${callId.take(8)})")
 
-        // 2. Start full-screen incoming call UI & pre-warm live stream
-        LiveStreamController.getInstance(this).start()
+        // 2. Start full-screen incoming call UI
         DoorbellConnectionService.startIncomingCall(this, callId, snapshotUrl)
         CallEventBus.postEvent(DoorbellEvent(event = DoorbellEvent.CALL_RINGING, callId = callId, snapshotUrl = snapshotUrl))
     }

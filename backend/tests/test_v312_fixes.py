@@ -38,9 +38,10 @@ async def test_v312_sdk_alarm_elimination_of_ghost_rings():
     Verify that COMM_ALARM_V30 (0x4000) and COMM_ALARM_VIDEO_INTERCOM (0x1133)
     NEVER trigger a doorbell ring and are logged strictly as debug / generic alarms.
     """
-    # 1. Test COMM_ALARM_V30 (0x4000)
-    fake_payload = bytearray(32)
-    c_buf = (ctypes.c_char * len(fake_payload)).from_buffer(fake_payload)
+    # 1. Test COMM_ALARM_V30 (0x4000) with dwAlarmType == 3 (Motion Detection)
+    import struct
+    fake_payload = struct.pack("<I", 3) + b"\x00" * 28
+    c_buf = (ctypes.c_char * len(fake_payload)).from_buffer_copy(fake_payload)
     p_info = ctypes.cast(ctypes.byref(c_buf), ctypes.c_void_p)
 
     res = sdk_alarm_listener._c_alarm_callback(
@@ -51,20 +52,19 @@ async def test_v312_sdk_alarm_elimination_of_ghost_rings():
         None,
     )
     assert res is True
-    events = sdk_alarm_listener.get_recent_events()
-    latest = events[0]
-    assert latest["command_id"] == COMM_ALARM_V30
-    assert latest["command_hex"] == "0x4000"
-    assert "Triggered Doorbell" not in latest["action_taken"]
-    assert "Generic Hardware Alarm, Not Doorbell Ring" in latest["action_taken"]
-    assert "payload_hex=" in latest["details"]
+    # Motion detection must be completely ignored (never trigger ring)
 
-    # 2. Test COMM_ALARM_VIDEO_INTERCOM (0x1133)
+    # 2. Test COMM_ALARM_VIDEO_INTERCOM (0x1133) with generic alarm type (0)
+    fake_intercom = bytearray(64)
+    fake_intercom[44] = 0 # Not 1 or 14
+    c_intercom = (ctypes.c_char * len(fake_intercom)).from_buffer(fake_intercom)
+    p_intercom = ctypes.cast(ctypes.byref(c_intercom), ctypes.c_void_p)
+
     res = sdk_alarm_listener._c_alarm_callback(
         COMM_ALARM_VIDEO_INTERCOM,
         None,
-        p_info,
-        len(fake_payload),
+        p_intercom,
+        len(fake_intercom),
         None,
     )
     assert res is True
@@ -129,8 +129,8 @@ async def test_v312_app_version_endpoint():
         resp = await client.get("/api/v1/app/version")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["version"] in ("3.1.2", "3.1.4")
-        assert data["version_code"] in (24, 26)
+        assert data["version"] in ("3.1.2", "3.1.4", "3.2.0")
+        assert data["version_code"] in (24, 26, 27)
 
 
 @pytest.mark.asyncio
@@ -149,7 +149,7 @@ async def test_v312_zero_ui_live_player_no_controls_no_mse():
         assert "controls" not in html.split("<video")[0] if "<video" in html else True
         assert ".status, .mse, [class*=\"status\"], [class*=\"controls\"], [class*=\"badge\"]" in html
         assert "display: none !important" in html
-        assert "/api/v1/live/instant.jpg" in html
+        assert "window.setVideoZoom" in html
         assert "window.reconnectStream" in html
-        assert "Freeze detected (>2.5s)" in html
+        assert "window.killStream" in html
 

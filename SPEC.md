@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell System Specification (v3.1.4)
+# Foxway Smart Doorbell System Specification (v3.2.0)
 
-**Versie:** `v3.1.4` (`versionCode = 26`)  
+**Versie:** `v3.2.0` (`versionCode = 27`)  
 **Datum:** 30 Oktober 2026  
 **Productie-omgeving:** `foxway` (`192.168.2.1`), WAN: `https://deurbel.foxway.nl`  
 **Camera:** EZVIZ DB1 Pro (`192.168.2.31`), native **4:3 aspect ratio** (`768x576` / `960x720`)
@@ -13,26 +13,28 @@ Het Foxway Deurbelsysteem is een end-to-end, privacy-vriendelijk en ultra-low-la
    - **BELANGRIJK:** Poort 80 (HTTP / ISAPI / ONVIF) is **NIET AANWEZIG** op de camera. Er wordt NOOIT verbonden met poort 80 of `/ISAPI/...`.
    - Native 4:3 beeldsensor met microfoon en luidspreker.
    - Tweeweg-audio gestuurd via `libhcnetsdk.so` C-SDK (`app/audio_bridge.py`) over TCP poort 8000.
-   - **Hardware Drukknop-Detectie:** `NET_DVR_SetupAlarmChan_V41` op poort 8000 vangt hardware intercom- en alarm-events synchroon op (`app/sdk_alarm_listener.py`). Alleen zuivere `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` (0x1132) met `byEventType == 1` triggert een deurbel-oproep. Algemene alarmen zoals `COMM_ALARM_V30` (0x4000) en `COMM_ALARM_VIDEO_INTERCOM` (0x1133) worden gelogd als diagnostische debug-data en veroorzaken géén spook-oproepen. Raw HEX payloads en commando-codes worden real-time geregistreerd.
+   - **Hardware Drukknop-Detectie (`backend/app/sdk_alarm_listener.py`):** `NET_DVR_SetupAlarmChan_V41` op poort 8000 vangt hardware intercom- en alarm-events synchroon op met persistente callback-referentie (`self._callback_ref`).
+     - `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` (0x1132) met byte 44 == 1 triggert direct een deurbel-oproep (Visitor Call).
+     - `COMM_ALARM_VIDEO_INTERCOM` (0x1133) met byte 44 in (1, 14) triggert direct een deurbel-oproep.
+     - `COMM_ALARM_V30` (0x4000) of `COMM_ALARM_V40` (0x4007) met `dwAlarmType == 3` (Motion) wordt 100% genegeerd en niet weggeschreven; elk ander `dwAlarmType` triggert een legitieme oproep.
+     - Alle onbekende commando's worden met hun eerste 64 hex payload bytes gelogd in het admin paneel.
 2. **FastAPI & Python Media Server (`backend` in Docker):**
    - Draait op poort 8090 met `network_mode: host`.
-   - **Zero-UI Live Player op `/api/v1/live/player`:** Eigen minimalistische speler gebaseerd op `<zero-player>` en `/api/go2rtc/video-rtc.js`. Toont direct op milliseconde 0 het laatste snapshot (`/api/v1/live/instant.jpg`) als achtergrond/poster, verwijdert alle controls via MutationObserver, verbergt go2rtc badges via CSS en beschikt over een 1500ms freeze watchdog die bij stilstand direct herverbindt.
+   - **Zero-UI Live Player op `/api/v1/live/player`:** Minimalistische speler gebaseerd op `<zero-player>` en `/api/go2rtc/video-rtc.js`. Geen instant.jpg polling of poster, CSS `object-fit: fill !important`, buffer-lag recovery op 0.8s via `ontimeupdate`, `window.setAudioMuted()`, `window.killStream()`, `window.setVideoZoom()`, en stabiele WS-herverbinding uitsluitend bij `onclose`/`onerror`.
    - **Onbeperkt Opeenvolgend Deurbel Testen:** `POST /api/v1/webhook/shelly-ring?force=true` omzeilt alle debounces en reset eerdere gespreksstatussen direct om telkens een nieuwe oproep met unieke call_id uit te zenden.
    - **Stille Uren (23:30 - 07:30 Europe/Amsterdam):** AI bewegingsclips worden 's nachts stil opgenomen (`silent = True`, geen pushmelding/FCM), terwijl deurbeloproepen altijd met hoogste prioriteit doorkomen. Instelbaar via `/admin` en de Android app.
    - **Anti-Car Swap Filter (`app/ai_detector.py`):** `parked_spots` pre-filtering (`IoU >= 0.55` en `changed_pixel_ratio < 0.30` direct afgekeurd) en strikte stap-verplaatsing validatie over $\ge 3$ opeenvolgende frames (`0.02*w <= step_disp <= 0.12*w` met `IoU >= 0.15` en totale verplaatsing $\ge 14\%$) voorkomen dat de detector tussen stilstaande auto's verspringt.
-   - **Geen Akoestische Chime (Hardware-Only):** Akoestische / FFT-gebaseerde chime-detectie (`ring_detector.py`) is definitief en volledig verwijderd. Alleen hardware triggers (Poort 8000 C-SDK `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` met `byEventType == 1` en Shelly Plus Uni webhook) zijn actief.
+   - **Geen Akoestische Chime (Hardware-Only):** Akoestische / FFT-gebaseerde chime-detectie (`ring_detector.py`) is definitief en volledig verwijderd. Alleen hardware triggers (Poort 8000 C-SDK en Shelly Plus Uni webhook) zijn actief.
    - **2-Fasen Clip Lifecycle (`RECORDING` -> `READY`):** Bij detectie $T_0$ wordt direct synchroon de geverifieerde miniatuurfoto opgeslagen naar `/mnt/opslag/deurbel/clips/thumb_<clip_id>.jpg` (>5 KB). Meteen daarna wordt de clip-rij met `status = "RECORDING"` aangemaakt en pas daarna gaat de push-melding uit. Pas na afronding van de 20s Post-Roll en concat (`.mp4 > 100 KB`, `duration >= 5s`) wordt de status geüpdatet naar `READY`.
    - **Gecentraliseerde SQLite WAL Database (`app/database.py`):** WAL mode met `PRAGMA synchronous=NORMAL;`, `PRAGMA busy_timeout=60000;`, timeout=60.0s en async write lock serialisatie.
    - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met 25 FPS live preview player, dynamische variabelen, stille uren configuratie, uitsluitingszones canvas, real-time Poort 8000 SDK hardware events viewer en AI inspectie.
 3. **Android Client App (`android-app`):**
-   - Native Jetpack Compose, Kotlin coroutines, versie 3.1.4 (`versionCode = 26`).
-   - **Strikte 4:3 Aspect Ratio Container:** `LiveScreen.kt` en `CallScreen.kt` hanteren een harde, onwrikbare `.fillMaxWidth().aspectRatio(4f / 3f).clip(RectangleShape)` container zonder vervormende rekking of uitrek-toggles.
-   - **Synchrone Hard-Kill voor Audio:** Bij schermwissels, minimaliseren (`onStop()`, `onPause()`, `onDestroy()`) of ophangen stopt alle audio onmiddellijk via `hardKillAudio()`, en wordt de luidsprekerstatus direct gesynchroniseerd via `AudioManager.isSpeakerphoneOn`.
-   - `WebChromeClient.getDefaultVideoPoster()` retourneert een 1x1 transparante bitmap (0% grijze play-knop).
-   - "🔄 Sync Live" knop herlaadt en roept direct `window.reconnectStream()` aan.
-   - **Warm Live Stream Retention:** `LiveScreen` blijft warm bewaard tussen tab-wissels (`MainActivity.kt`), waardoor terugkeren naar Live Kijken 0,0s vertraging geeft.
+   - Native Jetpack Compose, Kotlin coroutines, versie 3.2.0 (`versionCode = 27`).
+   - **Strikte 4:3 Aspect Ratio Container:** `LiveScreen.kt`, `CallScreen.kt` en `ClipsScreen.kt` hanteren een harde, onwrikbare `.fillMaxWidth().aspectRatio(4f / 3f).clipToBounds()` container zonder vervormende rekking of uitrek-toggles.
+   - **Pinch-to-Zoom & Pan:** Transparante Compose gebaren-overlay met `detectTransformGestures` (schaal 1x tot 5x, pan) en `detectTapGestures` dubbeltik-reset over alle videoschermen (Live, Call, Clips).
+   - **Synchrone Hard-Kill voor Audio & Streams:** Geen offscreen verborgen WebViews in `MainActivity.kt`. Bij schermwissels, minimaliseren (`onStop()`, `onPause()`, `onDestroy()`) of verlaten via `onDispose` stopt alle audio en video onmiddellijk via `window.killStream()`, `onPause()`, `pauseTimers()`, `loadUrl("about:blank")` + `destroy()` en `hardKillAudio()`.
+   - `LiveScreen` start standaard gedempt (`isSpeakerMuted = true`), speaker toggle stuurt direct `window.setAudioMuted` en `AudioManager.isSpeakerphoneOn` aan.
    - Cellular-only WAN lock in `ConnectionManager.kt` en `EndpointResolver.kt` voorkomt LAN ping-pong op mobiele data (bij geen Wi-Fi direct en permanent WAN).
-   - Sluiten van clips in `ClipsScreen.kt` stopt en released ExoPlayer direct en wist selectie.
 
 ---
 

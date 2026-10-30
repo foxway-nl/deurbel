@@ -74,12 +74,10 @@ class LiveStreamController private constructor(private val context: Context) {
     private val isRunning = AtomicBoolean(false)
     private var reconnectJob: Job? = null
     private var freezeWatchdogJob: Job? = null
-    private var httpFallbackJob: Job? = null
 
     init {
         initAudioTrack()
         startFreezeWatchdog()
-        startHttpFallbackWatcher()
     }
 
     fun forceSpeakerphone() {
@@ -165,52 +163,7 @@ class LiveStreamController private constructor(private val context: Context) {
         }
     }
 
-    /**
-     * HTTP Instant Snapshot Fallback:
-     * When WebSocket is connecting, stalled, or behind a restrictive proxy,
-     * automatically polls /api/v1/live/instant.jpg every 150ms so video never blacks out.
-     */
-    private fun startHttpFallbackWatcher() {
-        httpFallbackJob?.cancel()
-        httpFallbackJob = scope.launch(Dispatchers.IO) {
-            val httpClient = OkHttpClient.Builder()
-                .connectTimeout(1500, TimeUnit.MILLISECONDS)
-                .readTimeout(1500, TimeUnit.MILLISECONDS)
-                .build()
 
-            while (isActive) {
-                delay(150L)
-                if (!isRunning.get()) continue
-
-                val now = System.currentTimeMillis()
-                val lastFrame = _lastNewFrameMs.value
-                // If no frame has arrived for >1200ms, immediately fetch via HTTP fallback
-                if (lastFrame == 0L || (now - lastFrame) > 1200L) {
-                    try {
-                        val activeBase = connectionManager.activeBaseUrl.value.ifBlank { "https://deurbel.foxway.nl" }
-                        val url = "$activeBase/api/v1/live/instant.jpg?t=$now"
-                        val req = Request.Builder().url(url).build()
-                        httpClient.newCall(req).execute().use { resp ->
-                            if (resp.isSuccessful) {
-                                val bytes = resp.body?.bytes()
-                                if (bytes != null && bytes.size > 1000) {
-                                    val options = BitmapFactory.Options().apply {
-                                        inPreferredConfig = Bitmap.Config.RGB_565
-                                    }
-                                    val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
-                                    if (bmp != null) {
-                                        _currentBitmap.value = bmp
-                                        _lastNewFrameMs.value = System.currentTimeMillis()
-                                        _isFrozen.value = false
-                                    }
-                                }
-                            }
-                        }
-                    } catch (_: Throwable) {}
-                }
-            }
-        }
-    }
 
     fun start() {
         if (isRunning.getAndSet(true)) {

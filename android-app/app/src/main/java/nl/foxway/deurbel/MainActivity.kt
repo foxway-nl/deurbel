@@ -61,7 +61,6 @@ class MainActivity : ComponentActivity() {
                     if (isPaired) {
                         try {
                             WebSocketForegroundService.start(this@MainActivity)
-                            nl.foxway.deurbel.network.LiveStreamController.getInstance(this@MainActivity).start()
                         } catch (_: Exception) {}
                     }
                 }
@@ -225,38 +224,19 @@ fun MainAppScaffold(
             }
 
             Box(modifier = Modifier.fillMaxSize()) {
-                // Keep LiveScreen warm and alive so switching tabs doesn't re-buffer for 4 seconds
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .then(
-                            if (selectedTab == MainTab.LIVE) Modifier
-                            else Modifier.graphicsLayer {
-                                alpha = 0f
-                                translationX = -10000f
+                when (selectedTab) {
+                    MainTab.LIVE -> LiveScreen()
+                    MainTab.CLIPS -> ClipsScreen(
+                        initialClipId = activeTargetClipId,
+                        onClipSelected = {
+                            activeTargetClipId = null
+                            (context as? android.app.Activity)?.intent?.apply {
+                                removeExtra("clip_id")
+                                removeExtra("screen")
                             }
-                        )
-                ) {
-                    LiveScreen()
-                }
-
-                if (selectedTab == MainTab.CLIPS) {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        ClipsScreen(
-                            initialClipId = activeTargetClipId,
-                            onClipSelected = {
-                                activeTargetClipId = null
-                                (context as? android.app.Activity)?.intent?.apply {
-                                    removeExtra("clip_id")
-                                    removeExtra("screen")
-                                }
-                            }
-                        )
-                    }
-                } else if (selectedTab == MainTab.SETTINGS) {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        SettingsScreen(onUnpair = onUnpair)
-                    }
+                        }
+                    )
+                    MainTab.SETTINGS -> SettingsScreen(onUnpair = onUnpair)
                 }
             }
         }
