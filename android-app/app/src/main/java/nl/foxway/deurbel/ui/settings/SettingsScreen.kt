@@ -925,6 +925,48 @@ fun SettingsScreen(
 
                     HorizontalDivider(color = DividerDark)
 
+                    // ── Logboek & Foutrapportage ──
+                    Text(
+                        text = "Systeemlogboek & Diagnose",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+
+                    // Knop: Bekijk Systeemlogboek (30 dagen)
+                    Button(
+                        onClick = { showLogsDialog = true },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SurfaceVariantDark,
+                            contentColor = CyanAccent
+                        ),
+                        border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Info, contentDescription = null, tint = CyanAccent)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("📋 Bekijk Systeemlogboek (30 dagen)", color = CyanAccent, fontWeight = FontWeight.SemiBold)
+                    }
+
+                    // Knop: Rapporteer Fout / Status-Dump
+                    Button(
+                        onClick = { reportStatusDump() },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SurfaceVariantDark,
+                            contentColor = TextPrimary
+                        ),
+                        border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Share, contentDescription = null, tint = EmeraldPrimary)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("📤 Rapporteer Fout / Status-Dump", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                    }
+
+                    HorizontalDivider(color = DividerDark)
+
                     // Knop 4: Apparaat Ontkoppelen
                     OutlinedButton(
                         onClick = {
@@ -950,7 +992,7 @@ fun SettingsScreen(
             val appVersionText = remember {
                 try {
                     val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-                    val vName = pInfo.versionName ?: "2.5.0"
+                    val vName = pInfo.versionName ?: "3.3.0"
                     val vCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
                         pInfo.longVersionCode
                     } else {
@@ -959,7 +1001,7 @@ fun SettingsScreen(
                     }
                     "Foxway Deurbel v$vName (Build $vCode)"
                 } catch (_: Exception) {
-                    "Foxway Deurbel v2.5.0 (Build 16)"
+                    "Foxway Deurbel v3.3.0 (Build 28)"
                 }
             }
 

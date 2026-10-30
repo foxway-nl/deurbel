@@ -38,6 +38,7 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
+from starlette.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
@@ -1399,10 +1400,14 @@ async def proxy_go2rtc_ws(websocket: WebSocket, src: str = Query("deurbel")):
                 try:
                     while True:
                         data = await upstream.recv()
+                        if websocket.client_state != WebSocketState.CONNECTED:
+                            break
                         if isinstance(data, str):
                             await websocket.send_text(data)
                         elif isinstance(data, bytes):
                             await websocket.send_bytes(data)
+                except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError, ConnectionResetError):
+                    pass
                 except Exception:
                     pass
 
@@ -1752,14 +1757,23 @@ async def websocket_live_hub_stream(ws: WebSocket):
             except Exception:
                 return
         async def sender():
-            while True:
-                data = await client_queue.get()
-                await ws.send_bytes(data)
+            try:
+                while True:
+                    data = await client_queue.get()
+                    if ws.client_state != WebSocketState.CONNECTED:
+                        break
+                    await ws.send_bytes(data)
+            except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError, ConnectionResetError):
+                pass
+            except Exception:
+                pass
 
         async def receiver():
             try:
                 while True:
                     await ws.receive()
+            except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError, ConnectionResetError):
+                pass
             except Exception:
                 pass
 
@@ -1771,10 +1785,21 @@ async def websocket_live_hub_stream(ws: WebSocket):
         )
         for t in pending:
             t.cancel()
+        for t in done:
+            if not t.cancelled():
+                try:
+                    t.exception()
+                except Exception:
+                    pass
     except Exception:
         pass
     finally:
         live_hub.unregister_client(client_queue)
+        try:
+            if ws.client_state == WebSocketState.CONNECTED:
+                await ws.close()
+        except Exception:
+            pass
 
 
 @app.websocket("/api/ws")
@@ -1793,16 +1818,22 @@ async def websocket_go2rtc_proxy(ws: WebSocket, src: str = Query("deurbel")):
                     while True:
                         msg = await ws.receive_text()
                         await g_ws.send(msg)
+                except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError, ConnectionResetError):
+                    pass
                 except Exception:
                     pass
 
             async def forward_to_client():
                 try:
                     async for msg in g_ws:
+                        if ws.client_state != WebSocketState.CONNECTED:
+                            break
                         if isinstance(msg, str):
                             await ws.send_text(msg)
                         else:
                             await ws.send_bytes(msg)
+                except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError, ConnectionResetError):
+                    pass
                 except Exception:
                     pass
 
