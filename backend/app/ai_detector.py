@@ -872,14 +872,18 @@ class SmartDetector:
                 if track.category == "vehicle":
                     is_parked_spot = is_parked_vehicle(last_box, self.parked_vehicle_boxes, threshold=0.50)
 
-                    # Manier 1 (Nieuw in beeld verschenen rijdende auto):
-                    # Niet op een geparkeerde plek 2s geleden, gezien in minstens 3 frames met changed_pixel_ratio >= 0.15
-                    # En alle opeenvolgende stappen moeten voldoen aan: 0.02*w <= step_dx <= 0.12*w en IoU >= 0.15,
-                    # tot totale verplaatsing >= 14% van schermbreedte (of min_vehicle_disp)
+                    # Manier 1 (Nieuw in beeld verschenen rijdende auto - TAAK 4 aangescherpt):
+                    # Niet op een geparkeerde plek, minstens 4 opeenvolgende frames in dezelfde richting,
+                    # verplaatsing abs(cx2 - cx1) >= 0.18*w en changed_pixel_ratio >= 0.35.
                     valid_steps = True
-                    if len(track.frames) < 3:
+                    same_direction = True
+                    if len(track.frames) < 4:
                         valid_steps = False
+                        same_direction = False
                     else:
+                        xs = [((f[1][0] + f[1][2]) / 2.0) for f in track.frames]
+                        dxs = [xs[i] - xs[i - 1] for i in range(1, len(xs))]
+                        same_direction = all(d > 0 for d in dxs) or all(d < 0 for d in dxs)
                         for idx in range(1, len(track.frames)):
                             pb = track.frames[idx - 1][1]
                             cb = track.frames[idx][1]
@@ -889,14 +893,16 @@ class SmartDetector:
                                 valid_steps = False
                                 break
 
-                    if (not is_parked_spot) and max_pixel_ratio >= 0.15 and len(track.frames) >= 3 and valid_steps and delta_d >= 0.14:
+                    total_dx = abs(cx2 - cx1) / float(w)
+                    if (not is_parked_spot) and max_pixel_ratio >= 0.35 and len(track.frames) >= 4 and valid_steps and same_direction and total_dx >= 0.18:
                         is_valid_object = True
-                        verified_disp_pct = max(delta_d_pct, 14.0)
-                        logger.info("Vehicle Manier 1 (New Moving Vehicle): %s ratio=%.2f, frames=%d, disp=%.1f%%", track.label, max_pixel_ratio, len(track.frames), delta_d_pct)
+                        verified_disp_pct = max(delta_d_pct, 18.0)
+                        logger.info("Vehicle Manier 1 (New Moving Vehicle): %s ratio=%.2f, frames=%d, disp=%.1f%%, dir=%s",
+                                    track.label, max_pixel_ratio, len(track.frames), delta_d_pct, same_direction)
 
                     # Manier 2 (Wegrijdende of inparkerende auto):
-                    # Overlapt geparkeerde plek, ratio >= 0.25 én centroid shift >= 5% van schermbreedte
-                    elif is_parked_spot and max_pixel_ratio >= 0.25 and delta_d >= min_vehicle_disp:
+                    # Overlapt geparkeerde plek, ratio >= 0.35 én centroid shift >= 18% van schermbreedte
+                    elif is_parked_spot and max_pixel_ratio >= 0.35 and delta_d >= 0.18:
                         is_valid_object = True
                         verified_disp_pct = delta_d_pct
                         logger.info("Vehicle Manier 2 (Departing/Parking): %s ratio=%.2f, disp=%.1f%%", track.label, max_pixel_ratio, delta_d_pct)
@@ -1127,6 +1133,17 @@ class SmartDetector:
             },
         )
         logger.info("Dispatched immediate push notification for %s (%s) within 1.2s", category, label)
+
+        from app.logger import log_ai_event
+        log_ai_event(
+            category=category,
+            label=label,
+            confidence=round(confidence, 2),
+            displacement_pct=disp_pct,
+            silent=in_quiet_hours or not should_notify,
+            action="Dispatched" if (should_notify and not in_quiet_hours) else "Silent/Suppressed",
+            details=f"quiet={in_quiet_hours}, notify={should_notify}",
+        )
 
         # 7. Launch background clip recording under single recording lock
         asyncio.create_task(

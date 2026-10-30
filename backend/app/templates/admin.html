@@ -465,14 +465,19 @@
                 <div class="flex items-center justify-between pb-3 border-b border-dark-800">
                     <div>
                         <div class="flex items-center gap-2">
-                            <h3 class="font-bold text-white text-sm">Hikvision Poort 8000 C-SDK Hardware Alarmkanaal</h3>
+                            <h3 class="font-bold text-white text-sm">Hikvision Poort 8000 C-SDK Dual Alarmkanaal & Sniffer</h3>
                             <span id="sdk-alarm-status" class="px-2 py-0.5 rounded text-[10px] font-bold bg-dark-800 text-gray-400">Controleren...</span>
                         </div>
-                        <p class="text-xs text-gray-400">Binnenkomende hardware drukknop events (NET_DVR_SetupAlarmChan_V41 op 192.168.2.31:8000)</p>
+                        <p class="text-xs text-gray-400">Dual ingest (Deploy 0 & 1) + Passieve TCP Listen op Poort 7200 + 100% Raw Sniffer</p>
                     </div>
-                    <button onclick="loadSdkAlarmLogs()" class="px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs text-gray-300">
-                        Verversen
-                    </button>
+                    <div class="flex items-center gap-2">
+                        <button onclick="loadNativeSdkLog()" class="px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs text-cyan-400">
+                            🔍 Bekijk hcnetsdk_native.log
+                        </button>
+                        <button onclick="loadSdkAlarmLogs()" class="px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs text-gray-300">
+                            Verversen
+                        </button>
+                    </div>
                 </div>
                 <div class="overflow-x-auto">
                     <table class="w-full text-left text-xs">
@@ -493,6 +498,39 @@
                     </table>
                 </div>
             </div>
+
+            <!-- Shazam Chime Acoustic Detector Monitor -->
+            <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4">
+                <div class="flex items-center justify-between pb-3 border-b border-dark-800">
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <h3 class="font-bold text-white text-sm">Real-Time 3-Layer Shazam Deurbel-Chime Detector</h3>
+                            <span id="shazam-status" class="px-2 py-0.5 rounded text-[10px] font-bold bg-dark-800 text-gray-400">Controleren...</span>
+                        </div>
+                        <p class="text-xs text-gray-400">728 Hz / 570 Hz dual-tone akoestische vingerafdruk (2D Normalized Cross-Correlation)</p>
+                    </div>
+                    <button onclick="loadShazamDetections()" class="px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs text-gray-300">
+                        Verversen
+                    </button>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs">
+                        <thead class="bg-dark-800/60 text-gray-400 uppercase text-[10px] tracking-wider">
+                            <tr>
+                                <th class="p-3">Tijdstip</th>
+                                <th class="p-3">NCC Score</th>
+                                <th class="p-3">Status</th>
+                                <th class="p-3">Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="shazam-table-body" class="divide-y divide-dark-800 text-gray-300">
+                            <tr>
+                                <td colspan="4" class="p-4 text-center text-gray-500">Nog geen akoestische chime evaluaties boven drempelwaarde.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </section>
     </main>
 
@@ -503,6 +541,29 @@
             <button onclick="closeSnapModal()" class="absolute top-4 right-4 bg-dark-800/80 text-white rounded-full p-2 hover:bg-dark-700">
                 ✕
             </button>
+        </div>
+    </div>
+
+    <!-- Modal for Native C-SDK Log View -->
+    <div id="sdk-log-modal" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden z-50 flex items-center justify-center p-4" onclick="closeSdkLogModal()">
+        <div class="max-w-4xl w-full max-h-[85vh] bg-dark-900 border border-dark-700 rounded-2xl overflow-hidden p-5 flex flex-col space-y-4" onclick="event.stopPropagation()">
+            <div class="flex items-center justify-between pb-3 border-b border-dark-800">
+                <div>
+                    <h3 class="font-bold text-white text-base">Hikvision libhcnetsdk.so Native C-Log</h3>
+                    <p id="sdk-log-filename" class="text-xs text-cyan-400 font-mono">SdkLog_1_W.log</p>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button onclick="loadNativeSdkLog()" class="px-3 py-1 rounded-lg bg-dark-800 hover:bg-dark-700 text-xs text-gray-300">
+                        Verversen
+                    </button>
+                    <button onclick="closeSdkLogModal()" class="bg-dark-800 hover:bg-dark-700 text-white rounded-full p-2">
+                        ✕
+                    </button>
+                </div>
+            </div>
+            <div id="sdk-log-content" class="flex-1 bg-dark-950 rounded-xl p-4 font-mono text-xs overflow-y-auto space-y-1 text-gray-300 max-h-[60vh]">
+                Laden van logregels...
+            </div>
         </div>
     </div>
 
@@ -524,31 +585,15 @@
 
             if (tabId === 'tab-inspector') loadAuditLogs();
             if (tabId === 'tab-settings') loadSystemSettings();
-            if (tabId === 'tab-logs') { loadBackendLogs(); loadCrashLogs(); loadSdkAlarmLogs(); }
+            if (tabId === 'tab-logs') { loadBackendLogs(); loadCrashLogs(); loadSdkAlarmLogs(); loadShazamDetections(); }
         }
 
-        // Live HUD clock & frame refresh
+        // Live HUD clock
         setInterval(() => {
             const now = new Date();
-            document.getElementById('hud-clock').textContent = now.toTimeString().split(' ')[0];
+            const clockEl = document.getElementById('hud-clock');
+            if (clockEl) clockEl.textContent = now.toTimeString().split(' ')[0];
         }, 1000);
-
-        // Frame refresh loop (every 1.5s)
-        function refreshLiveFrame() {
-            if (currentTab === 'tab-live') {
-                const img = document.getElementById('live-img');
-                const t0 = performance.now();
-                const nextSrc = '/api/v1/live/instant.jpg?t=' + Date.now();
-                const temp = new Image();
-                temp.onload = () => {
-                    img.src = nextSrc;
-                    const elapsed = Math.round(performance.now() - t0);
-                    document.getElementById('frame-age').textContent = elapsed + ' ms';
-                };
-                temp.src = nextSrc;
-            }
-        }
-        setInterval(refreshLiveFrame, 1500);
 
         // Periodic Status Refresh (CPU, RAM, Disk, Components)
         async function fetchSystemStatus() {
@@ -901,6 +946,80 @@
                     container.innerHTML = '<div class="p-6 text-center text-gray-500">Geen Android app crashes gemeld (applicatie draait stabiel).</div>';
                 }
             } catch (e) {}
+        }
+
+        async function loadNativeSdkLog() {
+            const modal = document.getElementById('sdk-log-modal');
+            const content = document.getElementById('sdk-log-content');
+            const filenameEl = document.getElementById('sdk-log-filename');
+            if (modal) modal.classList.remove('hidden');
+            if (content) content.innerText = 'Logregels ophalen van server...';
+            try {
+                const res = await fetch('/api/v1/admin/hcnetsdk-native-log');
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const d = await res.json();
+                if (filenameEl) filenameEl.innerText = d.file || 'Geen bestand';
+                if (content) {
+                    content.innerHTML = '';
+                    if (d.lines && d.lines.length > 0) {
+                        d.lines.forEach(l => {
+                            const p = document.createElement('div');
+                            p.textContent = l;
+                            p.className = 'hover:bg-dark-900 px-1 rounded whitespace-pre-wrap';
+                            content.appendChild(p);
+                        });
+                        content.scrollTop = content.scrollHeight;
+                    } else {
+                        content.innerText = 'Geen logregels gevonden in ' + (d.file || 'bestand');
+                    }
+                }
+            } catch (err) {
+                if (content) content.innerText = 'Fout bij ophalen van C-SDK native logs: ' + err.message;
+            }
+        }
+
+        function closeSdkLogModal() {
+            const modal = document.getElementById('sdk-log-modal');
+            if (modal) modal.classList.add('hidden');
+        }
+
+        async function loadShazamDetections() {
+            const tbody = document.getElementById('shazam-table-body');
+            const statusEl = document.getElementById('shazam-status');
+            try {
+                const res = await fetch('/api/v1/admin/shazam-detections');
+                if (!res.ok) return;
+                const d = await res.json();
+                if (statusEl) {
+                    if (d.status === 'active') {
+                        statusEl.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
+                        statusEl.innerText = '🟢 Actief (3-Layer Shazam)';
+                    } else {
+                        statusEl.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30';
+                        statusEl.innerText = '🟡 Gestopt';
+                    }
+                }
+                if (!tbody) return;
+                tbody.innerHTML = '';
+                if (d.detections && d.detections.length > 0) {
+                    d.detections.forEach(det => {
+                        const tr = document.createElement('tr');
+                        const isMatch = det.matched;
+                        const statClass = isMatch ? 'text-emerald-400 font-bold' : 'text-gray-400';
+                        tr.innerHTML = `
+                            <td class="p-3 text-gray-400 font-mono text-[11px]">${det.timestamp}</td>
+                            <td class="p-3 font-mono font-bold ${det.ncc >= 0.82 ? 'text-emerald-400' : 'text-cyan-400'}">${(det.ncc * 100).toFixed(1)}% (${det.ncc})</td>
+                            <td class="p-3 ${statClass}">${isMatch ? '🚨 MATCHED DEURBEL' : 'Evaluatie'}</td>
+                            <td class="p-3 text-gray-300 max-w-sm truncate" title="${det.details}">${det.details}</td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center text-gray-500">Nog geen akoestische chime evaluaties boven drempelwaarde.</td></tr>';
+                }
+            } catch (e) {
+                if (tbody) tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center text-red-400">Fout bij laden van Shazam detecties.</td></tr>';
+            }
         }
     </script>
 </body>

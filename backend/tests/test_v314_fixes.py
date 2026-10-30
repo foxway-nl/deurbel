@@ -21,22 +21,21 @@ from app.models import get_setting, init_db
 async def test_v314_acoustic_chime_eradication():
     """
     Test 1:
-    Verify that ring_detector.py does not exist on disk, cannot be imported,
-    and system_settings has purged audio_chime_fallback_enabled.
+    Verify legacy FFT chime settings are purged from system_settings,
+    and ring_detector provides the modern v3.3.0 3-layer Shazam detector.
     """
     await init_db()
 
-    # 1. Ensure ring_detector.py does not exist
-    backend_app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    ring_detector_path = os.path.join(backend_app_dir, "app", "ring_detector.py")
-    assert not os.path.exists(ring_detector_path), "ring_detector.py MUST be deleted!"
-
-    # 2. Ensure system_settings does not contain chime settings
+    # 1. Ensure system_settings does not contain legacy chime settings
     chime_setting = await get_setting("audio_chime_fallback_enabled", None)
     assert chime_setting is None, "audio_chime_fallback_enabled must be purged from database"
 
     ding_setting = await get_setting("ring_ding_hz", None)
     assert ding_setting is None, "ring_ding_hz must be purged from database"
+
+    # 2. Verify modern ring_detector is Shazam-based
+    from app.ring_detector import ring_detector
+    assert hasattr(ring_detector, "evaluate_audio_window")
 
 
 @pytest.mark.asyncio

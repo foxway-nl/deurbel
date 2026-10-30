@@ -271,6 +271,22 @@ CREATE TABLE IF NOT EXISTS crash_logs (
     stacktrace    TEXT NOT NULL,
     screen_state  TEXT DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS sdk_alarm_logs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp      TEXT NOT NULL,
+    command_id     INTEGER NOT NULL,
+    command_hex    TEXT NOT NULL,
+    command_name   TEXT NOT NULL,
+    event_type     INTEGER,
+    event_name     TEXT,
+    details        TEXT DEFAULT '',
+    dw_buf_len     INTEGER DEFAULT 0,
+    by_deploy_type INTEGER DEFAULT 0,
+    payload_hex    TEXT DEFAULT '',
+    payload_ascii  TEXT DEFAULT '',
+    action_taken   TEXT DEFAULT 'Logged'
+);
 """
 
 

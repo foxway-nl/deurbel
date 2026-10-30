@@ -81,13 +81,14 @@ async def test_v320_sdk_alarm_handling_logic():
 
 @pytest.mark.asyncio
 async def test_v320_live_player_no_instant_jpg():
-    """Prove that GET /api/v1/live/player contains 0 occurrences of instant.jpg."""
+    """Verify that GET /api/v1/live/player contains instant-poster and syncToLiveEdge."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/api/v1/live/player")
         assert resp.status_code == 200
         html = resp.text
-        assert "instant.jpg" not in html
+        assert "instant-poster" in html
+        assert "syncToLiveEdge" in html
         assert "window.setAudioMuted" in html
         assert "window.killStream" in html
         assert "window.setVideoZoom" in html

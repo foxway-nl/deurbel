@@ -481,11 +481,11 @@ fun LiveScreen() {
                     }
                 }
 
-                // Speaker Mute Toggle
+                // Speaker Mute Toggle (Strict 2-state: Red = muted, Green = audio on)
                 Surface(
-                    color = if (isSpeakerMuted) CoralDecline.copy(alpha = 0.3f) else SurfaceGlass,
+                    color = if (isSpeakerMuted) Color(0xFFDC2626) else Color(0xFF10B981),
                     shape = RoundedCornerShape(20.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, if (isSpeakerMuted) CoralDecline else DividerDark),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, if (isSpeakerMuted) Color(0xFFDC2626) else Color(0xFF10B981)),
                     modifier = Modifier.clickable {
                         val next = !isSpeakerMuted
                         isSpeakerMuted = next
@@ -502,7 +502,7 @@ fun LiveScreen() {
                         Icon(
                             imageVector = if (isSpeakerMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
                             contentDescription = "Deurbel Geluid",
-                            tint = if (isSpeakerMuted) CoralDecline else EmeraldPrimary,
+                            tint = Color.White,
                             modifier = Modifier.size(18.dp)
                         )
                     }

@@ -1,4 +1,4 @@
-# Foxway Smart Doorbell API Documentatie (v3.2.0)
+# Foxway Smart Doorbell API Documentatie (v3.3.0)
 
 De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8090`, WAN: `https://deurbel.foxway.nl`).
 
@@ -6,15 +6,27 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
 
 ---
 
-## 1. Poort 8000 C-SDK Hardware Alarm Listener (`v3.2.0`)
+## 1. Poort 8000 C-SDK Hardware Alarm Listener & Packet Sniffer (`v3.3.0`)
 
-### `GET /api/v1/admin/sdk-alarm-events` (en `/api/v1/sdk-alarm-events`)
-- **Beschrijving:** Exposeert de real-time hardware events die via Poort 8000 C-SDK (`NET_DVR_SetupAlarmChan_V41`) binnenkomen.
+### `GET /api/v1/admin/sdk-alarm-logs` (en `/api/v1/admin/sdk-alarm-events`)
+- **Beschrijving:** Exposeert persistente Port 8000 C-SDK raw packet sniffer logs uit de SQLite tabel `sdk_alarm_logs`.
 - **Filtering & Triggers:**
-  - `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` (0x1132) met byte 44 == 1 triggert direct een deurbel-ring (Visitor Call).
+  - Dual Alarm Ingest met `byDeployType = 0` (Intercom) en `byDeployType = 1` (Server mode) via de officiële 28-byte `NET_DVR_SETUPALARM_PARAM` struct.
+  - Passieve TCP Listen op Poort 7200 (`NET_DVR_StartListen_V30`).
+  - Native file logger naar `/mnt/opslag/deurbel/logs/hcnetsdk_native/`.
+  - `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` (0x1132) met byte 44 in (1, 0) triggert direct een deurbel-ring.
   - `COMM_ALARM_VIDEO_INTERCOM` (0x1133) met byte 44 in (1, 14) triggert direct een deurbel-ring.
-  - `COMM_ALARM_V30` (0x4000) en `0x4007`: `dwAlarmType == 3` (Motion) wordt 100% genegeerd en niet weggeschreven; elk ander `dwAlarmType` triggert een deurbel-ring.
-  - Logt de eerste 64 bytes hex payload van elk event.
+  - `COMM_ALARM_V30` (0x4000) en `0x4007`: `dwAlarmType == 3` (Motion) wordt genegeerd; elk ander `dwAlarmType` triggert een deurbel-ring.
+  - ISAPI alarms (`0x5002` / `0x6009`) met 'ring' / 'call' triggeren een deurbel-ring.
+
+### `GET /api/v1/admin/hcnetsdk-native-log`
+- **Beschrijving:** Retourneert de laatste 300 regels van het actieve native C-SDK logbestand (`SdkLog_1_W.log`).
+
+### `GET /api/v1/admin/shazam-detections`
+- **Beschrijving:** Exposeert de recente 3-laags Shazam akoestische chime evaluaties (728 Hz / 570 Hz) met hun 2D Normalized Cross-Correlation scores.
+
+### `POST /api/v1/logs/client`
+- **Beschrijving:** Ingest van Android client diagnostics dumps (toestelspecificaties, schermstatus en app-logs) naar de centrale dagelijkse black-box log `/mnt/opslag/deurbel/logs/YYYY-MM-DD.jsonl`.
 - **Output:**
   ```json
   {

@@ -369,3 +369,61 @@ async def ingest_client_crash(body: ClientCrashReport):
     )
     return {"status": "ok", "log_id": log_id, "message": "Crash stacktrace gelogd"}
 
+
+@router.get("/api/v1/admin/sdk-alarm-logs")
+@router.get("/api/v1/admin/sdk-alarm-events")
+async def get_sdk_alarm_logs(limit: int = 100):
+    """Returns persistent Port 8000 SDK packet sniffer logs from SQLite."""
+    from app.database import get_db
+    from app.sdk_alarm_listener import sdk_alarm_listener
+    async with get_db(write=False) as db:
+        cursor = await db.execute(
+            """
+            SELECT id, timestamp, command_id, command_hex, command_name,
+                   event_type, event_name, details, dw_buf_len, by_deploy_type,
+                   payload_hex, payload_ascii, action_taken
+            FROM sdk_alarm_logs
+            ORDER BY id DESC LIMIT ?
+            """,
+            (limit,)
+        )
+        rows = await cursor.fetchall()
+        return {
+            "connected": sdk_alarm_listener.is_connected,
+            "channel0": sdk_alarm_listener._alarm_handle_deploy0 >= 0,
+            "channel1": sdk_alarm_listener._alarm_handle_deploy1 >= 0,
+            "listen_handle": sdk_alarm_listener._listen_handle >= 0,
+            "events": [dict(r) for r in rows],
+        }
+
+
+@router.get("/api/v1/admin/hcnetsdk-native-log")
+async def get_hcnetsdk_native_log():
+    """Returns tail of native C-SDK log file."""
+    import glob
+    files = glob.glob("/mnt/opslag/deurbel/logs/hcnetsdk_native/*.log")
+    if not files:
+        return {"file": None, "lines": ["Geen native C-SDK logbestand gevonden."]}
+    latest_file = max(files, key=os.path.getmtime)
+    lines = []
+    try:
+        with open(latest_file, "r", encoding="utf-8", errors="ignore") as f:
+            lines = list(collections.deque(f, maxlen=300))
+    except Exception as e:
+        lines = [f"Fout bij lezen van {latest_file}: {e}"]
+    return {"file": os.path.basename(latest_file), "lines": lines}
+
+
+@router.get("/api/v1/admin/shazam-detections")
+async def get_shazam_detections():
+    """Returns recent Shazam Chime detection evaluations."""
+    try:
+        from app.ring_detector import ring_detector
+        return {
+            "status": "active" if ring_detector._running else "stopped",
+            "fingerprint": os.path.exists(ring_detector.fingerprint_path),
+            "detections": ring_detector.get_recent_detections(),
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e), "detections": []}
+

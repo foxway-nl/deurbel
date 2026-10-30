@@ -85,6 +85,7 @@ from app.models import (
     set_camera_credentials,
 )
 from app.push_service import push_event, ws_manager
+from app.logger import log_client_dump
 from app.recorder import (
     cleanup_expired_clips,
     cleanup_storage_and_retention,
@@ -302,6 +303,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not start SDK Alarm Listener: %s", e)
 
+    # Start Real-Time 3-Layer Shazam Doorbell Chime Detector
+    try:
+        from app.ring_detector import ring_detector
+        await ring_detector.start()
+    except Exception as e:
+        logger.warning("Could not start Shazam Ring Detector: %s", e)
+
     # Start RAM Ring Buffer for continuous smart pre-roll
     try:
         await ring_buffer.start()
@@ -338,6 +346,11 @@ async def lifespan(app: FastAPI):
     try:
         from app.sdk_alarm_listener import sdk_alarm_listener
         await sdk_alarm_listener.stop()
+    except Exception:
+        pass
+    try:
+        from app.ring_detector import ring_detector
+        await ring_detector.stop()
     except Exception:
         pass
     await mdns_service.stop()
@@ -1426,10 +1439,12 @@ async def proxy_go2rtc_asset(asset_name: str):
 async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(False)):
     """
     Clean Zero-UI fullscreen 4:3 HTML5 player for native go2rtc hardware streaming (MSE + WebRTC).
-    Zero controls, object-fit fill, buffer lag compensation, audio mute toggle, killStream & setVideoZoom.
+    Zero controls, object-fit fill, <0.3s live-edge lag sync, audio mute toggle, killStream & setVideoZoom.
+    Displays instant-poster at ms 0 to eliminate 4s black screen, removed on first video frame.
     """
     is_muted_attr = "muted" if muted else ""
     default_muted = "true" if muted else "false"
+    ts = int(time.time() * 1000)
     html = f"""<!DOCTYPE html>
 <html lang="nl">
 <head>
@@ -1444,6 +1459,17 @@ async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(False
       background: #000;
       overflow: hidden;
       touch-action: none;
+    }}
+    #instant-poster {{
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100vw !important;
+      height: 100vh !important;
+      object-fit: fill !important;
+      z-index: 10;
+      pointer-events: none;
+      background: #000;
     }}
     zero-player {{
       width: 100vw !important;
@@ -1472,11 +1498,13 @@ async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(False
   </style>
 </head>
 <body>
+  <img id="instant-poster" src="/api/v1/live/instant.jpg?t={ts}" alt="" />
   <zero-player id="player" src="" mode="webrtc,mse,mp4" playsinline autoplay {is_muted_attr} disablepictureinpicture></zero-player>
   <script type="module">
     import {{ VideoRTC }} from '/api/go2rtc/video-rtc.js';
 
     window._killed = false;
+    window._syncTimer = null;
 
     class ZeroPlayer extends VideoRTC {{
       oninit() {{
@@ -1494,12 +1522,36 @@ async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(False
           this.video.volume = initMuted ? 0.0 : 1.0;
 
           const v = this.video;
-          v.ontimeupdate = function() {{
-            if (v.buffered.length > 0) {{
-              const lag = v.buffered.end(v.buffered.length - 1) - v.currentTime;
-              if (lag > 1.5) v.currentTime = v.buffered.end(v.buffered.length - 1) - 0.2;
+
+          const hidePoster = () => {{
+            const poster = document.getElementById('instant-poster');
+            if (poster) {{
+              poster.style.display = 'none';
+              try {{ poster.remove(); }} catch(e) {{}}
             }}
           }};
+
+          const syncToLiveEdge = () => {{
+            if (v && v.buffered && v.buffered.length > 0) {{
+              const end = v.buffered.end(v.buffered.length - 1);
+              const lag = end - v.currentTime;
+              if (lag > 0.4) {{
+                v.currentTime = Math.max(0, end - 0.12);
+              }}
+            }}
+          }};
+
+          v.addEventListener('loadedmetadata', () => {{ syncToLiveEdge(); }});
+          v.addEventListener('loadeddata', () => {{ hidePoster(); syncToLiveEdge(); }});
+          v.addEventListener('canplay', () => {{ hidePoster(); syncToLiveEdge(); }});
+          v.addEventListener('playing', () => {{ hidePoster(); syncToLiveEdge(); }});
+          v.ontimeupdate = () => {{
+            hidePoster();
+            syncToLiveEdge();
+          }};
+
+          if (window._syncTimer) clearInterval(window._syncTimer);
+          window._syncTimer = setInterval(syncToLiveEdge, 250);
         }}
       }}
 
@@ -1558,6 +1610,10 @@ async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(False
 
     window.killStream = function() {{
       window._killed = true;
+      if (window._syncTimer) {{
+        clearInterval(window._syncTimer);
+        window._syncTimer = null;
+      }}
       try {{
         if (window.ws) {{ window.ws.onclose = null; window.ws.onerror = null; window.ws.close(); window.ws = null; }}
         if (window.pc) {{ window.pc.close(); window.pc = null; }}
@@ -1597,6 +1653,29 @@ async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(False
 </body>
 </html>"""
     return HTMLResponse(content=html)
+
+
+class ClientStatusDumpRequest(BaseModel):
+    device: Optional[Dict[str, Any]] = None
+    screen_state: Optional[str] = ""
+    client_logs: Optional[str] = ""
+
+
+@app.post("/api/v1/logs/client", tags=["Health & Diagnostics"])
+@app.post("/api/v1/logs/client-dump", tags=["Health & Diagnostics"])
+async def ingest_client_status_dump(payload: ClientStatusDumpRequest, request: Request):
+    """
+    Ingests Android client diagnostics status dump and writes to daily blackbox log.
+    Captures device specs, current screen state, and recent app logger entries.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    log_client_dump(
+        device_info=payload.device or {},
+        screen_state=payload.screen_state or "",
+        recent_logs=payload.client_logs or "",
+        ip=client_ip,
+    )
+    return {"status": "ok", "message": "Client status-dump successfully recorded"}
 
 
 @app.get("/api/v1/frame.jpeg", tags=["Live Video & Streaming"])

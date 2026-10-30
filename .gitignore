@@ -41,4 +41,5 @@ firebase-sa.json
 *.pem
 *.key
 *.log
+logs/
 .antigravityignore

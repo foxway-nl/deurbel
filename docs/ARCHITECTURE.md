@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell Architectuur (v3.2.0)
+# Foxway Smart Doorbell Architectuur (v3.3.0)
 
-Dit document beschrijft de technische opzet en datastromen van versie 3.2.0.
+Dit document beschrijft de technische opzet en datastromen van versie 3.3.0.
 
 > **HARDWARE SPECIFICATIE:** De EZVIZ DB1 Pro (`192.168.2.31`) heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT naar Poort 80 verbonden. Alle camera-interacties verlopen strikt via Poort 554 (RTSP) en Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`).
 
@@ -19,10 +19,37 @@ flowchart TD
 
     subgraph Server ["Foxway Server (192.168.2.1)"]
         RTSP["go2rtc (Poort 8554/1984)"]
-        SDK["Hikvision C-SDK (Poort 8000)"]
+        SDK["Hikvision C-SDK (Poort 8000 Dual Ingest)"]
+        Shazam["3-Layer Shazam Chime Detector (728Hz / 570Hz)"]
         RingBuffer["RAM Ring-Buffer (/dev/shm/deurbel_ring - Unix TS seg_%s.ts)"]
+        BlackBox["Centrale Black-Box Logging (/mnt/opslag/deurbel/logs/YYYY-MM-DD.jsonl)"]
         
         subgraph Backend ["FastAPI Backend (Docker :8090)"]
+            Router["FastAPI Router"]
+            LivePlayer["Zero-UI Live Player (<0.3s edge-sync, instant poster)"]
+            StateEngine["Call State Machine"]
+            AI["Temporal AI Detector (YOLOv8n + Parked Car Gatekeeper)"]
+            SDKListener["SDK Alarm Listener & 100% Buffer Sniffer"]
+        end
+    end
+
+    subgraph Client ["Android App (v3.3.0, versionCode 28)"]
+        LiveView["Live Kijken (2-State Mute Knop)"]
+        CallView["Aanbelscherm (Tweeweg Audio)"]
+        ClipsView["Opnames & Clips (Vaste 4:3 Containers)"]
+        WSClient["WebSocket Foreground Service & Push Gatekeeper"]
+        StatusReporter["Status-Dump Reporter"]
+    end
+
+    CamBtn -->|Poort 8000 C-SDK| SDKListener
+    CamMic -->|RTSP Audio| Shazam
+    Shazam -->|NCC >= 0.82| StateEngine
+    SDKListener -->|Alarm Packet| StateEngine
+    SDKListener --> BlackBox
+    Shazam --> BlackBox
+    Backend --> BlackBox
+    StatusReporter -->|POST /api/v1/logs/client| BlackBox
+```
             SDKAlarm["Port 8000 SDK Alarm Listener (0x1132 b44==1, 0x1133 b44 in 1,14, 0x4000 non-motion)"]
             WSProxy["WebSocket Proxy (/api/go2rtc/ws) & Zero-UI Player (/api/v1/live/player, no instant.jpg)"]
             TemporalAI["Temporal Pixel-Diff AI & Anti-Car Swap (parked_spots pre-filter)"]

@@ -172,6 +172,20 @@ class WebSocketForegroundService : Service() {
                 )
             }
             "motion" -> {
+                // Hard Rule: Suppress if event is marked silent
+                if (item.silent) {
+                    Log.i(TAG, "Suppressed silent motion event id=${item.id}")
+                    return
+                }
+                // Hard Rule: Check user notification preferences for this category
+                val settingsPrefs = getSharedPreferences("foxway_settings", Context.MODE_PRIVATE)
+                val cat = item.category.lowercase().trim()
+                val notifyKey = "notify_$cat"
+                val isNotifyEnabled = settingsPrefs.getBoolean(notifyKey, true)
+                if (!isNotifyEnabled) {
+                    Log.i(TAG, "Suppressed notification for disabled category '$cat' (key=$notifyKey)")
+                    return
+                }
                 // Hard Rule: Motion notification only if < 60 seconds old AND not shown before
                 if (eventSec > 0 && ageSec > 60L) {
                     Log.w(TAG, "Suppressed stale motion event id=${item.id}, age=${ageSec}s (>60s limit)")

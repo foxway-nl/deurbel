@@ -191,5 +191,12 @@ interface FoxwayApi {
 
     @PUT("/api/v1/settings/camera")
     suspend fun updateCameraSettings(@Body body: CameraSettingsUpdate): Response<Map<String, Any>>
+
+    // ── Client Status Dump & Diagnostics ──────────────────────────────
+
+    @POST("/api/v1/logs/client")
+    suspend fun postClientStatusDump(
+        @Body body: Map<String, Any>
+    ): Response<Map<String, Any>>
 }
 

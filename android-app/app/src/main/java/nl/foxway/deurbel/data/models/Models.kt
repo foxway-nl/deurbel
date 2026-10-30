@@ -295,6 +295,7 @@ data class EventItemDto(
     val title: String = "",
     @SerializedName("clip_id") val clipId: String = "",
     @SerializedName("snapshot_url") val snapshotUrl: String = "",
+    val silent: Boolean = false,
     @SerializedName("created_at") val createdAt: String = ""
 )
 

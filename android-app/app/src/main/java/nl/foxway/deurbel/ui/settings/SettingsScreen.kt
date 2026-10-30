@@ -125,13 +125,33 @@ fun SettingsScreen(
         uncheckedBorderColor = Color(0xFF546E7A)
     )
 
+    val saveSettingsToPrefs: (DetectionSettingsDto) -> Unit = { det ->
+        context.getSharedPreferences("foxway_settings", Context.MODE_PRIVATE).edit()
+            .putBoolean("detection_enabled", det.detectionEnabled)
+            .putBoolean("record_person", det.recordPerson)
+            .putBoolean("record_vehicle", det.recordVehicle)
+            .putBoolean("record_animal", det.recordAnimal)
+            .putBoolean("record_motion", det.recordMotion)
+            .putBoolean("notify_person", det.notifyPerson)
+            .putBoolean("notify_vehicle", det.notifyVehicle)
+            .putBoolean("notify_animal", det.notifyAnimal)
+            .putBoolean("notify_motion", det.notifyMotion)
+            .putBoolean("quiet_hours_enabled", det.quietHoursEnabled)
+            .putString("quiet_hours_start", det.quietHoursStart)
+            .putString("quiet_hours_end", det.quietHoursEnd)
+            .apply()
+    }
+
     val loadRemoteSettings = {
         coroutineScope.launch {
             try {
                 val api = ApiClientFactory.createApi()
                 val det = api.getDetectionSettings()
                 if (det.isSuccessful) {
-                    det.body()?.let { detectionSettings = it }
+                    det.body()?.let {
+                        detectionSettings = it
+                        saveSettingsToPrefs(it)
+                    }
                 }
                 val stor = api.getStorageSettings()
                 if (stor.isSuccessful) {
@@ -143,11 +163,46 @@ fun SettingsScreen(
 
     val saveDetection: (DetectionSettingsDto) -> Unit = { updated ->
         detectionSettings = updated
+        saveSettingsToPrefs(updated)
         coroutineScope.launch {
             try {
                 val api = ApiClientFactory.createApi()
                 api.updateDetectionSettings(updated)
             } catch (_: Exception) {}
+        }
+    }
+
+    val reportStatusDump: () -> Unit = {
+        coroutineScope.launch {
+            try {
+                val api = ApiClientFactory.createApi()
+                val deviceMap = mapOf<String, Any>(
+                    "brand" to android.os.Build.BRAND,
+                    "model" to android.os.Build.MODEL,
+                    "manufacturer" to android.os.Build.MANUFACTURER,
+                    "android_sdk" to android.os.Build.VERSION.SDK_INT,
+                    "app_version" to "v3.3.0 (28)",
+                    "base_url" to activeBaseUrl,
+                    "is_wan_mode" to isWanMode
+                )
+                val logsList = appLogger.logsFlow.value
+                val logsText = logsList.take(40).joinToString("\n") { entry ->
+                    "[${entry.formattedTime()}] [${entry.category.name}] ${entry.message}${if (!entry.details.isNullOrBlank()) " (${entry.details})" else ""}"
+                }
+                val payload = mapOf<String, Any>(
+                    "device" to deviceMap,
+                    "screen_state" to "SettingsScreen",
+                    "client_logs" to logsText
+                )
+                val resp = api.postClientStatusDump(payload)
+                if (resp.isSuccessful) {
+                    Toast.makeText(context, "✅ Status-dump succesvol gerapporteerd!", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(context, "Status-dump fout: HTTP ${resp.code()}", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Verzendfout: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -941,7 +996,8 @@ fun SettingsScreen(
     if (showLogsDialog) {
         LogViewerDialog(
             appLogger = appLogger,
-            onDismiss = { showLogsDialog = false }
+            onDismiss = { showLogsDialog = false },
+            onReportStatusDump = { reportStatusDump() }
         )
     }
 
@@ -1241,7 +1297,8 @@ private fun HardwareTestDialog(
 @Composable
 private fun LogViewerDialog(
     appLogger: AppLogger,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onReportStatusDump: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -1420,6 +1477,19 @@ private fun LogViewerDialog(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Wissen", color = CoralDecline)
                     }
+                }
+
+                Button(
+                    onClick = { onReportStatusDump() },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = CyanAccent.copy(alpha = 0.2f),
+                        contentColor = CyanAccent
+                    ),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, CyanAccent)
+                ) {
+                    Text("📤 Rapporteer Fout / Status-Dump", fontWeight = FontWeight.Bold)
                 }
             }
         }
