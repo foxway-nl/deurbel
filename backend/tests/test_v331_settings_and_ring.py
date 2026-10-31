@@ -121,3 +121,23 @@ async def test_v331_shazam_threshold_and_admin_endpoint():
         assert "detections" in data
         assert data.get("threshold") == 0.72
 
+
+@pytest.mark.asyncio
+async def test_v331_admin_auto_login():
+    """Verify 1-click admin auto-login token generation and cookie setting."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Fetch token from /api/v1/admin/auth-token
+        res_token = await client.get("/api/v1/admin/auth-token")
+        assert res_token.status_code == 200
+        token_data = res_token.json()
+        assert "token" in token_data
+        token = token_data["token"]
+        assert len(token) > 20
+
+        # 2. Access /admin with token param -> should redirect to /admin and set cookie
+        res_admin = await client.get(f"/admin?token={token}", follow_redirects=False)
+        assert res_admin.status_code == 302
+        assert res_admin.headers["location"] == "/admin"
+        assert "foxway_admin_session" in res_admin.cookies
+

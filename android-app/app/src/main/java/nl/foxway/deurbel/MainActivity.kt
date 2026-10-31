@@ -129,6 +129,7 @@ fun MainAppScaffold(
         mutableStateOf(if (initialTargetScreen == "clips" || !initialTargetClipId.isNullOrBlank()) MainTab.CLIPS else MainTab.LIVE)
     }
     var permState by remember { mutableStateOf(nl.foxway.deurbel.util.PermissionChecker.checkAll(context)) }
+    var openPermissionsInSettings by remember { mutableStateOf(false) }
 
     LaunchedEffect(initialTargetScreen, initialTargetClipId) {
         if (initialTargetScreen == "clips" || !initialTargetClipId.isNullOrBlank()) {
@@ -190,6 +191,7 @@ fun MainAppScaffold(
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                     shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
                     onClick = {
+                        openPermissionsInSettings = true
                         selectedTab = MainTab.SETTINGS
                     }
                 ) {
@@ -236,7 +238,11 @@ fun MainAppScaffold(
                             }
                         }
                     )
-                    MainTab.SETTINGS -> SettingsScreen(onUnpair = onUnpair)
+                    MainTab.SETTINGS -> SettingsScreen(
+                        onUnpair = onUnpair,
+                        openPermissions = openPermissionsInSettings,
+                        onPermissionsOpened = { openPermissionsInSettings = false }
+                    )
                 }
             }
         }

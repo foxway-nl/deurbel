@@ -26,6 +26,7 @@ from fastapi import (
     Depends,
     Form,
     HTTPException,
+    Query,
     Request,
     Response,
     status,
@@ -119,8 +120,26 @@ def require_admin(request: Request):
 # ── 3. Web UI HTML Routes ─────────────────────────────────────────────
 
 @router.get("/admin/login", response_class=HTMLResponse)
-async def admin_login_page(request: Request):
-    """Serves the login page, or redirects to /admin if already logged in."""
+async def admin_login_page(request: Request, token: Optional[str] = Query(None)):
+    """Serves the login page, or auto-logs in if a valid token is provided, or redirects to /admin if already logged in."""
+    if token:
+        try:
+            payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+            if payload.get("sub") == "admin" or payload.get("role") == "admin":
+                resp = RedirectResponse(url="/admin", status_code=status.HTTP_302_FOUND)
+                resp.set_cookie(
+                    key=SESSION_COOKIE_NAME,
+                    value=token,
+                    max_age=86400 * 7,
+                    httponly=True,
+                    samesite="lax",
+                    secure=False,
+                )
+                logger.info("Admin auto-login token verified on /admin/login from %s", request.client.host if request.client else "unknown")
+                return resp
+        except JWTError:
+            pass
+
     if verify_admin_session(request):
         return RedirectResponse(url="/admin", status_code=status.HTTP_302_FOUND)
     login_html = (TEMPLATES_DIR / "login.html").read_text(encoding="utf-8")
@@ -166,12 +185,37 @@ async def admin_logout():
 
 
 @router.get("/admin", response_class=HTMLResponse)
-async def admin_dashboard_page(request: Request):
-    """Serves the main dark-mode Admin Dashboard."""
+async def admin_dashboard_page(request: Request, token: Optional[str] = Query(None)):
+    """Serves the main dark-mode Admin Dashboard, with seamless auto-login if token is supplied."""
+    if token:
+        try:
+            payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+            if payload.get("sub") == "admin" or payload.get("role") == "admin":
+                resp = RedirectResponse(url="/admin", status_code=status.HTTP_302_FOUND)
+                resp.set_cookie(
+                    key=SESSION_COOKIE_NAME,
+                    value=token,
+                    max_age=86400 * 7,
+                    httponly=True,
+                    samesite="lax",
+                    secure=False,
+                )
+                logger.info("Admin auto-login token verified on /admin from %s", request.client.host if request.client else "unknown")
+                return resp
+        except JWTError as e:
+            logger.warning("Admin auto-login token invalid: %s", e)
+
     if not verify_admin_session(request):
         return RedirectResponse(url="/admin/login", status_code=status.HTTP_302_FOUND)
     admin_html = (TEMPLATES_DIR / "admin.html").read_text(encoding="utf-8")
     return HTMLResponse(content=admin_html)
+
+
+@router.get("/api/v1/admin/auth-token")
+async def get_admin_auth_token():
+    """Generates an admin session JWT token for seamless 1-click auto-login from the paired Android client."""
+    token = create_session_token("admin")
+    return {"token": token}
 
 
 # ── 4. Admin API Endpoints ────────────────────────────────────────────

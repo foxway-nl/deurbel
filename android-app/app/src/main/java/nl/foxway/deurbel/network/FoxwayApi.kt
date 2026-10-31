@@ -198,5 +198,10 @@ interface FoxwayApi {
     suspend fun postClientStatusDump(
         @Body body: Map<String, Any>
     ): Response<Map<String, Any>>
+
+    // ── Admin Auto-Login Token ────────────────────────────────────────
+
+    @GET("/api/v1/admin/auth-token")
+    suspend fun getAdminAuthToken(): Response<Map<String, String>>
 }
 

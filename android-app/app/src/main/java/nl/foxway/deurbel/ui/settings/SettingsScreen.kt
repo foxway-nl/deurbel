@@ -17,6 +17,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -63,10 +66,12 @@ import nl.foxway.deurbel.util.SystemPermissionState
  *  - Hardware & Sound Diagnostic Test (Live video, outdoor audio meter, speak test)
  *  - 30-Day Rotating Event Logbook with filter, search, copy & clear
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SettingsScreen(
-    onUnpair: () -> Unit
+    onUnpair: () -> Unit,
+    openPermissions: Boolean = false,
+    onPermissionsOpened: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -76,6 +81,23 @@ fun SettingsScreen(
     val activeBaseUrl by connectionManager.activeBaseUrl.collectAsState()
     val isWanMode by connectionManager.isWanMode.collectAsState()
     val appLogger = remember { AppLogger.getInstance(context) }
+
+    val scrollState = rememberScrollState()
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    var showPermissionsDetail by remember { mutableStateOf(openPermissions) }
+
+    LaunchedEffect(openPermissions) {
+        if (openPermissions) {
+            showPermissionsDetail = true
+            delay(150)
+            try {
+                bringIntoViewRequester.bringIntoView()
+            } catch (_: Exception) {
+                scrollState.animateScrollTo(scrollState.maxValue)
+            }
+            onPermissionsOpened?.invoke()
+        }
+    }
 
     val userName by prefs.userName.collectAsState(initial = "")
     val userId by prefs.userId.collectAsState(initial = "")
@@ -281,7 +303,7 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scrollState)
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
@@ -782,12 +804,14 @@ fun SettingsScreen(
                     }
 
                     // 1. Android Permissies & Betrouwbaarheid status
-                    var showPermissionsDetail by remember { mutableStateOf(false) }
                     val allPermsOk = permState.allGranted
                     Surface(
                         color = SurfaceVariantDark,
                         shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.fillMaxWidth().clickable { showPermissionsDetail = !showPermissionsDetail }
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .bringIntoViewRequester(bringIntoViewRequester)
+                            .clickable { showPermissionsDetail = !showPermissionsDetail }
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
                             Row(
@@ -874,7 +898,7 @@ fun SettingsScreen(
                         Text("Start Deurbel Hardware Test", color = BackgroundDark, fontWeight = FontWeight.Bold)
                     }
 
-                    // Knop 2: Test Aanbel Trigger (Simuleer Drukknop) (zonder dubbele flash!)
+                    // Knop 2: Test Aanbel Trigger (Simuleer Drukknop) - exact zelfde styling als Knop 1
                     Button(
                         onClick = {
                             coroutineScope.launch {
@@ -903,15 +927,18 @@ fun SettingsScreen(
                         },
                         enabled = !isTriggeringShelly,
                         shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariantDark),
-                        modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 48.dp)
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = EmeraldPrimary,
+                            disabledContainerColor = EmeraldPrimary.copy(alpha = 0.6f)
+                        ),
+                        modifier = Modifier.fillMaxWidth().height(48.dp)
                     ) {
                         if (isTriggeringShelly) {
-                            CircularProgressIndicator(color = EmeraldPrimary, modifier = Modifier.size(18.dp))
+                            CircularProgressIndicator(color = BackgroundDark, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
                         } else {
-                            Icon(imageVector = Icons.Default.NotificationsActive, contentDescription = null, tint = TextPrimary, modifier = Modifier.size(20.dp))
+                            Icon(imageVector = Icons.Default.NotificationsActive, contentDescription = null, tint = BackgroundDark, modifier = Modifier.size(20.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Test Aanbel Trigger (Simuleer Drukknop)", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                            Text("Test Aanbel Trigger (Simuleer Drukknop)", color = BackgroundDark, fontWeight = FontWeight.Bold)
                         }
                     }
 
@@ -919,27 +946,56 @@ fun SettingsScreen(
                         Text(text = it, style = MaterialTheme.typography.bodySmall, color = CyanAccent)
                     }
 
-                    // Knop 3: Open Web Beheerpaneel (/admin)
+                    // Knop 3: Open Web Beheerpaneel (/admin) - met seamless 1-click auto-login!
+                    var isOpeningAdmin by remember { mutableStateOf(false) }
                     OutlinedButton(
                         onClick = {
-                            val adminUrl = if (isWanMode) "https://deurbel.foxway.nl/admin" else "${currentApiBaseUrl.trimEnd('/')}/admin"
-                            val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(adminUrl)).apply {
-                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                            }
-                            try {
-                                context.startActivity(browserIntent)
-                            } catch (e: Exception) {
-                                Toast.makeText(context, "Kan browser niet openen: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                            coroutineScope.launch {
+                                try {
+                                    isOpeningAdmin = true
+                                    val api = ApiClientFactory.createApi()
+                                    val tokenResp = api.getAdminAuthToken()
+                                    val token = if (tokenResp.isSuccessful) tokenResp.body()?.get("token") else null
+                                    val baseUrl = if (isWanMode) "https://deurbel.foxway.nl" else currentApiBaseUrl.trimEnd('/')
+                                    val adminUrl = if (!token.isNullOrBlank()) {
+                                        "$baseUrl/admin?token=$token"
+                                    } else {
+                                        "$baseUrl/admin"
+                                    }
+                                    val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(adminUrl)).apply {
+                                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                    }
+                                    context.startActivity(browserIntent)
+                                } catch (e: Exception) {
+                                    val baseUrl = if (isWanMode) "https://deurbel.foxway.nl" else currentApiBaseUrl.trimEnd('/')
+                                    try {
+                                        val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse("$baseUrl/admin")).apply {
+                                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                        }
+                                        context.startActivity(browserIntent)
+                                    } catch (ex: Exception) {
+                                        Toast.makeText(context, "Kan browser niet openen: ${ex.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                    }
+                                } finally {
+                                    isOpeningAdmin = false
+                                }
                             }
                         },
+                        enabled = !isOpeningAdmin,
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanAccent),
                         border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.5f)),
                         modifier = Modifier.fillMaxWidth().height(48.dp)
                     ) {
-                        Icon(imageVector = Icons.Default.AdminPanelSettings, contentDescription = null, tint = CyanAccent)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Open Web Beheerpaneel (/admin)", color = CyanAccent, fontWeight = FontWeight.SemiBold)
+                        if (isOpeningAdmin) {
+                            CircularProgressIndicator(color = CyanAccent, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Inloggen & openen...", color = CyanAccent, fontWeight = FontWeight.SemiBold)
+                        } else {
+                            Icon(imageVector = Icons.Default.AdminPanelSettings, contentDescription = null, tint = CyanAccent)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Open Web Beheerpaneel (/admin)", color = CyanAccent, fontWeight = FontWeight.SemiBold)
+                        }
                     }
 
                     HorizontalDivider(color = DividerDark)
