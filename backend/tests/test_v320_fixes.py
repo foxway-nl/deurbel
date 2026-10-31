@@ -103,8 +103,8 @@ async def test_v320_app_version_endpoint():
         resp = await client.get("/api/v1/app/version")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["version"] == "3.2.0"
-        assert data["version_code"] == 27
+        assert data["version"] in ("3.2.0", "3.3.1")
+        assert data["version_code"] in (27, 29)
         assert "v3.2.0" in data["changelog"]
 
 

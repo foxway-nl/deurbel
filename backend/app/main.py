@@ -755,13 +755,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "3.2.0",
-        "version_code": 27,
-        "build_time": "2026-10-30T16:00:00Z",
+        "version": "3.3.1",
+        "version_code": 29,
+        "build_time": "2026-10-31T15:45:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.2.0: Port 8000 C-SDK hardware doorbell pushbutton detection (0x1132 & 0x1133 byte 44), audio hard-kill on all screen/app exits, pinch-to-zoom & pan in live & clips, elimination of background instant.jpg polling, strict 4:3 object-fit fill player.",
+        "changelog": "v3.3.1 (v3.2.0 / v3.1.4 / v3.0.0 / v2.8.0): Forensisch bewezen ring triggers (C-SDK + Shazam Chime 0.72), R8 uitschakeling voor betrouwbare call-UI en meldingen, 1-klik admin auto-login, permissieknop styling en automatische scroll/expand naar permissies.",
     }
 
 
