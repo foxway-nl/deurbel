@@ -263,6 +263,9 @@ fun SettingsScreen(
                     titleContentColor = TextPrimary
                 ),
                 actions = {
+                    IconButton(onClick = { showLogsDialog = true }) {
+                        Icon(imageVector = Icons.Default.Info, contentDescription = "Logboek", tint = CyanAccent)
+                    }
                     IconButton(onClick = {
                         permState = PermissionChecker.checkAll(context)
                         refreshUsers()
@@ -761,6 +764,22 @@ fun SettingsScreen(
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     Text("Systeem & Diagnose", fontWeight = FontWeight.Bold, color = TextPrimary)
+
+                    // 📋 Prominente Logboek Knop direct bovenaan
+                    Button(
+                        onClick = { showLogsDialog = true },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = CyanAccent.copy(alpha = 0.15f),
+                            contentColor = CyanAccent
+                        ),
+                        border = BorderStroke(1.dp, CyanAccent),
+                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Info, contentDescription = null, tint = CyanAccent)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("📋 Bekijk Systeemlogboek (30 dagen)", color = CyanAccent, fontWeight = FontWeight.Bold)
+                    }
 
                     // 1. Android Permissies & Betrouwbaarheid status
                     var showPermissionsDetail by remember { mutableStateOf(false) }

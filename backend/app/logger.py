@@ -154,3 +154,43 @@ def log_client_dump(
         },
     )
 
+
+def log_settings_change(source: str, changes: Dict[str, Any]) -> None:
+    """Log any configuration or settings change to black-box JSONL."""
+    log_blackbox(
+        category="SETTINGS",
+        event="SETTINGS CHANGE",
+        level="INFO",
+        data={
+            "source": source,
+            "changes": changes,
+        },
+    )
+
+
+def log_notify_decision(
+    event_type: str,
+    category: str,
+    should_notify: bool,
+    in_quiet_hours: bool,
+    silent: bool,
+    reason: str,
+    tokens: int = 0,
+) -> None:
+    """Log whether a push notification was dispatched or suppressed and the exact rule."""
+    log_blackbox(
+        category="NOTIFY",
+        event="NOTIFY DECISION",
+        level="INFO" if should_notify and not in_quiet_hours else "DEBUG",
+        data={
+            "event_type": event_type,
+            "category": category,
+            "should_notify": should_notify,
+            "in_quiet_hours": in_quiet_hours,
+            "silent": silent,
+            "reason": reason,
+            "device_tokens_count": tokens,
+        },
+    )
+
+

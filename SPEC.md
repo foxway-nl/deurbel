@@ -1,7 +1,7 @@
-# Foxway Smart Doorbell System Specification (v3.3.0)
+# Foxway Smart Doorbell System Specification (v3.3.1)
 
-**Versie:** `v3.3.0` (`versionCode = 28`)  
-**Datum:** 30 Oktober 2026  
+**Versie:** `v3.3.1` (`versionCode = 29`)  
+**Datum:** 31 Oktober 2026  
 **Productie-omgeving:** `foxway` (`192.168.2.1`), WAN: `https://deurbel.foxway.nl`  
 **Camera:** EZVIZ DB1 Pro (`192.168.2.31`), native **4:3 aspect ratio** (`768x576` / `960x720`)
 
@@ -19,18 +19,22 @@ Het Foxway Deurbelsysteem is een end-to-end, privacy-vriendelijk en ultra-low-la
      - Passieve TCP Listen op Poort 7200 (`NET_DVR_StartListen_V30`).
      - Native C-SDK file logger geactiveerd naar `/mnt/opslag/deurbel/logs/hcnetsdk_native/`.
      - 100% Raw buffer packet sniffer met byte-diffing op bewegingsalarmen (`0x4000`).
-     - Triggers: `0x1132` (byte 44 in 1, 0), `0x1133` (byte 44 in 1, 14), `0x4000` (`dwAlarmType == 0`), en ISAPI ring (`0x5002` / `0x6009`).
+     - Triggers: `0x1132` (byte 44 in 1, 0), `0x1133` (byte 44 in 1, 14), `0x4000` (`dwAlarmType == 0`), en ISAPI ring (`0x5002` / `0x6009`), gelogd met `trigger_source = 'CSDK_PORT_8000'`.
 2. **FastAPI & Python Media Server (`backend` in Docker):**
    - Draait op poort 8090 met `network_mode: host`.
-   - **Real-Time 3-Layer Shazam Deurbel-Chime Detector (`ring_detector.py`):** Getraind op authentieke audio-opnames van de fysieke deurbel (728 Hz / 570 Hz dual-tone). Laag 1: spectrale whitening, Laag 2: kwarts-klok toonstabiliteit binnen +-15 Hz, Laag 3: 2D Normalized Cross-Correlation (NCC $\ge 0.82$, 12s cooldown). Logt alle pogingen $\ge 0.45$ NCC in daily JSONL.
+   - **Real-Time 3-Layer Shazam Deurbel-Chime Detector (`ring_detector.py`):** Gekalibreerd op echte fysieke deurbelopnames (728 Hz / 570 Hz dual-tone). Laag 1: spectrale whitening, Laag 2: kwarts-klok toonstabiliteit binnen +-15 Hz, Laag 3: 2D Normalized Cross-Correlation (NCC $\ge 0.72$, 12s cooldown). Logt alle evaluaties $\ge 0.45$ NCC in daily JSONL en triggert oproep met `trigger_source = 'SHAZAM_CHIME'`.
    - **Zero-UI Live Player op `/api/v1/live/player`:** Minimalistische speler gebaseerd op `<zero-player>` en `/api/go2rtc/video-rtc.js`. Instant 4:3 poster gerenderd op ms 0 via `<img id="instant-poster">`, direct verwijderd op eerste video-frame. Live-edge lag recovery op `<0.3s` via 250ms interval, `window.setAudioMuted()`, `window.killStream()`, `window.setVideoZoom()`, en stabiele WS-herverbinding uitsluitend bij `onclose`/`onerror`.
-   - **Notificatie-Poortwachter & Stille Uren (23:30 - 07:30):** Wanneer een categorie `Melding` op UIT staat, zet de backend `silent = True` en `should_notify = False`, waardoor FCM en client-notificaties 100% worden onderdrukt. Deurbeloproepen (`CALL_RINGING`) rinkelen altijd.
+   - **Notificatie-Poortwachter & Stille Uren (23:30 - 07:30):** Wanneer een categorie `Melding` op UIT staat, zet de backend `silent = True` en `should_notify = False`, waardoor FCM en client-notificaties 100% worden onderdrukt. Deurbeloproepen (`CALL_RINGING`) rinkelen altijd en worden nooit onderdrukt.
    - **Anti-Car Swap Filter (`app/ai_detector.py`):** `parked_spots` pre-filtering (`IoU >= 0.55` en `changed_pixel_ratio < 0.30` direct afgekeurd) en strikte stap-verplaatsing validatie over $\ge 4$ opeenvolgende frames in dezelfde richting (`abs(dx) >= 0.18*w` met `changed_pixel_ratio >= 0.35` en `0.02*w <= step_disp <= 0.12*w`).
-   - **Centrale Black-Box JSONL Logging (`app/logger.py`):** Schrijft alle server-, SDK-, Shazam-, AI- en client-events naar chronologische dagelijkse logbestanden in `/mnt/opslag/deurbel/logs/YYYY-MM-DD.jsonl`.
+   - **Centrale Black-Box JSONL Logging (`app/logger.py`):** Schrijft alle server-, SDK-, Shazam-, AI- en client-events, inclusief `[SETTINGS CHANGE]` en `[NOTIFY DECISION]`, naar `/mnt/opslag/deurbel/logs/YYYY-MM-DD.jsonl`.
    - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met 25 FPS live preview player, real-time Poort 8000 SDK packet sniffer tabel, native C-SDK log viewer modal, en Shazam Chime live monitor.
 3. **Android Client App (`android-app`):**
-   - Native Jetpack Compose, Kotlin coroutines, versie 3.3.0 (`versionCode = 28`).
+   - Native Jetpack Compose, Kotlin coroutines, versie 3.3.1 (`versionCode = 29`).
+   - **R8 Minification Uitgeschakeld:** `isMinifyEnabled = false` en `isShrinkResources = false` waarborgen foutloze JSON/Gson deserialisatie van data-classes (`DoorbellEvent`, `CallRingingPayload`, instellingen DTOs).
+   - **Verbeterde Foreground Service Compatibiliteit:** Special-use foreground service types worden uitsluitend op Android 14+ (`API 34`) meegegeven, waardoor crashes op Android 10-13 zijn verholpen.
+   - **Real-Time Belscherm Activatie:** Directe activering van inkomende oproepen zonder foutieve klokskew-suppressie.
    - **Directe 2-Standen Luidsprekerknop:** In `LiveScreen.kt` direct Rood (Gedempt) of Groen (Geluid Aan), zonder grijze `SurfaceGlass` tussenstand.
+   - **Prominente Systeemlogboek Knop:** Direct bovenaan Kaart 4 in `SettingsScreen.kt` en als actieknop in de TopAppBar.
    - **SharedPreferences Notificatie Synchronisatie:** Slaat categorie-schakelaars lokaal op en onderdrukt notificaties in `WebSocketForegroundService.kt` wanneer een categorie UIT staat of het event `silent = true` heeft.
    - **Fout / Status-Dump Reporter:** `"📤 Rapporteer Fout / Status-Dump"` knop in `SettingsScreen.kt` verstuurt toestelspecificaties, schermstatus en de laatste 40 app-logs naar `POST /api/v1/logs/client`.
    - **Strikte 4:3 Aspect Ratio Container:** `LiveScreen.kt`, `CallScreen.kt` en `ClipsScreen.kt` hanteren een harde, onwrikbare `.fillMaxWidth().aspectRatio(4f / 3f)` container.

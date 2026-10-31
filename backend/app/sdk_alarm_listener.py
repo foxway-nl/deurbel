@@ -304,7 +304,7 @@ class SDKAlarmListener:
             if self._loop and self._loop.is_running():
                 try:
                     from app.main import call_sm
-                    asyncio.run_coroutine_threadsafe(call_sm.ring(), self._loop)
+                    asyncio.run_coroutine_threadsafe(call_sm.ring(trigger_source="CSDK_PORT_8000"), self._loop)
                 except Exception as e:
                     logger.error("Failed to dispatch ring to call_sm: %s", e)
         else:

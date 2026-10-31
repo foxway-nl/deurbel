@@ -99,7 +99,7 @@ class FoxwayApp : Application() {
             put("error_message", throwable.message ?: throwable.javaClass.name)
             put("stacktrace", stacktrace)
             put("screen_state", screenContext)
-            put("app_version", "2.3.0")
+            put("app_version", BuildConfig.VERSION_NAME)
             put("timestamp", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US).format(Date()))
         }
 

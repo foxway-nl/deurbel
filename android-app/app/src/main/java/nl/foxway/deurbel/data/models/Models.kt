@@ -197,6 +197,9 @@ data class DoorbellEvent(
     val timestamp: String?
         get() = data["timestamp"] as? String
 
+    val triggerSource: String?
+        get() = data["trigger_source"] as? String
+
     companion object {
         const val CALL_RINGING = "CALL_RINGING"
         const val CALL_CLAIMED = "CALL_CLAIMED"
@@ -296,6 +299,7 @@ data class EventItemDto(
     @SerializedName("clip_id") val clipId: String = "",
     @SerializedName("snapshot_url") val snapshotUrl: String = "",
     val silent: Boolean = false,
+    @SerializedName("trigger_source") val triggerSource: String = "UNKNOWN",
     @SerializedName("created_at") val createdAt: String = ""
 )
 

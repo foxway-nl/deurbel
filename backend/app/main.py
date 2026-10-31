@@ -206,12 +206,14 @@ async def _on_ringing(call):
     """Broadcast CALL_RINGING via WS + FCM and record in event queue."""
     from app.models import save_event
     snapshot_url = f"/api/v1/snapshots/{call.call_id}.jpg" if call.snapshot_path else ""
+    trigger_src = getattr(call, "trigger_source", "UNKNOWN")
     event_dict = await save_event(
         event_type="ring",
         category="ring",
         title="Aanbel oproep",
         clip_id=call.call_id,
         snapshot_url=snapshot_url,
+        trigger_source=trigger_src,
     )
     # Pre-warm Hikvision Port 8000 SDK session so user answering has instant (<200ms) two-way audio
     from app.audio_bridge import async_prewarm_sdk_session
@@ -222,6 +224,7 @@ async def _on_ringing(call):
         "call_id": call.call_id,
         "snapshot_url": snapshot_url,
         "timestamp": call.started_at,
+        "trigger_source": trigger_src,
     })
 
 
@@ -778,7 +781,8 @@ async def shelly_ring_webhook(request: Request, force: bool = False):
     Debounced by 15s to prevent duplicate calls unless force=True.
     """
     is_force = force or (request.query_params.get("force", "").lower() in ("true", "1"))
-    call = await call_sm.ring(force=is_force)
+    src = "TEST_BUTTON" if is_force else "SHELLY_WEBHOOK"
+    call = await call_sm.ring(force=is_force, trigger_source=src)
     if call is None:
         return JSONResponse(status_code=200, content={"status": "SUPPRESSED", "reason": "cooldown or active call"})
 
@@ -791,6 +795,7 @@ async def shelly_ring_webhook(request: Request, force: bool = False):
             "call_id": call.call_id,
             "snapshot_url": snapshot_url,
             "timestamp": call.started_at,
+            "trigger_source": src,
         }
     )
 
@@ -866,11 +871,10 @@ async def ring():
     """
     Trigger a new doorbell ring.
 
-    Called via Shelly Plus Uni webhook (GET or POST) or the 728 Hz
-    Python audio detector.  Idempotent — duplicate rings during
-    cooldown or an active call are silently ignored.
+    Called via Shelly Plus Uni webhook (GET or POST) or manual trigger.
+    Idempotent — duplicate rings during cooldown or an active call are silently ignored.
     """
-    call = await call_sm.ring()
+    call = await call_sm.ring(trigger_source="SHELLY_WEBHOOK")
     if call is None:
         return {"status": "SUPPRESSED", "reason": "cooldown or active call"}
 
@@ -880,6 +884,7 @@ async def ring():
         "call_id": call.call_id,
         "snapshot_url": snapshot_url,
         "timestamp": call.started_at,
+        "trigger_source": "SHELLY_WEBHOOK",
     }
 
 
@@ -1763,18 +1768,14 @@ async def websocket_live_hub_stream(ws: WebSocket):
                     if ws.client_state != WebSocketState.CONNECTED:
                         break
                     await ws.send_bytes(data)
-            except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError, ConnectionResetError):
-                pass
-            except Exception:
+            except BaseException:
                 pass
 
         async def receiver():
             try:
                 while True:
                     await ws.receive()
-            except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError, ConnectionResetError):
-                pass
-            except Exception:
+            except BaseException:
                 pass
 
         send_task = asyncio.create_task(sender())
@@ -1916,7 +1917,9 @@ async def get_detection_settings_endpoint():
 @app.put("/api/v1/settings/detection", response_model=DetectionSettingsModel, tags=["Smart AI Detection"])
 async def update_detection_settings_endpoint(body: DetectionSettingsModel):
     """Update AI detection categories, activity zone, and quiet hours schedule."""
+    from app.logger import log_settings_change
     await DetectionSettings.save(body.model_dump())
+    log_settings_change("api_detection_settings", body.model_dump())
     return body
 
 
@@ -2002,8 +2005,10 @@ async def get_storage_settings_endpoint():
 @app.put("/api/v1/settings/storage", response_model=StorageStatsResponse, tags=["Settings & Storage"])
 async def update_storage_settings_endpoint(body: StorageSettingsModel):
     """Update retention days and max storage cap. Triggers pruning if over capacity."""
+    from app.logger import log_settings_change
     await set_setting("retention_days", str(body.retention_days))
     await set_setting("max_storage_gb", str(body.max_storage_gb))
+    log_settings_change("storage_settings", body.model_dump())
     stats = await cleanup_storage_and_retention(body.retention_days, body.max_storage_gb)
     stats["retention_days"] = body.retention_days
     return StorageStatsResponse(**stats)

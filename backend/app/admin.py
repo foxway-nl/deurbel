@@ -199,6 +199,8 @@ async def update_admin_settings_endpoint(request: Request, body: dict):
         clean_updates[k] = str(v)
 
     await update_system_settings(clean_updates)
+    from app.logger import log_settings_change
+    log_settings_change("admin_web", clean_updates)
     logger.info("Admin updated system settings: %s", list(clean_updates.keys()))
     return {"status": "ok", "message": f"Succesvol {len(clean_updates)} instellingen bijgewerkt"}
 
@@ -246,17 +248,27 @@ async def get_admin_system_status(request: Request):
     creds = await get_camera_credentials()
 
     from app.sdk_alarm_listener import sdk_alarm_listener
+    from app.ring_detector import ring_detector
     sdk_status = {
         "connected": sdk_alarm_listener.is_connected,
         "user_id": sdk_alarm_listener._user_id,
-        "alarm_handle": sdk_alarm_listener._alarm_handle,
+        "channel0": sdk_alarm_listener._alarm_handle_deploy0 >= 0,
+        "channel1": sdk_alarm_listener._alarm_handle_deploy1 >= 0,
+        "listen_handle": sdk_alarm_listener._listen_handle >= 0,
         "target": f"{creds.get('ip', '192.168.2.31')}:{creds.get('port', 8000)}",
         "commands_monitored": {
-            "0x1132": "COMM_UPLOAD_VIDEO_INTERCOM_EVENT (byte 44 event_type == 1)",
-            "0x1133": "COMM_ALARM_VIDEO_INTERCOM (byte 44 alarm_type in (1, 14))",
-            "0x4000": "COMM_ALARM_V30 (dwAlarmType != 3)",
+            "0x1132": "COMM_UPLOAD_VIDEO_INTERCOM_EVENT (byte 44 in (1, 0))",
+            "0x1133": "COMM_ALARM_VIDEO_INTERCOM (byte 44 in (1, 14))",
+            "0x4000": "COMM_ALARM_V30 (dwAlarmType == 0)",
+            "0x5002/0x6009": "COMM_ISAPI_ALARM (ring/call)",
         },
         "recent_events_count": len(sdk_alarm_listener.get_recent_events()),
+    }
+    shazam_status = {
+        "active": ring_detector._running,
+        "threshold": ring_detector.ncc_trigger_threshold,
+        "fingerprint": os.path.exists(ring_detector.fingerprint_path),
+        "recent_count": len(ring_detector.get_recent_detections()),
     }
 
     return {
@@ -272,6 +284,7 @@ async def get_admin_system_status(request: Request):
         "live_fresh": live_hub.is_fresh(),
         "doorbell_ip": creds.get("ip", ""),
         "sdk_alarm_listener": sdk_status,
+        "shazam_status": shazam_status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -299,7 +312,7 @@ async def admin_test_ring(request: Request):
     """Triggers an instantaneous test ring event across the state machine."""
     require_admin(request)
     from app.main import call_sm
-    call = await call_sm.ring(force=True)
+    call = await call_sm.ring(force=True, trigger_source="TEST_BUTTON")
     return {
         "status": "ok",
         "call_id": call.call_id if call else "none",
@@ -419,10 +432,19 @@ async def get_shazam_detections():
     """Returns recent Shazam Chime detection evaluations."""
     try:
         from app.ring_detector import ring_detector
+        detections = []
+        for d in ring_detector.get_recent_detections():
+            detections.append({
+                "timestamp": str(d.get("timestamp", "")),
+                "ncc": float(d.get("ncc", 0.0)),
+                "matched": bool(d.get("matched", False)),
+                "details": str(d.get("details", "")),
+            })
         return {
             "status": "active" if ring_detector._running else "stopped",
             "fingerprint": os.path.exists(ring_detector.fingerprint_path),
-            "detections": ring_detector.get_recent_detections(),
+            "threshold": float(ring_detector.ncc_trigger_threshold),
+            "detections": detections,
         }
     except Exception as e:
         return {"status": "error", "error": str(e), "detections": []}

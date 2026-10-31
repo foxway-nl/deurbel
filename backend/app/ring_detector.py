@@ -43,7 +43,7 @@ class ShazamChimeDetector:
         self.n_fft = 1024
         self.hop_length = 160
         self.cooldown_seconds = 12.0
-        self.ncc_trigger_threshold = 0.82
+        self.ncc_trigger_threshold = 0.72
         self.ncc_log_threshold = 0.45
 
         self._pattern_spec: Optional[np.ndarray] = None
@@ -151,19 +151,19 @@ class ShazamChimeDetector:
                 best_ncc = ncc
 
         details = f"NCC={best_ncc:.4f}, P1={prominence_tone1:.1f}x, P2={prominence_tone2:.1f}x"
-        matched = (best_ncc >= self.ncc_trigger_threshold) and pitch_prominent
+        matched = bool((best_ncc >= self.ncc_trigger_threshold) and pitch_prominent)
 
         if best_ncc >= self.ncc_log_threshold:
             log_shazam_event(
-                ncc=best_ncc,
-                threshold=self.ncc_trigger_threshold,
-                matched=matched,
-                f_tone1=self._f_tone1,
-                f_tone2=self._f_tone2,
-                details=details,
+                ncc=float(best_ncc),
+                threshold=float(self.ncc_trigger_threshold),
+                matched=bool(matched),
+                f_tone1=float(self._f_tone1),
+                f_tone2=float(self._f_tone2),
+                details=str(details),
             )
 
-        return best_ncc, matched, details
+        return float(best_ncc), bool(matched), str(details)
 
     def feed_pcm_samples(self, pcm_bytes: bytes) -> None:
         """Feed raw 16kHz 16-bit mono PCM bytes into the detector."""
@@ -184,9 +184,9 @@ class ShazamChimeDetector:
         if ncc >= self.ncc_log_threshold:
             self._recent_detections.append({
                 "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-                "ncc": round(ncc, 4),
-                "matched": matched,
-                "details": details,
+                "ncc": round(float(ncc), 4),
+                "matched": bool(matched),
+                "details": str(details),
             })
 
         if matched:
@@ -197,7 +197,7 @@ class ShazamChimeDetector:
                 if self._loop and self._loop.is_running():
                     try:
                         from app.main import call_sm
-                        asyncio.run_coroutine_threadsafe(call_sm.ring(), self._loop)
+                        asyncio.run_coroutine_threadsafe(call_sm.ring(trigger_source="SHAZAM_CHIME"), self._loop)
                     except Exception as e:
                         logger.error("Failed triggering ring from Shazam: %s", e)
             else:

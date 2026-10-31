@@ -1134,7 +1134,7 @@ class SmartDetector:
         )
         logger.info("Dispatched immediate push notification for %s (%s) within 1.2s", category, label)
 
-        from app.logger import log_ai_event
+        from app.logger import log_ai_event, log_notify_decision
         log_ai_event(
             category=category,
             label=label,
@@ -1143,6 +1143,14 @@ class SmartDetector:
             silent=in_quiet_hours or not should_notify,
             action="Dispatched" if (should_notify and not in_quiet_hours) else "Silent/Suppressed",
             details=f"quiet={in_quiet_hours}, notify={should_notify}",
+        )
+        log_notify_decision(
+            event_type="AI_DETECTION",
+            category=category,
+            should_notify=bool(should_notify and not in_quiet_hours),
+            in_quiet_hours=bool(in_quiet_hours),
+            silent=bool(in_quiet_hours or not should_notify),
+            reason=f"quiet_hours={in_quiet_hours}, category_switch={should_notify}",
         )
 
         # 7. Launch background clip recording under single recording lock

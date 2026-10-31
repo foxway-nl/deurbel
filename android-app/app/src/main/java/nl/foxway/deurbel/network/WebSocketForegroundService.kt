@@ -49,6 +49,81 @@ class WebSocketForegroundService : Service() {
             val intent = Intent(context, WebSocketForegroundService::class.java)
             context.stopService(intent)
         }
+
+        fun showMotionNotificationExternal(context: Context, event: EventItemDto) {
+            val scope = CoroutineScope(Dispatchers.IO)
+            scope.launch {
+                try {
+                    val prefs = FoxwayApp.instance.preferencesManager
+                    val resolver = EndpointResolver(prefs)
+                    val resolved = resolver.resolve()
+                    val activeBaseUrl = resolved.apiBaseUrl.trimEnd('/')
+                    val clipId = event.clipId.ifBlank { "" }
+                    val targetThumbUrl = if (clipId.isNotBlank()) {
+                        "$activeBaseUrl/api/v1/clips/$clipId/thumbnail"
+                    } else if (event.snapshotUrl.startsWith("http")) {
+                        event.snapshotUrl
+                    } else if (event.snapshotUrl.isNotBlank()) {
+                        "$activeBaseUrl${event.snapshotUrl}"
+                    } else null
+
+                    var bitmap: android.graphics.Bitmap? = null
+                    if (targetThumbUrl != null) {
+                        for (attempt in 0..1) {
+                            try {
+                                val conn = URL(targetThumbUrl).openConnection() as HttpURLConnection
+                                conn.connectTimeout = 3000
+                                conn.readTimeout = 3000
+                                conn.inputStream.use { input ->
+                                    bitmap = BitmapFactory.decodeStream(input)
+                                }
+                                if (bitmap != null) break
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Attempt $attempt failed to load thumbnail from $targetThumbUrl: ${e.message}")
+                            }
+                            if (attempt == 0 && bitmap == null) {
+                                delay(500L)
+                            }
+                        }
+                    }
+
+                    val intent = Intent(context, MainActivity::class.java).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        putExtra("screen", "clips")
+                        putExtra("clip_id", event.clipId)
+                        putExtra("event_id", event.id)
+                    }
+                    val pendingIntent = PendingIntent.getActivity(
+                        context,
+                        event.id.toInt(),
+                        intent,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                    )
+
+                    val notifBuilder = NotificationCompat.Builder(context, FoxwayApp.CHANNEL_MOTION)
+                        .setSmallIcon(android.R.drawable.ic_menu_camera)
+                        .setContentTitle(event.title.ifBlank { "Beweging gedetecteerd" })
+                        .setContentText("Beweging waargenomen bij de voordeur")
+                        .setPriority(NotificationCompat.PRIORITY_HIGH)
+                        .setAutoCancel(true)
+                        .setContentIntent(pendingIntent)
+
+                    if (bitmap != null) {
+                        notifBuilder.setLargeIcon(bitmap)
+                        notifBuilder.setStyle(
+                            NotificationCompat.BigPictureStyle()
+                                .bigPicture(bitmap)
+                                .setSummaryText(event.title)
+                        )
+                    }
+
+                    val notificationManager = context.getSystemService(NotificationManager::class.java)
+                    notificationManager?.notify(event.id.toInt(), notifBuilder.build())
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error showing external motion notification: ${e.message}")
+                }
+            }
+        }
     }
 
     private lateinit var persistentWebSocket: PersistentWebSocket
@@ -72,13 +147,12 @@ class WebSocketForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    buildNotification(),
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                } else {
-                    0
-                }
-                startForeground(NOTIFICATION_ID, buildNotification(), fgsType)
+                )
             } else {
                 startForeground(NOTIFICATION_ID, buildNotification())
             }
@@ -171,19 +245,20 @@ class WebSocketForegroundService : Service() {
     private suspend fun processEventItem(item: EventItemDto) {
         val eventSec = parseIsoEpochSeconds(item.createdAt)
         val nowSec = System.currentTimeMillis() / 1000L
-        val ageSec = if (eventSec > 0) Math.abs(nowSec - eventSec) else 0L
+        val diffSec = nowSec - eventSec
 
-        Log.i(TAG, "Processing event: id=${item.id}, type=${item.type}, age=${ageSec}s")
+        Log.i(TAG, "Processing event: id=${item.id}, type=${item.type}, age=${diffSec}s")
         when (item.type.lowercase()) {
             "ring" -> {
-                // Hard Rule: A ring event MUST ONLY open the call screen if it is < 15 seconds old!
-                if (eventSec > 0 && ageSec > 15L) {
-                    Log.w(TAG, "Suppressed stale ring event id=${item.id}, age=${ageSec}s (>15s limit)")
+                // Hard Rule: A ring event MUST ONLY open the call screen if it is fresh (< 30s)
+                if (eventSec > 0 && diffSec > 30L) {
+                    Log.w(TAG, "Suppressed stale ring event id=${item.id}, age=${diffSec}s (>30s limit)")
                     return
                 }
                 handleRinging(
                     callId = item.clipId.ifBlank { "ring_${item.id}" },
-                    snapshotUrl = item.snapshotUrl
+                    snapshotUrl = item.snapshotUrl,
+                    triggerSource = item.triggerSource
                 )
             }
             "motion" -> {
@@ -202,8 +277,8 @@ class WebSocketForegroundService : Service() {
                     return
                 }
                 // Hard Rule: Motion notification only if < 60 seconds old AND not shown before
-                if (eventSec > 0 && ageSec > 60L) {
-                    Log.w(TAG, "Suppressed stale motion event id=${item.id}, age=${ageSec}s (>60s limit)")
+                if (eventSec > 0 && diffSec > 60L) {
+                    Log.w(TAG, "Suppressed stale motion event id=${item.id}, age=${diffSec}s (>60s limit)")
                     return
                 }
                 val eventPrefs = getSharedPreferences("foxway_events", Context.MODE_PRIVATE)
@@ -250,18 +325,20 @@ class WebSocketForegroundService : Service() {
             DoorbellEvent.CALL_RINGING -> {
                 val callId = event.callId ?: return
                 val snapshotUrl = event.snapshotUrl ?: ""
+                val triggerSource = event.triggerSource ?: "UNKNOWN"
                 val ts = event.timestamp
                 if (!ts.isNullOrBlank()) {
                     val eventSec = parseIsoEpochSeconds(ts)
                     val nowSec = System.currentTimeMillis() / 1000L
-                    val ageSec = Math.abs(nowSec - eventSec)
-                    if (eventSec > 0 && ageSec > 15L) {
-                        Log.w(TAG, "Suppressed stale WS CALL_RINGING, age=${ageSec}s (>15s limit)")
+                    val diffSec = nowSec - eventSec
+                    if (eventSec > 0 && diffSec > 30L) {
+                        Log.w(TAG, "Suppressed stale WS CALL_RINGING, age=${diffSec}s (>30s limit)")
                         return
                     }
                 }
-                handleRinging(callId, snapshotUrl)
+                handleRinging(callId, snapshotUrl, triggerSource)
             }
+            "AI_DETECTION" -> handleMotionWsEvent(event)
             DoorbellEvent.CALL_CLAIMED -> handleClaimed(event)
             DoorbellEvent.CALL_MISSED -> handleMissed(event)
             DoorbellEvent.CALL_ENDED -> handleEnded(event)
@@ -269,8 +346,54 @@ class WebSocketForegroundService : Service() {
         }
     }
 
-    private fun handleRinging(callId: String, snapshotUrl: String) {
-        Log.i(TAG, "CALL_RINGING triggered: callId=$callId")
+    private fun handleMotionWsEvent(event: DoorbellEvent) {
+        val silent = (event.data["silent"] as? Boolean)
+            ?: (event.data["silent"] as? String)?.toBoolean()
+            ?: false
+        if (silent) {
+            Log.i(TAG, "Suppressed silent WS motion event")
+            return
+        }
+        val cat = (event.data["category"] as? String)?.lowercase()?.trim() ?: "general"
+        val settingsPrefs = getSharedPreferences("foxway_settings", Context.MODE_PRIVATE)
+        val notifyKey = "notify_$cat"
+        val isNotifyEnabled = settingsPrefs.getBoolean(notifyKey, true)
+        if (!isNotifyEnabled) {
+            Log.i(TAG, "Suppressed WS notification for disabled category '$cat' (key=$notifyKey)")
+            return
+        }
+        val eventId = (event.data["event_id"] as? Number)?.toLong()
+            ?: (event.data["event_id"] as? String)?.toLongOrNull()
+            ?: System.currentTimeMillis()
+        val eventPrefs = getSharedPreferences("foxway_events", Context.MODE_PRIVATE)
+        val shownIds = eventPrefs.getStringSet("shown_event_ids", emptySet())?.toMutableSet() ?: mutableSetOf()
+        val idStr = eventId.toString()
+        if (shownIds.contains(idStr)) {
+            Log.i(TAG, "Suppressed duplicate WS motion event id=$eventId (already shown)")
+            return
+        }
+        shownIds.add(idStr)
+        eventPrefs.edit().putStringSet("shown_event_ids", shownIds).apply()
+
+        val clipId = event.data["clip_id"] as? String ?: ""
+        val title = event.data["title"] as? String ?: "Beweging gedetecteerd"
+        val snapshotUrl = event.data["snapshot_url"] as? String ?: ""
+
+        val dto = EventItemDto(
+            id = eventId,
+            type = "motion",
+            category = cat,
+            title = title,
+            clipId = clipId,
+            snapshotUrl = snapshotUrl,
+            silent = false,
+            createdAt = event.data["timestamp"] as? String ?: ""
+        )
+        showMotionNotificationExternal(this, dto)
+    }
+
+    private fun handleRinging(callId: String, snapshotUrl: String, triggerSource: String = "UNKNOWN") {
+        Log.i(TAG, "CALL_RINGING triggered: callId=$callId, source=$triggerSource")
 
         // 1. Acquire WakeLock to turn the screen on
         try {
@@ -285,85 +408,15 @@ class WebSocketForegroundService : Service() {
         }
 
         nl.foxway.deurbel.data.AppLogger.getInstance(this)
-            .call("Inkomende oproep van deurbel (ID: ${callId.take(8)})")
+            .call("Inkomende oproep van deurbel (ID: ${callId.take(8)})", "Bron: $triggerSource")
 
         // 2. Start full-screen incoming call UI
         DoorbellConnectionService.startIncomingCall(this, callId, snapshotUrl)
         CallEventBus.postEvent(DoorbellEvent(event = DoorbellEvent.CALL_RINGING, callId = callId, snapshotUrl = snapshotUrl))
     }
 
-    private suspend fun handleMotionNotification(event: EventItemDto) {
-        withContext(Dispatchers.IO) {
-            try {
-                val resolved = endpointResolver.resolve()
-                val activeBaseUrl = resolved.apiBaseUrl.trimEnd('/')
-                val clipId = event.clipId.ifBlank { "" }
-                val targetThumbUrl = if (clipId.isNotBlank()) {
-                    "$activeBaseUrl/api/v1/clips/$clipId/thumbnail"
-                } else if (event.snapshotUrl.startsWith("http")) {
-                    event.snapshotUrl
-                } else if (event.snapshotUrl.isNotBlank()) {
-                    "$activeBaseUrl${event.snapshotUrl}"
-                } else null
-
-                // Fetch bitmap with 1 retry after 500ms if needed (TAAK 3)
-                var bitmap: android.graphics.Bitmap? = null
-                if (targetThumbUrl != null) {
-                    for (attempt in 0..1) {
-                        try {
-                            val conn = URL(targetThumbUrl).openConnection() as HttpURLConnection
-                            conn.connectTimeout = 3000
-                            conn.readTimeout = 3000
-                            conn.inputStream.use { input ->
-                                bitmap = BitmapFactory.decodeStream(input)
-                            }
-                            if (bitmap != null) break
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Attempt $attempt failed to load thumbnail from $targetThumbUrl: ${e.message}")
-                        }
-                        if (attempt == 0 && bitmap == null) {
-                            delay(500L)
-                        }
-                    }
-                }
-
-                val intent = Intent(this@WebSocketForegroundService, MainActivity::class.java).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    putExtra("screen", "clips")
-                    putExtra("clip_id", event.clipId ?: "")
-                    putExtra("event_id", event.id)
-                }
-                val pendingIntent = PendingIntent.getActivity(
-                    this@WebSocketForegroundService,
-                    event.id.toInt(),
-                    intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-
-                val notifBuilder = NotificationCompat.Builder(this@WebSocketForegroundService, FoxwayApp.CHANNEL_MOTION)
-                    .setSmallIcon(android.R.drawable.ic_menu_camera)
-                    .setContentTitle(event.title.ifBlank { "Beweging gedetecteerd" })
-                    .setContentText("Beweging waargenomen bij de voordeur")
-                    .setPriority(NotificationCompat.PRIORITY_HIGH)
-                    .setAutoCancel(true)
-                    .setContentIntent(pendingIntent)
-
-                if (bitmap != null) {
-                    // Set largeIcon for collapsed thumbnail on the right, and BigPictureStyle for expanded view (TAAK 3)
-                    notifBuilder.setLargeIcon(bitmap)
-                    notifBuilder.setStyle(
-                        NotificationCompat.BigPictureStyle()
-                            .bigPicture(bitmap)
-                            .setSummaryText(event.title)
-                    )
-                }
-
-                val notificationManager = getSystemService(NotificationManager::class.java)
-                notificationManager?.notify(event.id.toInt(), notifBuilder.build())
-            } catch (e: Exception) {
-                Log.w(TAG, "Error showing motion notification: ${e.message}")
-            }
-        }
+    private fun handleMotionNotification(event: EventItemDto) {
+        showMotionNotificationExternal(this, event)
     }
 
     private fun handleClaimed(event: DoorbellEvent) {

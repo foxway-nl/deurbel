@@ -35,9 +35,10 @@ class ActiveCall:
         "clip_path",
         "timeout_task",
         "recorder_task",
+        "trigger_source",
     )
 
-    def __init__(self, call_id: str) -> None:
+    def __init__(self, call_id: str, trigger_source: str = "UNKNOWN") -> None:
         self.call_id = call_id
         self.state: CallState = CallState.RINGING
         self.started_at: str = datetime.now(timezone.utc).isoformat()
@@ -47,6 +48,7 @@ class ActiveCall:
         self.clip_path: Optional[str] = None
         self.timeout_task: Optional[asyncio.Task] = None
         self.recorder_task: Optional[asyncio.Task] = None
+        self.trigger_source: str = trigger_source
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +59,7 @@ class ActiveCall:
             "claimed_by_user_id": self.claimed_by_user_id,
             "snapshot_path": self.snapshot_path,
             "clip_path": self.clip_path,
+            "trigger_source": self.trigger_source,
         }
 
 
@@ -89,9 +92,9 @@ class CallStateMachine:
 
     # ── RING ──────────────────────────────────────────────────────────
 
-    async def ring(self, force: bool = False) -> Optional[ActiveCall]:
+    async def ring(self, force: bool = False, trigger_source: str = "UNKNOWN") -> Optional[ActiveCall]:
         """
-        Called by Shelly webhook or 728 Hz detector.
+        Called by Shelly webhook, C-SDK, Shazam detector, or test button.
         If force=True, bypasses the 15s cooldown (used by the Test Aanbel Trigger button).
 
         Returns the new ``ActiveCall`` or ``None`` if the ring was
@@ -103,7 +106,7 @@ class CallStateMachine:
             now = time.monotonic()
 
             if force:
-                logger.info("Force ring requested — bypassing all cooldowns and resetting active call")
+                logger.info("Force ring requested (source=%s) — bypassing all cooldowns and resetting active call", trigger_source)
                 if self._current:
                     if self._current.timeout_task and not self._current.timeout_task.done():
                         self._current.timeout_task.cancel()
@@ -114,8 +117,9 @@ class CallStateMachine:
 
             # If already RINGING (and not forced), retrigger the notification and extend timeout!
             elif self._current and self._current.state == CallState.RINGING:
-                logger.info("Call %s is already RINGING — retriggering notification & extending timeout", self._current.call_id)
+                logger.info("Call %s is already RINGING — retriggering notification & extending timeout (source=%s)", self._current.call_id, trigger_source)
                 call = self._current
+                call.trigger_source = trigger_source
                 call.started_at = datetime.now(timezone.utc).isoformat()
                 self._last_ring_ts = now
                 if call.timeout_task and not call.timeout_task.done():
@@ -127,20 +131,20 @@ class CallStateMachine:
 
             # Ignore duplicate presses during cooldown (unless force=True)
             elif (now - self._last_ring_ts < settings.RING_COOLDOWN_SECONDS):
-                logger.info("Ring suppressed (cooldown %.1fs remaining)", settings.RING_COOLDOWN_SECONDS - (now - self._last_ring_ts))
+                logger.info("Ring suppressed (cooldown %.1fs remaining, source=%s)", settings.RING_COOLDOWN_SECONDS - (now - self._last_ring_ts), trigger_source)
                 return None
 
             # Already in an active conversation (unless force=True)
             elif self._current and self._current.state == CallState.IN_CALL:
-                logger.info("Ring suppressed (active call %s in progress)", self._current.call_id)
+                logger.info("Ring suppressed (active call %s in progress, source=%s)", self._current.call_id, trigger_source)
                 return None
 
             call_id = uuid.uuid4().hex[:12]
-            call = ActiveCall(call_id)
+            call = ActiveCall(call_id, trigger_source=trigger_source)
             self._current = call
             self._last_ring_ts = now
 
-            logger.info("New call %s — RINGING", call_id)
+            logger.info("New call %s — RINGING (source=%s)", call_id, trigger_source)
 
             # Persist initial call log
             await save_call_log(call_id, CallState.RINGING.value)

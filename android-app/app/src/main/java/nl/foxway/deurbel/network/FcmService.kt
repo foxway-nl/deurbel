@@ -78,7 +78,10 @@ class FcmService : FirebaseMessagingService() {
         if (eventType == DoorbellEvent.CALL_RINGING) {
             val callId = doorbellEvent.callId ?: ""
             val snapshotUrl = doorbellEvent.snapshotUrl ?: ""
+            val triggerSource = doorbellEvent.triggerSource ?: "UNKNOWN"
             try {
+                nl.foxway.deurbel.data.AppLogger.getInstance(applicationContext)
+                    .call("FCM inkomende oproep (ID: ${callId.take(8)})", "Bron: $triggerSource")
                 nl.foxway.deurbel.telecom.DoorbellConnectionService.startIncomingCall(
                     applicationContext,
                     callId,
@@ -87,6 +90,46 @@ class FcmService : FirebaseMessagingService() {
                 WebSocketForegroundService.start(applicationContext)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start services from FCM", e)
+            }
+        } else if (eventType == "AI_DETECTION") {
+            try {
+                val silent = (doorbellEvent.data["silent"] as? Boolean)
+                    ?: (doorbellEvent.data["silent"] as? String)?.toBoolean()
+                    ?: false
+                if (!silent) {
+                    val cat = (doorbellEvent.data["category"] as? String)?.lowercase()?.trim() ?: "general"
+                    val settingsPrefs = getSharedPreferences("foxway_settings", android.content.Context.MODE_PRIVATE)
+                    val notifyKey = "notify_$cat"
+                    val isNotifyEnabled = settingsPrefs.getBoolean(notifyKey, true)
+                    if (isNotifyEnabled) {
+                        val eventId = (doorbellEvent.data["event_id"] as? Number)?.toLong()
+                            ?: (doorbellEvent.data["event_id"] as? String)?.toLongOrNull()
+                            ?: System.currentTimeMillis()
+                        val eventPrefs = getSharedPreferences("foxway_events", android.content.Context.MODE_PRIVATE)
+                        val shownIds = eventPrefs.getStringSet("shown_event_ids", emptySet())?.toMutableSet() ?: mutableSetOf()
+                        val idStr = eventId.toString()
+                        if (!shownIds.contains(idStr)) {
+                            shownIds.add(idStr)
+                            eventPrefs.edit().putStringSet("shown_event_ids", shownIds).apply()
+                            val clipId = doorbellEvent.data["clip_id"] as? String ?: ""
+                            val title = doorbellEvent.data["title"] as? String ?: "Beweging gedetecteerd"
+                            val snapshotUrl = doorbellEvent.data["snapshot_url"] as? String ?: ""
+                            val dto = nl.foxway.deurbel.data.models.EventItemDto(
+                                id = eventId,
+                                type = "motion",
+                                category = cat,
+                                title = title,
+                                clipId = clipId,
+                                snapshotUrl = snapshotUrl,
+                                silent = false,
+                                createdAt = doorbellEvent.data["timestamp"] as? String ?: ""
+                            )
+                            WebSocketForegroundService.showMotionNotificationExternal(applicationContext, dto)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to handle AI_DETECTION from FCM", e)
             }
         }
     }

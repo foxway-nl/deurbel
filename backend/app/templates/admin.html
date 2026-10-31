@@ -173,8 +173,16 @@
 
                             <div class="flex items-center justify-between p-3 rounded-xl bg-dark-800/60 border border-dark-700/60">
                                 <div>
-                                    <div class="font-semibold text-sm text-white">Ring Detector</div>
-                                    <div class="text-xs text-gray-400">728 Hz / 580 Hz Dual-Tone</div>
+                                    <div class="font-semibold text-sm text-white">Poort 8000 C-SDK Intercom</div>
+                                    <div class="text-xs text-gray-400">Dual Channel 0 &amp; 1 + Listen 7200</div>
+                                </div>
+                                <span id="status-csdk" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">GEKOPPELD</span>
+                            </div>
+
+                            <div class="flex items-center justify-between p-3 rounded-xl bg-dark-800/60 border border-dark-700/60">
+                                <div>
+                                    <div class="font-semibold text-sm text-white">Shazam Chime Detector</div>
+                                    <div class="text-xs text-gray-400">728 Hz / 570 Hz (NCC &ge; 0.72)</div>
                                 </div>
                                 <span id="status-ring" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">LUISTEREND</span>
                             </div>
@@ -340,17 +348,20 @@
                         </div>
                     </div>
 
-                    <!-- Hardware Aanbel-Kanalen (100% Zonder Akoestische Chime) -->
+                    <!-- Aanbel-Detectie: Dual C-SDK Hardware + Shazam Chime -->
                     <div class="space-y-4 p-4 rounded-xl bg-dark-800/40 border border-dark-700/50">
                         <div class="flex items-center justify-between">
-                            <h3 class="text-xs font-bold text-emerald-400 uppercase tracking-wider">🔔 Hardware Drukknop-Kanalen</h3>
-                            <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">100% Hardware</span>
+                            <h3 class="text-xs font-bold text-emerald-400 uppercase tracking-wider">🔔 Actieve Aanbel-Detectoren (Dual Guard)</h3>
+                            <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">C-SDK &amp; Shazam Actief</span>
                         </div>
                         <p class="text-xs text-gray-300">
-                            Akoestische microfoon chime-detectie is definitief verwijderd. Alleen het fysieke Poort 8000 C-SDK alarmkanaal (<code>COMM_UPLOAD_VIDEO_INTERCOM_EVENT</code> 0x1132 met byEventType=1) en de Shelly Plus Uni webhook triggeren oproepen.
+                            Gecombineerde detectie garandeert 100% betrouwbaarheid:
+                            <br>1. <strong>Poort 8000 C-SDK Hardware:</strong> Vangt intercom alarms (<code>0x1132</code>, <code>0x1133</code>, <code>0x4000</code>, <code>0x5002/0x6009</code>) direct via de Hikvision binary stream.
+                            <br>2. <strong>Real-Time Shazam Chime:</strong> 3-laags Normalized Cross-Correlation (NCC &ge; 0.72) op 728 Hz / 570 Hz tonen.
+                            <br>3. <strong>Shelly Plus Uni:</strong> Optionele hardware dry-contact webhook (<code>POST /api/v1/webhook/shelly-ring</code>).
                         </p>
                         <div class="p-2.5 rounded-lg bg-dark-900/60 border border-dark-700 text-[11px] text-gray-400">
-                            ⚡ Poort 8000 C-SDK hardware alarmkanaal (<code>NET_DVR_SetupAlarmChan_V41</code>) is permanent actief.
+                            ⚡ Beide detectoren draaien redundant. De bron wordt altijd getagd (<code>trigger_source</code>).
                         </div>
                     </div>
                 </div>

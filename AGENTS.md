@@ -7,10 +7,20 @@ Welkom in het Foxway Smart Doorbell project. Lees deze regels zorgvuldig voordat
 ## 🚨 HARDE ANTI-REGRESSIE REGELS
 
 1. **NOOIT OUDE SPECS GEBRUIKEN:**
-   - De codebase bevindt zich op versie **v3.3.0** (`versionCode = 28`).
-   - Oude documenten over v1.0 / v2.0 / v2.3 / v2.4 / v2.5 / v2.6 / v2.8 / v2.9 / v3.0 / v3.1.2 / v3.1.4 / v3.2.0 mogen nooit leidend zijn.
+   - De codebase bevindt zich op versie **v3.3.1** (`versionCode = 29`).
+   - Oude documenten over v1.0 / v2.0 / v2.3 / v2.4 / v2.5 / v2.6 / v2.8 / v2.9 / v3.0 / v3.1.2 / v3.1.4 / v3.2.0 / v3.3.0 mogen nooit leidend zijn.
 
-2. **BESCHERMDE KERN-COMPONENTEN & HARDWARE-FEITEN (NIET AANRAKEN):**
+2. **STRIKTE COMMANDO-TIMEOUT (NOOIT MEER LANG WACHTEN):**
+   - Draai `pytest`, Gradle builds of Docker-taken **NOOIT** zonder harde timeout! Gebruik altijd `timeout 90s pytest ...` en `timeout 300s ./gradlew ...`.
+   - Als een test of container langer dan 90 seconden hangt, kap je het proces direct af, los je de blokkade op en ga je door.
+   - Test **incrementeel per aangepast onderdeel** (`pytest tests/test_specifiek.py`), NIET blind alles in één hangende sessie!
+
+3. **ZERO-REGRESSION WET ("NIKS KAPOTMAKEN WAT AL WERKT"):**
+   - De **AI-detectie van Mensen, Voertuigen én Dieren** werkt uitstekend! **RAAK DE AI-DETECTIE DREMPELS EN LOGICA IN `ai_detector.py` NIET AAN!**
+   - De **Aanbel-detectie in de backend** werkt uitstekend! **MAAK DE AANBEL-TRIGGERS IN DE BACKEND NIET KAPOT!**
+   - Wanneer je één bug oplost, controleer je direct of omliggende functionaliteit nog heel is.
+
+4. **BESCHERMDE KERN-COMPONENTEN & HARDWARE-FEITEN (NIET AANRAKEN):**
    - **Hardware-Feiten EZVIZ DB1 Pro (192.168.2.31):** Poort 80 (HTTP / ISAPI / ONVIF) is **NIET BESCHIKBAAR**! Verbind **NOOIT** met poort 80 of `/ISAPI/...`. De enige open poorten zijn **Poort 554 (RTSP)** en **Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`)**.
    - **Hardware Drukknop-Detectie & Dual Ingest (`backend/app/sdk_alarm_listener.py`):** `NET_DVR_SetupAlarmChan_V41` op Poort 8000 vangt hardware intercom/alarm events op met persisterende callback ref en exacte 28-byte `NET_DVR_SETUPALARM_PARAM` struct in dual-mode (`byDeployType=0` Intercom mode en `byDeployType=1` Server mode) plus passieve TCP listen op Poort 7200 (`NET_DVR_StartListen_V30`). Triggers: (1) `COMM_UPLOAD_VIDEO_INTERCOM_EVENT` (0x1132) met byte 44 in (1, 0); (2) `COMM_ALARM_VIDEO_INTERCOM` (0x1133) met byte 44 in (1, 14); (3) `COMM_ALARM_V30` (0x4000) met `dwAlarmType == 0` (Motion `dwAlarmType == 3` wordt 100% genegeerd, geen DB writes of triggers); (4) `COMM_ISAPI_ALARM` (0x5002 / 0x6009) met 'ring' / 'call'. Alle pakketten worden gelogd in SQLite `sdk_alarm_logs` en native file logging `logs/hcnetsdk_native/`.
    - **Real-Time 3-Layer Shazam Deurbel-Chime Detector (`backend/app/ring_detector.py`):** Getraind op echte deurbel-opnames van de fysieke deurbel (728 Hz / 570 Hz dual-tone). Laag 1: spectrale whitening; Laag 2: kwarts-klok toonstabiliteit binnen +-15 Hz; Laag 3: 2D Normalized Cross-Correlation (NCC $\ge 0.82$, 12s cooldown). Logt alle evaluaties $\ge 0.45$ NCC in daily black-box JSONL.
@@ -38,15 +48,15 @@ Welkom in het Foxway Smart Doorbell project. Lees deze regels zorgvuldig voordat
 ## 🛠️ STANDAARD COMMANDO'S
 
 ### Python Tests Uitvoeren
-Python packages draaien in de Docker backend container. Draai tests altijd via:
+Python packages draaien in de Docker backend container. Draai tests altijd met timeout via:
 ```bash
-docker exec foxway-doorbell-backend pytest -v /mnt/opslag/deurbel/backend/tests/
+docker exec foxway-doorbell-backend timeout 90s pytest -v /mnt/opslag/deurbel/backend/tests/
 ```
 
 ### Android APK Compileren
-Java en de Android SDK zijn geïnstalleerd in de container `thyrlian/android-sdk:latest`. Bouw altijd via:
+Java en de Android SDK zijn geïnstalleerd in de container `thyrlian/android-sdk:latest`. Bouw altijd met timeout via:
 ```bash
-docker run --rm -v /mnt/opslag/deurbel:/mnt/opslag/deurbel -w /mnt/opslag/deurbel/android-app thyrlian/android-sdk:latest ./gradlew assembleRelease --max-workers=2
+docker run --rm -v /mnt/opslag/deurbel:/mnt/opslag/deurbel -w /mnt/opslag/deurbel/android-app thyrlian/android-sdk:latest timeout 300s ./gradlew assembleRelease --max-workers=2
 ```
 Kopieer na succes de APK naar `/mnt/opslag/deurbel/clips/foxway-deurbel.apk`.
 

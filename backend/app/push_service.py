@@ -183,6 +183,16 @@ async def send_fcm_to_all(event: str, data: dict, exclude_user: Optional[str] = 
     if event != "CALL_RINGING":
         if data.get("in_quiet_hours") or data.get("silent") or data.get("should_notify") is False:
             logger.info("FCM push suppressed for event %s (quiet hours / silent / should_notify=False)", event)
+            from app.logger import log_notify_decision
+            log_notify_decision(
+                event_type=event,
+                category=str(data.get("category", "")),
+                should_notify=False,
+                in_quiet_hours=bool(data.get("in_quiet_hours")),
+                silent=bool(data.get("silent")),
+                reason="FCM gatekeeper suppressed (in_quiet_hours or silent or not should_notify)",
+                tokens=len(tokens),
+            )
             return 0
 
     # Convert all values to strings (FCM data payloads are string-only)
@@ -208,6 +218,16 @@ async def send_fcm_to_all(event: str, data: dict, exclude_user: Optional[str] = 
             logger.warning("FCM send failed for token %s…", token[:20])
 
     logger.info("FCM sent %d/%d messages for event %s", sent, len(tokens), event)
+    from app.logger import log_notify_decision
+    log_notify_decision(
+        event_type=event,
+        category=str(data.get("category", "ring")),
+        should_notify=True,
+        in_quiet_hours=bool(data.get("in_quiet_hours")),
+        silent=False,
+        reason=f"FCM dispatched to {sent}/{len(tokens)} devices",
+        tokens=sent,
+    )
     return sent
 
 

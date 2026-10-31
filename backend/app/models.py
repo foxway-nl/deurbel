@@ -233,6 +233,7 @@ CREATE TABLE IF NOT EXISTS events (
     clip_id       TEXT,
     snapshot_url  TEXT,
     silent        INTEGER DEFAULT 0,
+    trigger_source TEXT DEFAULT 'UNKNOWN',
     created_at    TEXT NOT NULL
 );
 
@@ -317,6 +318,12 @@ async def init_db() -> None:
                 await db.execute(f"ALTER TABLE clips ADD COLUMN {col_def}")
             except Exception:
                 pass
+
+        # Migration: ensure trigger_source exists in events table (v3.3.1)
+        try:
+            await db.execute("ALTER TABLE events ADD COLUMN trigger_source TEXT DEFAULT 'UNKNOWN'")
+        except Exception:
+            pass
 
         # Deduplicate stale duplicate registrations keeping the newest record
         try:
@@ -741,6 +748,7 @@ async def save_event(
     clip_id: str = "",
     snapshot_url: str = "",
     silent: bool = False,
+    trigger_source: str = "UNKNOWN",
 ) -> dict:
     """Record an event (ring or confirmed motion) in the events table."""
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -750,10 +758,10 @@ async def save_event(
     async with get_db(write=True) as db:
         cursor = await db.execute(
             """
-            INSERT INTO events (type, category, title, clip_id, snapshot_url, silent, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO events (type, category, title, clip_id, snapshot_url, silent, trigger_source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (event_type, category, title, clip_id, snapshot_url, silent_val, now_iso),
+            (event_type, category, title, clip_id, snapshot_url, silent_val, trigger_source, now_iso),
         )
         event_id = cursor.lastrowid
         return {
@@ -764,6 +772,7 @@ async def save_event(
             "clip_id": clip_id,
             "snapshot_url": snapshot_url,
             "silent": silent,
+            "trigger_source": trigger_source,
             "created_at": now_iso,
         }
 

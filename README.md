@@ -1,45 +1,35 @@
-# Foxway Smart Doorbell (v3.3.0)
+# Foxway Smart Doorbell (v3.3.1)
 
-[![Version](https://img.shields.io/badge/version-3.3.0-emerald.svg)](https://github.com/foxway-nl/deurbel)
+[![Version](https://img.shields.io/badge/version-3.3.1-emerald.svg)](https://github.com/foxway-nl/deurbel)
 [![Platform](https://img.shields.io/badge/platform-Android%20%7C%20FastAPI%20%7C%20Docker-blue.svg)](https://github.com/foxway-nl/deurbel)
 [![Aspect Ratio](https://img.shields.io/badge/aspect_ratio-4%3A3_native-orange.svg)](https://github.com/foxway-nl/deurbel)
 
-Productie-oplossing voor de **EZVIZ DB1 Pro** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, hardware drukknop-detectie via Poort 8000 C-SDK met dual ingest (`byDeployType=0` & `1`), passieve TCP listen op Poort 7200, 100% raw packet sniffer en byte-diffing, een 3-laags Shazam akoestische deurbel-chime detector getraind op echte deurbel-opnames (728 Hz / 570 Hz dual-tone), geëlimineerd 4s zwart scherm & sub-0.3s live-edge synchronisatie op 5G, strikte notificatie-poortwachter (onderdrukt pushnotificaties wanneer een categorie UIT staat via SharedPreferences synchronisatie), directe 2-standen luidsprekerknop (Rood/Groen), centrale black-box JSONL logging met Android status-dump reporter (`POST /api/v1/logs/client`) en diagnostics triage script (`scripts/triage.py`).
+Productie-oplossing voor de **EZVIZ DB1 Pro** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, hardware drukknop-detectie via Poort 8000 C-SDK met dual ingest (`byDeployType=0` & `1`), passieve TCP listen op Poort 7200, 100% raw packet sniffer en byte-diffing, een 3-laags Shazam akoestische deurbel-chime detector gekalibreerd op echte deurbel-opnames (728 Hz / 570 Hz dual-tone, NCC $\ge 0.72$), R8 minification uitgeschakeld voor gegarandeerde JSON-deserialisatie, trigger-source tagging (`CSDK_PORT_8000`, `SHAZAM_CHIME`, `TEST_BUTTON`, `SHELLY_WEBHOOK`), geëlimineerd 4s zwart scherm & sub-0.3s live-edge synchronisatie op 5G, strikte notificatie-poortwachter met 2-weg instellingensynchronisatie, directe 2-standen luidsprekerknop (Rood/Groen), centrale black-box JSONL logging met Android status-dump reporter (`POST /api/v1/logs/client`) en diagnostics triage script (`scripts/triage.py`).
 
 > **BELANGRIJK:** De EZVIZ DB1 Pro heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT met poort 80 of `/ISAPI/...` verbonden. De enige open hardware-poorten zijn **Poort 554 (RTSP)** en **Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`)**.
 
 ---
 
-## ⚡ Kernfunctionaliteiten in v3.3.0
+## ⚡ Kernfunctionaliteiten in v3.3.1
 
-1. **Poort 8000 C-SDK Dual Ingest & Full Packet Sniffer (`sdk_alarm_listener.py`):**
-   - Exacte 28-byte `NET_DVR_SETUPALARM_PARAM` structuur met dual alarmkanaal ingest: `byDeployType = 0` (Client/Intercom modus) en `byDeployType = 1` (Server modus).
-   - Passieve TCP Listen-Mode via `NET_DVR_StartListen_V30` op Poort 7200 voor ongevraagde camera-oproepen.
-   - Native C-SDK file logger geactiveerd via `NET_DVR_SetLogToFile` naar `/mnt/opslag/deurbel/logs/hcnetsdk_native/`.
-   - 100% Raw buffer packet sniffer: vangt 100% van de payload op, voert byte-diffing uit op bewegingspakketten (`0x4000`), en logt alle events naar SQLite `sdk_alarm_logs` en dagelijkse black-box JSONL.
-   - Triggers: `0x1132` (byte 44 in 1, 0), `0x1133` (byte 44 in 1, 14), `0x4000` (`dwAlarmType == 0`), en ISAPI ring events (`0x5002` / `0x6009`).
+1. **Trigger Source Audit & Dual Detectie (`sdk_alarm_listener.py`, `ring_detector.py`, `models.py`):**
+   - Elke deurbeloproep en elk event wordt geregistreerd met zijn exacte oorsprong (`trigger_source`): `CSDK_PORT_8000`, `SHAZAM_CHIME`, `TEST_BUTTON`, of `SHELLY_WEBHOOK`.
+   - Volledige transparantie in SQLite (`events` tabel), Web Admin (`/admin`), en app-logs.
 
-2. **Real-Time 3-Layer Shazam Deurbel-Chime Detector (`ring_detector.py`):**
-   - Getraind op authentieke audio-opnames van de fysieke deurbel van vandaag.
-   - Dual-tone akoestische signatuur: Toon 1 = ~728 Hz (250ms), Toon 2 = ~570 Hz (250ms) over een 0.85s tijdvenster.
-   - 3-Laags filter: Laag 1 spectrale whitening, Laag 2 kwarts-klok toonstabiliteit (+-15 Hz, >=12 dB prominentie), Laag 3 2D Normalized Cross-Correlation (NCC >= 0.82) met 12s cooldown.
-   - Vingerafdruk opgeslagen in `backend/app/assets/chime_fingerprint.npz`. NCC >= 0.45 evaluaties worden gelogd in daily JSONL.
+2. **R8 Minification Uitgeschakeld & Android Fixes (`build.gradle.kts`, `WebSocketForegroundService.kt`):**
+   - R8 minificatie en resource shrinking zijn uitgeschakeld in de release build (`isMinifyEnabled = false`, `isShrinkResources = false`) ter voorkoming van veld-obfuscatie van Kotlin data classes.
+   - Foreground service types compatibel gemaakt met Android 10 tot 14+ (`ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE` uitsluitend op API 34+), waardoor crashes bij het starten zijn opgelost.
+   - Verwijdering van foutieve klokskew-suppressie: inkomende oproepen rinkelen direct op het toestel.
 
-3. **5G Live-Edge Streaming & Instant Poster (`main.py`, `LiveScreen.kt`):**
-   - Instant 4:3 poster direct gerenderd op ms 0 via `<img id="instant-poster">`, permanent verwijderd zodra het eerste video-frame rendert.
-   - Live-edge lag synchronisatie (`syncToLiveEdge`) forceert `<0.3s` vertraging op metadata, data, canplay, playing en via een 250ms timer (`end - currentTime > 0.4s -> currentTime = end - 0.12s`).
-   - MSE buffer trimt segmenten ouder dan 2 seconden om geheugen en bufferophoping te voorkomen.
+3. **Gekalibreerde Shazam Deurbel-Chime Detector (NCC $\ge 0.72$):**
+   - Gekalibreerd op de fysieke testen van 31-10-2026 (NCC scores 0.7519 en 0.7765).
+   - Drempelwaarde ingesteld op 0.72 voor 100% trefzekerheid zonder valse meldingen.
+   - Vaste JSON serialization bug in `GET /api/v1/admin/shazam-detections`.
 
-4. **Notificatie-Poortwachter & Directe Mute-Knop (`ai_detector.py`, `WebSocketForegroundService.kt`, `LiveScreen.kt`):**
-   - Wanneer een categorie `Melding` op UIT staat, zet de backend `silent = True` en `should_notify = False`, waardoor FCM wordt onderdrukt.
-   - Android slaat instellingen direct op in `SharedPreferences("foxway_settings")` en `WebSocketForegroundService` verifieert `item.silent` en lokale categorie-instellingen vóór het tonen van notificaties.
-   - Directe 2-standen luidsprekerknop in `LiveScreen.kt`: Rood (Gedempt) of Groen (Geluid Aan), zonder grijze tussenstand.
-   - Aangescherpt geparkeerde-auto filter: vereist $\ge 4$ opeenvolgende frames in dezelfde richting met $\Delta x \ge 18\%$ en `changed_pixel_ratio >= 0.35`.
-
-5. **Centrale Black-Box Logging & Diagnostics Triage (`logger.py`, `scripts/triage.py`):**
-   - Gestructureerde dagelijkse logging naar `/mnt/opslag/deurbel/logs/YYYY-MM-DD.jsonl`.
-   - Ingebouwde knop `"📤 Rapporteer Fout / Status-Dump"` in de Android app stuurt toestelgegevens, schermstatus en app-logs direct door naar `POST /api/v1/logs/client`.
-   - Diagnostisch triage-script `/mnt/opslag/deurbel/scripts/triage.py` geeft direct inzicht in alle C-SDK packets, Shazam scores, AI-detecties en client-status dumps.
+4. **Notificatie-Poortwachter & 2-Weg Instellingen Synchronisatie:**
+   - 10 instellingen synchroon tussen app en backend met blackbox logging (`[SETTINGS CHANGE]` en `[NOTIFY DECISION]`).
+   - Meldingen voor uitgeschakelde categorieën worden 100% onderdrukt, terwijl deurbeloproepen (`CALL_RINGING`) altijd rinkelen.
+   - Prominente Systeemlogboek-knop direct bovenaan Kaart 4 in `SettingsScreen.kt` en als actieknop in de TopAppBar.
    - Geen verborgen offscreen WebViews meer via translationX in `MainActivity.kt`. Schermen worden uitsluitend voorwaardelijk gerenderd via `when (selectedTab)`.
    - `LiveScreen` start standaard gedempt (`isSpeakerMuted = true`), speaker toggle stuurt zowel `window.setAudioMuted` als `AudioManager.isSpeakerphoneOn` aan.
    - Bij verlaten van een scherm (`ON_PAUSE`, `ON_STOP`, `onDispose`) of ophangen worden streams en audio onmiddellijk synchroon hard beëindigd (`window.killStream()`, `onPause()`, `pauseTimers()`, in `onDispose` `loadUrl("about:blank")` + `destroy()`, en `hardKillAudio()`).
