@@ -293,6 +293,7 @@ async def get_admin_system_status(request: Request):
 
     from app.sdk_alarm_listener import sdk_alarm_listener
     from app.ring_detector import ring_detector
+    from app.network_sniffer import network_sniffer
     sdk_status = {
         "connected": sdk_alarm_listener.is_connected,
         "user_id": sdk_alarm_listener._user_id,
@@ -314,6 +315,14 @@ async def get_admin_system_status(request: Request):
         "fingerprint": os.path.exists(ring_detector.fingerprint_path),
         "recent_count": len(ring_detector.get_recent_detections()),
     }
+    sniffer_status = {
+        "running": network_sniffer._running,
+        "iface": network_sniffer.iface,
+        "doorbell_ip": network_sniffer.doorbell_ip,
+        "gateway_ip": network_sniffer.gateway_ip,
+        "recent_bursts_count": len(network_sniffer.recent_bursts),
+        "signature": network_sniffer.known_signature,
+    }
 
     return {
         "status": "ok",
@@ -329,6 +338,7 @@ async def get_admin_system_status(request: Request):
         "doorbell_ip": creds.get("ip", ""),
         "sdk_alarm_listener": sdk_status,
         "shazam_status": shazam_status,
+        "network_sniffer": sniffer_status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -492,4 +502,45 @@ async def get_shazam_detections():
         }
     except Exception as e:
         return {"status": "error", "error": str(e), "detections": []}
+
+
+@router.get("/api/v1/admin/network-sniff-bursts")
+async def get_network_sniff_bursts(request: Request):
+    """Returns recent WAN outbound packet bursts from the doorbell."""
+    require_admin(request)
+    from app.network_sniffer import network_sniffer
+    return {
+        "status": "ok",
+        "running": network_sniffer._running,
+        "signature": network_sniffer.known_signature,
+        "bursts": network_sniffer.get_recent_bursts(),
+    }
+
+
+@router.get("/api/v1/admin/network-signature")
+async def get_network_signature(request: Request):
+    """Returns the active cloud packet signature for doorbell press detection."""
+    require_admin(request)
+    from app.network_sniffer import network_sniffer
+    return {
+        "status": "ok",
+        "signature": network_sniffer.known_signature,
+    }
+
+
+@router.post("/api/v1/admin/network-signature")
+async def update_network_signature(request: Request):
+    """Updates the active cloud packet signature configuration."""
+    require_admin(request)
+    from app.network_sniffer import network_sniffer
+    body = await request.json()
+    sig = network_sniffer.known_signature.copy()
+    sig.update(body)
+    network_sniffer._save_signature(sig)
+    return {
+        "status": "ok",
+        "message": "Cloud netwerk handtekening succesvol bijgewerkt",
+        "signature": network_sniffer.known_signature,
+    }
+
 

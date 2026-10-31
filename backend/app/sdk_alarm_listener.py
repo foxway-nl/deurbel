@@ -677,22 +677,31 @@ class SDKAlarmListener:
                 return False
 
     async def _supervisor_loop(self) -> None:
-        """Continuous background monitor that maintains connection and auto-reconnects."""
+        """Continuous background monitor that maintains connection and auto-reconnects (v3.4.1: 2s check, 3s retry)."""
+        was_disconnected = False
         while self._running:
             try:
                 if not self.is_connected:
+                    was_disconnected = True
                     logger.info("Connecting Port 8000 SDK Dual Alarm Channels...")
                     success = await asyncio.to_thread(self._setup_channel_sync)
                     if not success:
-                        logger.warning("Port 8000 SDK Alarm Channel setup failed, retrying in 10s...")
-                        await asyncio.sleep(10.0)
+                        logger.warning("Port 8000 SDK Alarm Channel setup failed, retrying in 3s...")
+                        await asyncio.sleep(3.0)
                         continue
-                await asyncio.sleep(15.0)
+                    else:
+                        logger.info("🎉 [CAMERA RECONNECTED] Port 8000 SDK Dual Alarm Channels restored!")
+                        was_disconnected = False
+                elif was_disconnected:
+                    logger.info("🎉 [CAMERA RECONNECTED] Port 8000 SDK Dual Alarm Channels active!")
+                    was_disconnected = False
+
+                await asyncio.sleep(2.0)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("Error in SDK alarm supervisor: %s", e)
-                await asyncio.sleep(10.0)
+                await asyncio.sleep(3.0)
 
     async def start(self) -> None:
         """Start the SDK alarm listener service."""

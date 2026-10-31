@@ -30,8 +30,7 @@ class PersistentWebSocket(
     companion object {
         private const val TAG = "PersistentWS"
         private const val HEARTBEAT_INTERVAL_MS = 25_000L
-        private const val INITIAL_BACKOFF_MS = 1_000L
-        private const val MAX_BACKOFF_MS = 30_000L
+        private val BACKOFF_STEPS = longArrayOf(1_000L, 3_000L, 5_000L, 15_000L)
     }
 
     private val gson = Gson()
@@ -46,7 +45,8 @@ class PersistentWebSocket(
     private var webSocket: WebSocket? = null
     private var heartbeatJob: Job? = null
     private var reconnectJob: Job? = null
-    private var backoffMs = INITIAL_BACKOFF_MS
+    private var backoffIndex = 0
+    private var currentLatch: CompletableDeferred<Unit>? = null
     private var isRunning = false
 
     private val client = OkHttpClient.Builder()
@@ -64,6 +64,18 @@ class PersistentWebSocket(
         if (isRunning) return
         isRunning = true
         scope.launch { connectLoop() }
+    }
+
+    /**
+     * Force immediate reconnect (e.g. after WiFi <-> 5G network switch).
+     */
+    fun forceReconnect(reason: String) {
+        Log.i(TAG, "forceReconnect called: $reason")
+        backoffIndex = 0
+        try {
+            webSocket?.cancel()
+        } catch (_: Exception) {}
+        currentLatch?.complete(Unit)
     }
 
     /**
@@ -96,11 +108,12 @@ class PersistentWebSocket(
                     .build()
 
                 val latch = CompletableDeferred<Unit>()
+                currentLatch = latch
 
                 webSocket = client.newWebSocket(request, object : WebSocketListener() {
                     override fun onOpen(ws: WebSocket, response: Response) {
                         Log.i(TAG, "WebSocket connected to $wsUrl")
-                        backoffMs = INITIAL_BACKOFF_MS
+                        backoffIndex = 0
                         startHeartbeat(ws)
                         val isLan = resolved.isLan
                         nl.foxway.deurbel.data.AppLogger.getInstance(nl.foxway.deurbel.FoxwayApp.instance)
@@ -123,10 +136,16 @@ class PersistentWebSocket(
                     }
 
                     override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                        Log.e(TAG, "WebSocket failure: ${t.message}")
+                        val isNormalAbort = t is java.io.InterruptedIOException ||
+                                           (t is java.net.SocketException && (t.message?.contains("closed", ignoreCase = true) == true || t.message?.contains("canceled", ignoreCase = true) == true))
+                        if (isNormalAbort) {
+                            Log.i(TAG, "WebSocket disconnected normally: ${t.message}")
+                        } else {
+                            Log.w(TAG, "WebSocket failure: ${t.message}")
+                            nl.foxway.deurbel.data.AppLogger.getInstance(nl.foxway.deurbel.FoxwayApp.instance)
+                                .network("WebSocket verbinding verbroken: ${t.message}")
+                        }
                         heartbeatJob?.cancel()
-                        nl.foxway.deurbel.data.AppLogger.getInstance(nl.foxway.deurbel.FoxwayApp.instance)
-                            .error("WebSocket verbinding verbroken", t.message)
                         latch.complete(Unit)
                     }
                 })
@@ -137,15 +156,19 @@ class PersistentWebSocket(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.e(TAG, "Connection error: ${e.message}")
+                Log.w(TAG, "Connection error: ${e.message}")
+            } finally {
+                currentLatch = null
             }
 
             if (!isRunning) break
 
-            // Exponential backoff
-            Log.d(TAG, "Reconnecting in ${backoffMs}ms…")
-            delay(backoffMs)
-            backoffMs = (backoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
+            val delayMs = BACKOFF_STEPS[backoffIndex.coerceAtMost(BACKOFF_STEPS.size - 1)]
+            Log.i(TAG, "Reconnecting in ${delayMs}ms… (step $backoffIndex)")
+            delay(delayMs)
+            if (backoffIndex < BACKOFF_STEPS.size - 1) {
+                backoffIndex++
+            }
         }
     }
 

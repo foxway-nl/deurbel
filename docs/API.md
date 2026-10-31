@@ -1,4 +1,4 @@
-# Foxway Smart Doorbell API Documentatie (v3.4.0)
+# Foxway Smart Doorbell API Documentatie (v3.4.1)
 
 De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8090`, WAN: `https://deurbel.foxway.nl`).
 
@@ -6,7 +6,44 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
 
 ---
 
-## 1. Poort 8000 C-SDK Hardware Alarm Listener & Packet Sniffer (`v3.4.0`)
+## 1. Host-Level EZVIZ Cloud Packet Sniffer (`v3.4.1`)
+
+### `GET /api/v1/admin/network-sniff-bursts`
+- **Beschrijving:** Exposeert recente uitgaande WAN-pakket bursts van de deurbel (`192.168.2.31`), verzameld in 1000ms vensters via actieve ARP redirect.
+- **Output:**
+  ```json
+  {
+    "status": "ok",
+    "running": true,
+    "signature": {
+      "enabled": true,
+      "dst_port": 6404,
+      "protocol": "UDP",
+      "min_packet_count": 2,
+      "min_bytes": 60,
+      "max_bytes": 4000
+    },
+    "bursts": [
+      {
+        "timestamp": "2026-10-31 16:53:08.100",
+        "dst_ip": "148.153.115.233",
+        "dst_port": 6404,
+        "protocol": "UDP",
+        "packet_count": 4,
+        "total_bytes": 176,
+        "payload_sizes": [44, 44, 44, 44],
+        "signature_matched": true
+      }
+    ]
+  }
+  ```
+
+### `GET /api/v1/admin/network-signature` & `POST /api/v1/admin/network-signature`
+- **Beschrijving:** Beheert de actieve netwerk-handtekening voor cloud-burst drukknopdetectie (`trigger_source = 'NETWORK_SNIFF'`).
+
+---
+
+## 2. Poort 8000 C-SDK Hardware Alarm Listener & Packet Sniffer
 
 ### `GET /api/v1/admin/sdk-alarm-logs` (en `/api/v1/admin/sdk-alarm-events`)
 - **Beschrijving:** Exposeert persistente Port 8000 C-SDK raw packet sniffer logs uit de SQLite tabel `sdk_alarm_logs`.

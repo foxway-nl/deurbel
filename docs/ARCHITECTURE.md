@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell Architectuur (v3.4.0)
+# Foxway Smart Doorbell Architectuur (v3.4.1)
 
-Dit document beschrijft de technische opzet en datastromen van versie 3.4.0.
+Dit document beschrijft de technische opzet en datastromen van versie 3.4.1.
 
 > **HARDWARE SPECIFICATIE:** De EZVIZ DB1 Pro (`192.168.2.31`) heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT naar Poort 80 verbonden. Alle camera-interacties verlopen strikt via Poort 554 (RTSP) en Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`).
 
@@ -19,25 +19,26 @@ flowchart TD
 
     subgraph Server ["Foxway Server (192.168.2.1)"]
         RTSP["go2rtc (Poort 8554/1984)"]
-        SDK["Hikvision C-SDK (Poort 8000 Dual Ingest)"]
+        SDK["Hikvision C-SDK (Poort 8000 Motion 0x4000 & Tweeweg-Audio)"]
         Shazam["3-Layer Shazam Chime Detector (728Hz / 570Hz, NCC >= 0.72)"]
+        NetSniff["Host-Level ARP Cloud-Sniffer (network_sniffer.py, UDP 6404)"]
         RingBuffer["RAM Ring-Buffer (/dev/shm/deurbel_ring - Unix TS seg_%s.ts)"]
         BlackBox["Centrale Black-Box Logging (/mnt/opslag/deurbel/logs/YYYY-MM-DD.jsonl)"]
         
         subgraph Backend ["FastAPI Backend (Docker :8090)"]
             Router["FastAPI Router"]
             LivePlayer["Zero-UI Live Player (<0.3s edge-sync, instant poster)"]
-            StateEngine["Call State Machine & Trigger Source Tagger"]
-            AI["Temporal AI Detector (YOLOv8n + Stationary Car Memory + 4 FPS Burst)"]
-            SDKListener["SDK Alarm Listener & Passive Doorbell Status Monitor"]
+            StateEngine["Call State Machine & Trigger Source Tagger (NETWORK_SNIFF / SHAZAM)"]
+            AI["Temporal AI Detector (YOLOv8n + Stationary Car Memory + 0.22 Conf + Fallback)"]
+            SDKListener["SDK Alarm Listener & Auto-Reconnect Supervisor"]
         end
     end
 
-    subgraph Client ["Android App (v3.4.0, versionCode 30)"]
+    subgraph Client ["Android App (v3.4.1, versionCode 31)"]
         LiveView["Live Kijken (2-State Mute Knop)"]
         CallView["Aanbelscherm (Tweeweg Audio)"]
-        ClipsView["Opnames & Clips (Vaste 4:3 Containers)"]
-        WSClient["WebSocket Foreground Service & Push Gatekeeper"]
+        ClipsView["Opnames & Clips (Badges: SHAZAM, NETWORK_SNIFF)"]
+        WSClient["WebSocket Foreground Service & NetworkCallback Auto-Reconnect"]
         StatusReporter["Status-Dump Reporter"]
     end
 

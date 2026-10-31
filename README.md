@@ -1,37 +1,30 @@
-# Foxway Smart Doorbell (v3.4.0)
+# Foxway Smart Doorbell (v3.4.1)
 
-[![Version](https://img.shields.io/badge/version-3.4.0-emerald.svg)](https://github.com/foxway-nl/deurbel)
+[![Version](https://img.shields.io/badge/version-3.4.1-emerald.svg)](https://github.com/foxway-nl/deurbel)
 [![Platform](https://img.shields.io/badge/platform-Android%20%7C%20FastAPI%20%7C%20Docker-blue.svg)](https://github.com/foxway-nl/deurbel)
 [![Aspect Ratio](https://img.shields.io/badge/aspect_ratio-4%3A3_native-orange.svg)](https://github.com/foxway-nl/deurbel)
 
-Productie-oplossing voor de **EZVIZ DB1 Pro** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, 100% EZVIZ AI-gevoeligheid met dynamisch stilstaande-auto geheugen, 4 FPS High-Speed scan-burst gekoppeld aan de camera-bewegingssensor, per-categorie cooldowns (5s zelfde categorie, 0s verschillende categorieën), passieve deurbel netwerk & SDK status monitor via `/proc/net/tcp` en `NET_DVR_GetDVRWorkState_V30`, hardware drukknop-detectie via Poort 8000 C-SDK met dual ingest (`byDeployType=0` & `1`), passieve TCP listen op Poort 7200, 100% raw packet sniffer en byte-diffing, 3-laags Shazam deurbel-chime detector (728 Hz / 570 Hz dual-tone, NCC $\ge 0.72$), R8 minification uitgeschakeld voor gegarandeerde JSON-deserialisatie, trigger-source tagging (`CSDK_PORT_8000`, `SHAZAM_CHIME`, `TEST_BUTTON`, `SHELLY_WEBHOOK`), sub-0.3s live-edge synchronisatie op 5G, strikte notificatie-poortwachter met 2-weg instellingensynchronisatie, directe 2-standen luidsprekerknop (Rood/Groen), centrale black-box JSONL logging met Android status-dump reporter (`POST /api/v1/logs/client`) en diagnostics triage script (`scripts/triage.py`).
+Productie-oplossing voor de **EZVIZ DB1 Pro** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, 10/10 EZVIZ AI-detectieniveau met 0.22 drempelwaarde en smart motion-fallback buiten geparkeerde auto's, host-level actieve ARP/Packet Sniffer voor EZVIZ Cloud aanbel-bursts (`trigger_source = NETWORK_SNIFF`), 3-laags Shazam deurbel-chime detector (728 Hz / 570 Hz dual-tone, NCC $\ge 0.72$), automatische herverbinding en WiFi/5G netwerkwissel-herstel in Android met backoff ladder (1s -> 3s -> 5s -> 15s), badges `[SHAZAM_CHIME]`, `[NETWORK_SNIFF]`, `[SHAZAM + SNIFF]`, sub-0.3s live-edge synchronisatie op 5G, en centrale black-box JSONL logging.
 
 > **BELANGRIJK:** De EZVIZ DB1 Pro heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT met poort 80 of `/ISAPI/...` verbonden. De enige open hardware-poorten zijn **Poort 554 (RTSP)** en **Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`)**.
 
 ---
 
-## ⚡ Kernfunctionaliteiten in v3.4.0
+## ⚡ Kernfunctionaliteiten in v3.4.1
 
-1. **100% EZVIZ AI-Detectiegevoeligheid (`ai_detector.py`):**
-   - **Stationary Parked-Car Geheugen:** Dynamisch 15-seconden geheugen (`IoU >= 0.72`, centroid shift `< 0.035*w`) filtert geparkeerde auto's betrouwbaar uit zonder false positives.
-   - **Voertuigen:** Rijdende auto's (`delta_d >= 0.045*w` over 2 frames / 0.5s) en wegrijdende auto's (`delta_d >= 0.05*w`) worden direct opgenomen.
-   - **Voetgangers & Fietsers:** YOLO conf threshold verlaagd naar `0.35` met validatie over 2 frames (`disp >= 1.5%` of `conf >= 0.50`), detecteert overkant-voetgangers op 12m.
-   - **Dieren:** Detecteert katten, honden, vogels, paarden, schapen en koeien direct vanaf `conf >= 0.32`.
-   - **Per-Categorie Cooldown:** Max 5s voor dezelfde categorie na afloop van een clip; **0s cooldown** voor verschillende categorieën (bijv. persoon direct na een auto).
-   - **High-Speed AI Scan-Burst:** Poort 8000 SDK camera-beweging (`0x4000 dwAlarmType == 3`) activeert 4 FPS (0.25s interval) scan-burst voor 8 seconden.
+1. **Host-Level Actieve ARP & EZVIZ Cloud Packet Sniffer (`network_sniffer.py`):**
+   - Omdat EZVIZ `0x1132` (aanbellen) blokkeert op Poort 8000, vangt een host-level packet sniffer de uitgaande cloud-burst (UDP 6404) direct op.
+   - Gerichte ARP-reply stuurt verkeer van `192.168.2.31` via host `192.168.2.1` (`eno1`) met automatische fail-safe gateway restore bij afsluiten.
+   - Auto-calibreert bij elke Shazam detectie en triggert oproep met `trigger_source = "NETWORK_SNIFF"` (of `"SHAZAM + SNIFF"`).
 
-2. **Passieve Deurbel Netwerk & SDK Analyser (`sdk_alarm_listener.py`):**
-   - Bij aanbel-activiteit (`SHAZAM_CHIME` of belscherm) inspecteert de backend direct `/proc/net/tcp` naar sockets van/naar `192.168.2.31` en bevraagt `NET_DVR_GetDVRWorkState_V30`.
-   - Schrijft diagnostiek direct weg naar dagelijkse JSONL zwarte doos onder `DEURBEL_STATUS_MONITOR`. 0ms latency, geen ARP spoofing.
+2. **10/10 EZVIZ AI-Detectieniveau & Smart Motion Fallback (`ai_detector.py`):**
+   - Bij camera hardware beweging (`0x4000`) wordt de YOLOv8 detectiedrempel voor 10 seconden verlaagd naar `0.22` (4 FPS scan-burst).
+   - Indien YOLO geen objecten detecteert, activeert een slimme contour motion-fallback (`area >= 1.5%`, verplaatsing $\ge 2\%$ over 3 frames) buiten stilstaande geparkeerde voertuigen en boomkruinen en keurt goed als `label = "Beweging (Hardware)"`.
 
-1. **Trigger Source Audit & Dual Detectie (`sdk_alarm_listener.py`, `ring_detector.py`, `models.py`):**
-   - Elke deurbeloproep en elk event wordt geregistreerd met zijn exacte oorsprong (`trigger_source`): `CSDK_PORT_8000`, `SHAZAM_CHIME`, `TEST_BUTTON`, of `SHELLY_WEBHOOK`.
-   - Volledige transparantie in SQLite (`events` tabel), Web Admin (`/admin`), en app-logs.
-
-2. **R8 Minification Uitgeschakeld & Android Fixes (`build.gradle.kts`, `WebSocketForegroundService.kt`):**
-   - R8 minificatie en resource shrinking zijn uitgeschakeld in de release build (`isMinifyEnabled = false`, `isShrinkResources = false`) ter voorkoming van veld-obfuscatie van Kotlin data classes.
-   - Foreground service types compatibel gemaakt met Android 10 tot 14+ (`ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE` uitsluitend op API 34+), waardoor crashes bij het starten zijn opgelost.
-   - Verwijdering van foutieve klokskew-suppressie: inkomende oproepen rinkelen direct op het toestel.
+3. **Netwerk- en WiFi/5G Herstel:**
+   - Zowel backend C-SDK als Shazam audio-consumer herverbinden binnen 3.0s met `[CAMERA RECONNECTED]`.
+   - Android `WebSocketForegroundService` detecteert via `ConnectivityManager.NetworkCallback()` direct netwerkwissels en herverbindt via backoff ladder `1s -> 3s -> 5s -> 15s`.
+   - Badges `[SHAZAM_CHIME]`, `[NETWORK_SNIFF]`, `[SHAZAM + SNIFF]` in Clips en 30-dagen Logboek.
 
 3. **Gekalibreerde Shazam Deurbel-Chime Detector (NCC $\ge 0.72$):**
    - Gekalibreerd op de fysieke testen van 31-10-2026 (NCC scores 0.7519 en 0.7765).

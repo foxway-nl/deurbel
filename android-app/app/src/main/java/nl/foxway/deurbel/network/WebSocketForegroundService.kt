@@ -132,6 +132,8 @@ class WebSocketForegroundService : Service() {
     private var pollJob: Job? = null
     private var lastEventId: Long = 0L
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var connectivityManager: android.net.ConnectivityManager? = null
+    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -158,6 +160,30 @@ class WebSocketForegroundService : Service() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed startForeground: ${e.message}", e)
+        }
+
+        // Register NetworkCallback to detect WiFi <-> 5G network switches immediately
+        if (networkCallback == null) {
+            try {
+                connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+                networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: android.net.Network) {
+                        Log.i(TAG, "Network switch detected (available) -> force reconnecting WebSocket")
+                        persistentWebSocket.forceReconnect("Network available")
+                    }
+
+                    override fun onLost(network: android.net.Network) {
+                        Log.i(TAG, "Network switch detected (lost) -> force reconnecting WebSocket")
+                        persistentWebSocket.forceReconnect("Network lost")
+                    }
+                }
+                val request = android.net.NetworkRequest.Builder()
+                    .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build()
+                connectivityManager?.registerNetworkCallback(request, networkCallback!!)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed registering network callback: ${e.message}")
+            }
         }
 
         // Start WebSocket
@@ -193,6 +219,10 @@ class WebSocketForegroundService : Service() {
         eventCollectorJob?.cancel()
         pollJob?.cancel()
         persistentWebSocket.stop()
+        try {
+            networkCallback?.let { connectivityManager?.unregisterNetworkCallback(it) }
+        } catch (_: Exception) {}
+        networkCallback = null
         try {
             LiveStreamController.getInstance(applicationContext).hardKillAudio()
         } catch (_: Exception) {}

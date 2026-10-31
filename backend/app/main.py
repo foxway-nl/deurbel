@@ -226,6 +226,14 @@ async def _on_ringing(call):
     except Exception as mon_err:
         logger.debug("Failed to trigger passive doorbell status monitor: %s", mon_err)
 
+    # Auto-calibrate EZVIZ Cloud network sniffer on Shazam chime (v3.4.1)
+    if trigger_src == "SHAZAM_CHIME":
+        try:
+            from app.network_sniffer import network_sniffer
+            network_sniffer.on_shazam_chime_triggered(time.time())
+        except Exception as sniff_err:
+            logger.debug("Failed auto-calibrating network sniffer: %s", sniff_err)
+
     await push_event("CALL_RINGING", {
         "event_id": event_dict["id"],
         "call_id": call.call_id,
@@ -333,6 +341,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not start Live Hub: %s", e)
 
+    # Start Host-Level EZVIZ Cloud Packet Sniffer & ARP Redirector (v3.4.1)
+    try:
+        from app.network_sniffer import network_sniffer
+        await network_sniffer.start()
+    except Exception as e:
+        logger.warning("Could not start Network Sniffer: %s", e)
+
     logger.info("✅ Backend ready")
     yield
 
@@ -362,6 +377,11 @@ async def lifespan(app: FastAPI):
     try:
         from app.ring_detector import ring_detector
         await ring_detector.stop()
+    except Exception:
+        pass
+    try:
+        from app.network_sniffer import network_sniffer
+        await network_sniffer.stop()
     except Exception:
         pass
     await mdns_service.stop()
@@ -762,13 +782,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "3.4.0",
-        "version_code": 30,
-        "build_time": "2026-10-31T16:30:00Z",
+        "version": "3.4.1",
+        "version_code": 31,
+        "build_time": "2026-10-31T17:15:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.4.0 (v3.3.1 / v3.2.0 / v3.1.4 / v3.0.0 / v2.8.0): 100% EZVIZ AI-detectiegevoeligheid met dynamisch geheugen voor geparkeerde voertuigen, 4 FPS scan-burst op hardware beweging, per-categorie cooldown en passieve netwerk/SDK status monitor.",
+        "changelog": "v3.4.1 (v3.4.0 / v3.3.1 / v3.2.0 / v3.1.4): Host-level EZVIZ Cloud ARP/Packet Sniffer (NETWORK_SNIFF), AI-detectie 10/10 met 0.22 conf drempel en smart motion-fallback buiten geparkeerde auto's, automatische herverbinding en WiFi/5G netwerkwissel-herstel.",
     }
 
 

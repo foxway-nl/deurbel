@@ -220,6 +220,7 @@ class ShazamChimeDetector:
         ]
 
         logger.info("Starting Shazam RTSP audio consumer on %s", rtsp_url)
+        had_disconnect = False
         while self._running:
             try:
                 self._process = subprocess.Popen(
@@ -228,14 +229,20 @@ class ShazamChimeDetector:
                     stderr=subprocess.DEVNULL,
                     bufsize=4096,
                 )
+                if had_disconnect:
+                    logger.info("🎉 [CAMERA RECONNECTED] Shazam RTSP audio consumer restored on %s!", rtsp_url)
+                    had_disconnect = False
+
                 while self._running and self._process.poll() is None:
                     chunk = self._process.stdout.read(3200) # 100ms chunk (3200 bytes)
                     if not chunk:
                         break
                     self.feed_pcm_samples(chunk)
             except Exception as e:
-                logger.debug("Shazam audio stream error (retrying in 5s): %s", e)
+                had_disconnect = True
+                logger.debug("Shazam audio stream error (retrying in 3s): %s", e)
             finally:
+                had_disconnect = True
                 if self._process:
                     try:
                         self._process.kill()
@@ -244,7 +251,7 @@ class ShazamChimeDetector:
                     self._process = None
 
             if self._running:
-                time.sleep(5.0)
+                time.sleep(3.0)
 
     async def start(self) -> None:
         if self._running:

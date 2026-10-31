@@ -1622,6 +1622,13 @@ private fun LogItemRow(entry: LogEntry) {
         LogCategory.INFO -> TextSecondary
     }
 
+    val triggerBadge = when {
+        entry.details?.contains("SHAZAM + SNIFF") == true || entry.message.contains("SHAZAM + SNIFF") -> "⚡ [SHAZAM + SNIFF]" to AmberWarning
+        entry.details?.contains("NETWORK_SNIFF") == true || entry.message.contains("NETWORK_SNIFF") -> "🌐 [NETWORK_SNIFF]" to CyanAccent
+        entry.details?.contains("SHAZAM_CHIME") == true || entry.message.contains("SHAZAM_CHIME") -> "🔔 [SHAZAM_CHIME]" to EmeraldPrimary
+        else -> null
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1640,11 +1647,20 @@ private fun LogItemRow(entry: LogEntry) {
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary
             )
-            Text(
-                text = entry.category.name,
-                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                color = categoryColor
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (triggerBadge != null) {
+                    Text(
+                        text = triggerBadge.first,
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = triggerBadge.second
+                    )
+                }
+                Text(
+                    text = entry.category.name,
+                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                    color = categoryColor
+                )
+            }
         }
         Text(
             text = entry.message,

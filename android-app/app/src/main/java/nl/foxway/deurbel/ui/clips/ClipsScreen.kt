@@ -659,6 +659,15 @@ private fun ClipCard(
 
                     // Detection category badge
                     val (badgeIcon, statusText, badgeColor) = when {
+                        !clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("SHAZAM + SNIFF") -> {
+                            Triple("⚡", "Aangebeld [SHAZAM + SNIFF]", AmberWarning)
+                        }
+                        !clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("NETWORK_SNIFF") -> {
+                            Triple("🌐", "Aangebeld [NETWORK_SNIFF]", CyanAccent)
+                        }
+                        !clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("SHAZAM_CHIME") -> {
+                            Triple("🔔", "Aangebeld [SHAZAM_CHIME]", EmeraldPrimary)
+                        }
                         !clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("Handmatige") -> {
                             Triple("🎥", clip.answeredBy, CoralDecline)
                         }

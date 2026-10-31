@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell System Specification (v3.4.0)
+# Foxway Smart Doorbell System Specification (v3.4.1)
 
-**Versie:** `v3.4.0` (`versionCode = 30`)  
+**Versie:** `v3.4.1` (`versionCode = 31`)  
 **Datum:** 31 Oktober 2026  
 **Productie-omgeving:** `foxway` (`192.168.2.1`), WAN: `https://deurbel.foxway.nl`  
 **Camera:** EZVIZ DB1 Pro (`192.168.2.31`), native **4:3 aspect ratio** (`768x576` / `960x720`)
@@ -13,31 +13,25 @@ Het Foxway Deurbelsysteem is een end-to-end, privacy-vriendelijk en ultra-low-la
    - **BELANGRIJK:** Poort 80 (HTTP / ISAPI / ONVIF) is **NIET AANWEZIG** op de camera. Er wordt NOOIT verbonden met poort 80 of `/ISAPI/...`.
    - Native 4:3 beeldsensor met microfoon en luidspreker.
    - Tweeweg-audio gestuurd via `libhcnetsdk.so` C-SDK (`app/audio_bridge.py`) over TCP poort 8000.
-   - **Hardware Drukknop-Detectie & Dual Ingest (`backend/app/sdk_alarm_listener.py`):**
-     - Exacte 28-byte `NET_DVR_SETUPALARM_PARAM` struct.
-     - Dual Ingest met `byDeployType = 0` (Client / Intercom) en `byDeployType = 1` (Server mode).
-     - Passieve TCP Listen op Poort 7200 (`NET_DVR_StartListen_V30`).
-     - Native C-SDK file logger geactiveerd naar `/mnt/opslag/deurbel/logs/hcnetsdk_native/`.
-     - 100% Raw buffer packet sniffer met byte-diffing op bewegingsalarmen (`0x4000`).
-     - Triggers: `0x1132` (byte 44 in 1, 0), `0x1133` (byte 44 in 1, 14), `0x4000` (`dwAlarmType == 0`), en ISAPI ring (`0x5002` / `0x6009`), gelogd met `trigger_source = 'CSDK_PORT_8000'`.
+   - **Hardware Drukknop-Detectie & Host-Level Cloud Sniffer (`backend/app/network_sniffer.py`):**
+     - Omdat EZVIZ hardware intercom event `0x1132` op Poort 8000 blokkeert, is de drukknop detectie dubbel gewaarborgd:
+       - **Shazam Chime Detector** (`ring_detector.py`, 728 Hz / 570 Hz dual-tone, NCC $\ge 0.72$).
+       - **Host-Level Actieve ARP/Packet Sniffer** (`network_sniffer.py`): stuurt gerichte ARP reply naar `192.168.2.31` elke 2.0s via host `192.168.2.1` (`eno1`), vangt uitgaand WAN cloudverkeer op in 1000ms vensters en triggert `trigger_source = 'NETWORK_SNIFF'` (of `'SHAZAM + SNIFF'` bij gelijktijdige detectie).
+       - Fail-safe atexit/signal handlers versturen 3x ARP restore packets (`00:f8:cc:d0:9e:00`) zodat internettoegang nooit verstoord raakt.
+     - C-SDK Poort 8000 vangt hardware bewegingsalarm `0x4000 dwAlarmType == 3` op en verzorgt tweeweg-audio.
 2. **FastAPI & Python Media Server (`backend` in Docker):**
    - Draait op poort 8090 met `network_mode: host`.
    - **Real-Time 3-Layer Shazam Deurbel-Chime Detector (`ring_detector.py`):** Gekalibreerd op echte fysieke deurbelopnames (728 Hz / 570 Hz dual-tone). Laag 1: spectrale whitening, Laag 2: kwarts-klok toonstabiliteit binnen +-15 Hz, Laag 3: 2D Normalized Cross-Correlation (NCC $\ge 0.72$, 12s cooldown). Logt alle evaluaties $\ge 0.45$ NCC in daily JSONL en triggert oproep met `trigger_source = 'SHAZAM_CHIME'`.
    - **Zero-UI Live Player op `/api/v1/live/player`:** Minimalistische speler gebaseerd op `<zero-player>` en `/api/go2rtc/video-rtc.js`. Instant 4:3 poster gerenderd op ms 0 via `<img id="instant-poster">`, direct verwijderd op eerste video-frame. Live-edge lag recovery op `<0.3s` via 250ms interval, `window.setAudioMuted()`, `window.killStream()`, `window.setVideoZoom()`, en stabiele WS-herverbinding uitsluitend bij `onclose`/`onerror`.
    - **Notificatie-Poortwachter & Stille Uren (23:30 - 07:30):** Wanneer een categorie `Melding` op UIT staat, zet de backend `silent = True` en `should_notify = False`, waardoor FCM en client-notificaties 100% worden onderdrukt. Deurbeloproepen (`CALL_RINGING`) rinkelen altijd en worden nooit onderdrukt.
-   - **100% EZVIZ AI-Gevoeligheid & Dynamisch Stilstaande-Auto Geheugen (`app/ai_detector.py`):**
-     - Dynamisch 15-seconden geheugen voor stilstaande auto's (`IoU >= 0.72`, centroid shift `< 0.035*w`) filtert geparkeerde auto's uit.
-     - Langsrijdende voertuigen (`delta_d >= 0.045*w` over 2 frames / 0.5s) en vertrekkende auto's (`delta_d >= 0.05*w`) worden direct opgenomen.
-     - Voetgangers (`conf >= 0.35`, verplaatsing $\ge 1.5\%$ of `conf >= 0.50`) en dieren (`conf >= 0.32`) triggeren direct.
-     - Per-categorie cooldown (5s zelfde categorie, 0s verschillende categorieën) voorkomt dat personen en voertuigen elkaar blokkeren.
-     - Camera hardware bewegingsalarm (`0x4000 dwAlarmType == 3`) activeert 4 FPS High-Speed Scan-Burst gedurende 8s.
-   - **Passieve Deurbel Netwerk & SDK Analyser (`app/sdk_alarm_listener.py`):**
-     - Bij aanbel-activiteit (`SHAZAM_CHIME` of belscherm) inspecteert de backend direct `/proc/net/tcp` naar sockets van/naar `192.168.2.31` en bevraagt `NET_DVR_GetDVRWorkState_V30`.
-     - Schrijft de status direct naar de dagelijkse JSONL zwarte doos onder `DEURBEL_STATUS_MONITOR`.
-   - **Centrale Black-Box JSONL Logging (`app/logger.py`):** Schrijft alle server-, SDK-, Shazam-, AI- en client-events, inclusief `[SETTINGS CHANGE]` en `[NOTIFY DECISION]`, naar `/mnt/opslag/deurbel/logs/YYYY-MM-DD.jsonl`.
-   - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met 25 FPS live preview player, real-time Poort 8000 SDK packet sniffer tabel, native C-SDK log viewer modal, en Shazam Chime live monitor.
+   - **10/10 EZVIZ AI-Gevoeligheid & Smart Motion Fallback (`app/ai_detector.py`):**
+     - Dynamisch geheugen voor stilstaande auto's filtert geparkeerde auto's betrouwbaar uit.
+     - Bij camera hardware beweging (`0x4000`) wordt de YOLOv8 detectiedrempel voor 10s verlaagd naar `0.22` en 4 FPS scan-burst geactiveerd.
+     - Indien YOLO geen objecten detecteert, activeert slimme contour motion fallback (`area >= 1.5%`, verplaatsing $\ge 2\%$ over 3 frames) buiten stilstaande auto's en boomkruinen en keurt goed als `label = "Beweging (Hardware)"`.
+   - **Netwerk- en WiFi/5G Herstel:** Zowel backend C-SDK als Shazam herverbinden binnen 3.0s met `[CAMERA RECONNECTED]`. Android `WebSocketForegroundService` detecteert via `ConnectivityManager.NetworkCallback()` direct netwerkwissels en herverbindt via backoff ladder `1s -> 3s -> 5s -> 15s`.
+   - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met live preview player, real-time Poort 8000 SDK packet sniffer tabel, native C-SDK log viewer modal, Shazam Chime live monitor en Live EZVIZ Cloud-Sniffer tabel.
 3. **Android Client App (`android-app`):**
-   - Native Jetpack Compose, Kotlin coroutines, versie 3.4.0 (`versionCode = 30`).
+   - Native Jetpack Compose, Kotlin coroutines, versie 3.4.1 (`versionCode = 31`). Badges `[SHAZAM_CHIME]`, `[NETWORK_SNIFF]`, `[SHAZAM + SNIFF]` in Clips en 30-dagen Logboek.
    - **R8 Minification Uitgeschakeld:** `isMinifyEnabled = false` en `isShrinkResources = false` waarborgen foutloze JSON/Gson deserialisatie van data-classes (`DoorbellEvent`, `CallRingingPayload`, instellingen DTOs).
    - **Verbeterde Foreground Service Compatibiliteit:** Special-use foreground service types worden uitsluitend op Android 14+ (`API 34`) meegegeven, waardoor crashes op Android 10-13 zijn verholpen.
    - **Real-Time Belscherm Activatie:** Directe activering van inkomende oproepen zonder foutieve klokskew-suppressie.

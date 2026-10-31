@@ -724,8 +724,8 @@ class SmartDetector:
                 # Run Temporal Pixel-Diff Masking Gatekeeper
                 await self._process_frame_gatekeeper(frame_640, now_t, cfg)
 
-                # High-Speed AI Scan-Burst: 4 FPS (0.25s) for 8s on hardware motion or active candidate
-                burst_active = (now_t - self._last_hardware_motion_time) < 8.0 or (now_t - self._last_candidate_seen_time) < 8.0
+                # High-Speed AI Scan-Burst: 4 FPS (0.25s) for 10s on hardware motion or active candidate
+                burst_active = (now_t - self._last_hardware_motion_time) < 10.0 or (now_t - self._last_candidate_seen_time) < 10.0
                 frame_interval = 0.25 if burst_active else 0.50
                 await asyncio.sleep(frame_interval)
 
@@ -803,11 +803,20 @@ class SmartDetector:
             exclusion_zones = []
 
         # ── 3. Layer 1: Fast YOLOv8n Inference (imgsz=640, <45ms) ─────────
+        is_hardware_motion_active = (now - self._last_hardware_motion_time) < 10.0
+        if is_hardware_motion_active:
+            person_conf_thresh = min(person_conf_thresh, 0.22)
+            vehicle_conf_thresh = min(vehicle_conf_thresh, 0.22)
+            animal_conf_thresh = min(animal_conf_thresh, 0.22)
+            yolo_conf = 0.20
+        else:
+            yolo_conf = 0.30
+
         try:
             results = self.model(
                 frame,
                 classes=[0, 1, 2, 3, 5, 7, 14, 15, 16, 17, 18, 19],
-                conf=0.30,
+                conf=yolo_conf,
                 imgsz=640,
                 verbose=False,
             )
@@ -815,13 +824,15 @@ class SmartDetector:
             logger.warning("YOLOv8n inference failed: %s", e)
             return
 
-        if not results or len(results) == 0 or results[0].boxes is None:
-            self._prune_stale_tracks(now)
-            return
-
-        boxes = results[0].boxes.xyxy.cpu().numpy()
-        confs = results[0].boxes.conf.cpu().numpy()
-        classes = results[0].boxes.cls.cpu().numpy()
+        has_yolo_boxes = results and len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0
+        if has_yolo_boxes:
+            boxes = results[0].boxes.xyxy.cpu().numpy()
+            confs = results[0].boxes.conf.cpu().numpy()
+            classes = results[0].boxes.cls.cpu().numpy()
+        else:
+            boxes = np.empty((0, 4))
+            confs = np.empty((0,))
+            classes = np.empty((0,))
 
         # Update Stationary Parked-Car Memory (v3.4.0) with all detected vehicle boxes
         detected_vehicle_boxes = [
@@ -889,6 +900,32 @@ class SmartDetector:
 
         if detected_candidates:
             self._last_candidate_seen_time = now
+        elif is_hardware_motion_active:
+            # Smart motion fallback on motion_mask outside parked cars & trees (v3.4.1)
+            fallback_mask = motion_mask.copy()
+            # Mask out upper canopy / roofline (y < 0.22 * h) and top right tree canopy (x > 0.60 * w, y < 0.35 * h)
+            fallback_mask[:int(0.22 * h), :] = 0
+            fallback_mask[:int(0.35 * h), int(0.60 * w):] = 0
+
+            # Mask out stationary vehicles
+            for s in self.stationary_vehicles:
+                sbx1, sby1, sbx2, sby2 = [int(v) for v in s["box"]]
+                sbx1, sby1 = max(0, sbx1), max(0, sby1)
+                sbx2, sby2 = min(w, sbx2), min(h, sby2)
+                fallback_mask[sby1:sby2, sbx1:sbx2] = 0
+
+            contours, _ = cv2.findContours(fallback_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            min_area = 0.015 * w * h  # 1.5% of frame area
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area >= min_area:
+                    x, y, cw, ch = cv2.boundingRect(cnt)
+                    cbox = (float(x), float(y), float(x + cw), float(y + ch))
+                    in_z, _ = self.is_in_exclusion_zone(cbox, (h, w), exclusion_zones)
+                    if not in_z:
+                        detected_candidates.append(("motion", "Beweging (Hardware)", 0.85, cbox, 0.25))
+                        self._last_candidate_seen_time = now
+                        break
 
         # Check person priority:
         has_person_now = any(cat == "person" for (cat, _, _, _, _) in detected_candidates)
@@ -922,6 +959,11 @@ class SmartDetector:
                     if category == "vehicle":
                         if iou >= 0.15 or (dist < 0.20 and size_ratio > 0.40):
                             if iou > best_iou or (best_iou == 0.0 and dist < 0.20):
+                                best_iou = max(iou, 0.01)
+                                matched_id = tid
+                    elif category == "motion":
+                        if iou >= 0.10 or (dist < 0.25 and size_ratio > 0.30):
+                            if iou > best_iou or (best_iou == 0.0 and dist < 0.25):
                                 best_iou = max(iou, 0.01)
                                 matched_id = tid
                     else:
@@ -1014,6 +1056,17 @@ class SmartDetector:
                         verified_disp_pct = delta_d_pct
                         logger.info("Animal APPROVED: %s conf=%.2f", track.label, track.best_conf)
                     elif duration_tracked >= 1.0:
+                        to_remove.append(tid)
+                        continue
+
+                elif track.category == "motion":
+                    # Smart Motion Fallback (v3.4.1) outside stationary vehicles & canopy:
+                    # Verified over >= 2 frames (or duration >= 0.4s) with displacement >= 2.0%
+                    if delta_d >= 0.02 or len(track.frames) >= 2:
+                        is_valid_object = True
+                        verified_disp_pct = delta_d_pct
+                        logger.info("Motion Fallback APPROVED: %s frames=%d disp=%.1f%%", track.label, len(track.frames), delta_d_pct)
+                    elif duration_tracked >= 1.5:
                         to_remove.append(tid)
                         continue
 
@@ -1133,6 +1186,9 @@ class SmartDetector:
         elif category == "animal":
             should_record = cfg.get("record_animal", True)
             should_notify = cfg.get("notify_animal", True)
+        elif category == "motion":
+            should_record = cfg.get("record_motion", True)
+            should_notify = cfg.get("notify_motion", True)
         else:
             should_record = cfg.get("record_motion", False)
             should_notify = cfg.get("notify_motion", False)

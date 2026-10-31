@@ -523,12 +523,33 @@ async def _record(call_id: str, clip_path: str) -> None:
     # Probe duration and persist clip metadata
     duration = await _probe_duration(clip_path)
     snapshot_path = await ensure_thumbnail(call_id, clip_path)
+
+    # Look up call log to preserve answered_by or trigger_source badge
+    ans = ""
+    try:
+        from app.database import get_db
+        async with get_db(write=False) as db:
+            c = await db.execute("SELECT trigger_source, answered_by FROM call_logs WHERE call_id = ?", (call_id,))
+            row = await c.fetchone()
+            if row:
+                if row["answered_by"]:
+                    ans = row["answered_by"]
+                elif row["trigger_source"]:
+                    ans = f"Aanbellen [{row['trigger_source']}]"
+    except Exception:
+        pass
+    if not ans:
+        from app.state_machine import call_sm
+        if call_sm._current and call_sm._current.call_id == call_id:
+            ans = call_sm._current.claimed_by or f"Aanbellen [{call_sm._current.trigger_source}]"
+
     await save_clip(
         clip_id=call_id,
         call_id=call_id,
         video_path=clip_path,
         snapshot_path=snapshot_path,
         duration=duration,
+        answered_by=ans,
     )
 
 
