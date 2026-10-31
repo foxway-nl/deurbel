@@ -219,6 +219,13 @@ async def _on_ringing(call):
     from app.audio_bridge import async_prewarm_sdk_session
     asyncio.create_task(async_prewarm_sdk_session())
 
+    # Trigger passive doorbell status monitor (v3.4.0)
+    try:
+        from app.sdk_alarm_listener import sdk_alarm_listener
+        asyncio.create_task(sdk_alarm_listener.log_passive_doorbell_status(trigger_source=trigger_src))
+    except Exception as mon_err:
+        logger.debug("Failed to trigger passive doorbell status monitor: %s", mon_err)
+
     await push_event("CALL_RINGING", {
         "event_id": event_dict["id"],
         "call_id": call.call_id,
@@ -755,13 +762,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "3.3.1",
-        "version_code": 29,
-        "build_time": "2026-10-31T15:45:00Z",
+        "version": "3.4.0",
+        "version_code": 30,
+        "build_time": "2026-10-31T16:30:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.3.1 (v3.2.0 / v3.1.4 / v3.0.0 / v2.8.0): Forensisch bewezen ring triggers (C-SDK + Shazam Chime 0.72), R8 uitschakeling voor betrouwbare call-UI en meldingen, 1-klik admin auto-login, permissieknop styling en automatische scroll/expand naar permissies.",
+        "changelog": "v3.4.0 (v3.3.1 / v3.2.0 / v3.1.4 / v3.0.0 / v2.8.0): 100% EZVIZ AI-detectiegevoeligheid met dynamisch geheugen voor geparkeerde voertuigen, 4 FPS scan-burst op hardware beweging, per-categorie cooldown en passieve netwerk/SDK status monitor.",
     }
 
 

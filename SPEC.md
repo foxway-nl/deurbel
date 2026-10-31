@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell System Specification (v3.3.1)
+# Foxway Smart Doorbell System Specification (v3.4.0)
 
-**Versie:** `v3.3.1` (`versionCode = 29`)  
+**Versie:** `v3.4.0` (`versionCode = 30`)  
 **Datum:** 31 Oktober 2026  
 **Productie-omgeving:** `foxway` (`192.168.2.1`), WAN: `https://deurbel.foxway.nl`  
 **Camera:** EZVIZ DB1 Pro (`192.168.2.31`), native **4:3 aspect ratio** (`768x576` / `960x720`)
@@ -25,11 +25,19 @@ Het Foxway Deurbelsysteem is een end-to-end, privacy-vriendelijk en ultra-low-la
    - **Real-Time 3-Layer Shazam Deurbel-Chime Detector (`ring_detector.py`):** Gekalibreerd op echte fysieke deurbelopnames (728 Hz / 570 Hz dual-tone). Laag 1: spectrale whitening, Laag 2: kwarts-klok toonstabiliteit binnen +-15 Hz, Laag 3: 2D Normalized Cross-Correlation (NCC $\ge 0.72$, 12s cooldown). Logt alle evaluaties $\ge 0.45$ NCC in daily JSONL en triggert oproep met `trigger_source = 'SHAZAM_CHIME'`.
    - **Zero-UI Live Player op `/api/v1/live/player`:** Minimalistische speler gebaseerd op `<zero-player>` en `/api/go2rtc/video-rtc.js`. Instant 4:3 poster gerenderd op ms 0 via `<img id="instant-poster">`, direct verwijderd op eerste video-frame. Live-edge lag recovery op `<0.3s` via 250ms interval, `window.setAudioMuted()`, `window.killStream()`, `window.setVideoZoom()`, en stabiele WS-herverbinding uitsluitend bij `onclose`/`onerror`.
    - **Notificatie-Poortwachter & Stille Uren (23:30 - 07:30):** Wanneer een categorie `Melding` op UIT staat, zet de backend `silent = True` en `should_notify = False`, waardoor FCM en client-notificaties 100% worden onderdrukt. Deurbeloproepen (`CALL_RINGING`) rinkelen altijd en worden nooit onderdrukt.
-   - **Anti-Car Swap Filter (`app/ai_detector.py`):** `parked_spots` pre-filtering (`IoU >= 0.55` en `changed_pixel_ratio < 0.30` direct afgekeurd) en strikte stap-verplaatsing validatie over $\ge 4$ opeenvolgende frames in dezelfde richting (`abs(dx) >= 0.18*w` met `changed_pixel_ratio >= 0.35` en `0.02*w <= step_disp <= 0.12*w`).
+   - **100% EZVIZ AI-Gevoeligheid & Dynamisch Stilstaande-Auto Geheugen (`app/ai_detector.py`):**
+     - Dynamisch 15-seconden geheugen voor stilstaande auto's (`IoU >= 0.72`, centroid shift `< 0.035*w`) filtert geparkeerde auto's uit.
+     - Langsrijdende voertuigen (`delta_d >= 0.045*w` over 2 frames / 0.5s) en vertrekkende auto's (`delta_d >= 0.05*w`) worden direct opgenomen.
+     - Voetgangers (`conf >= 0.35`, verplaatsing $\ge 1.5\%$ of `conf >= 0.50`) en dieren (`conf >= 0.32`) triggeren direct.
+     - Per-categorie cooldown (5s zelfde categorie, 0s verschillende categorieën) voorkomt dat personen en voertuigen elkaar blokkeren.
+     - Camera hardware bewegingsalarm (`0x4000 dwAlarmType == 3`) activeert 4 FPS High-Speed Scan-Burst gedurende 8s.
+   - **Passieve Deurbel Netwerk & SDK Analyser (`app/sdk_alarm_listener.py`):**
+     - Bij aanbel-activiteit (`SHAZAM_CHIME` of belscherm) inspecteert de backend direct `/proc/net/tcp` naar sockets van/naar `192.168.2.31` en bevraagt `NET_DVR_GetDVRWorkState_V30`.
+     - Schrijft de status direct naar de dagelijkse JSONL zwarte doos onder `DEURBEL_STATUS_MONITOR`.
    - **Centrale Black-Box JSONL Logging (`app/logger.py`):** Schrijft alle server-, SDK-, Shazam-, AI- en client-events, inclusief `[SETTINGS CHANGE]` en `[NOTIFY DECISION]`, naar `/mnt/opslag/deurbel/logs/YYYY-MM-DD.jsonl`.
    - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met 25 FPS live preview player, real-time Poort 8000 SDK packet sniffer tabel, native C-SDK log viewer modal, en Shazam Chime live monitor.
 3. **Android Client App (`android-app`):**
-   - Native Jetpack Compose, Kotlin coroutines, versie 3.3.1 (`versionCode = 29`).
+   - Native Jetpack Compose, Kotlin coroutines, versie 3.4.0 (`versionCode = 30`).
    - **R8 Minification Uitgeschakeld:** `isMinifyEnabled = false` en `isShrinkResources = false` waarborgen foutloze JSON/Gson deserialisatie van data-classes (`DoorbellEvent`, `CallRingingPayload`, instellingen DTOs).
    - **Verbeterde Foreground Service Compatibiliteit:** Special-use foreground service types worden uitsluitend op Android 14+ (`API 34`) meegegeven, waardoor crashes op Android 10-13 zijn verholpen.
    - **Real-Time Belscherm Activatie:** Directe activering van inkomende oproepen zonder foutieve klokskew-suppressie.

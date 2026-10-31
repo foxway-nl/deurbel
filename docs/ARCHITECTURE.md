@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell Architectuur (v3.3.1)
+# Foxway Smart Doorbell Architectuur (v3.4.0)
 
-Dit document beschrijft de technische opzet en datastromen van versie 3.3.1.
+Dit document beschrijft de technische opzet en datastromen van versie 3.4.0.
 
 > **HARDWARE SPECIFICATIE:** De EZVIZ DB1 Pro (`192.168.2.31`) heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT naar Poort 80 verbonden. Alle camera-interacties verlopen strikt via Poort 554 (RTSP) en Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`).
 
@@ -28,12 +28,12 @@ flowchart TD
             Router["FastAPI Router"]
             LivePlayer["Zero-UI Live Player (<0.3s edge-sync, instant poster)"]
             StateEngine["Call State Machine & Trigger Source Tagger"]
-            AI["Temporal AI Detector (YOLOv8n + Parked Car Gatekeeper)"]
-            SDKListener["SDK Alarm Listener & 100% Buffer Sniffer"]
+            AI["Temporal AI Detector (YOLOv8n + Stationary Car Memory + 4 FPS Burst)"]
+            SDKListener["SDK Alarm Listener & Passive Doorbell Status Monitor"]
         end
     end
 
-    subgraph Client ["Android App (v3.3.1, versionCode 29)"]
+    subgraph Client ["Android App (v3.4.0, versionCode 30)"]
         LiveView["Live Kijken (2-State Mute Knop)"]
         CallView["Aanbelscherm (Tweeweg Audio)"]
         ClipsView["Opnames & Clips (Vaste 4:3 Containers)"]

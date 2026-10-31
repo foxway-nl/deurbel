@@ -358,6 +358,13 @@ class SDKAlarmListener:
 
                 # Als dwAlarmType == 3 (Motion Detection): Byte-Diffing
                 if dwAlarmType == 3:
+                    # Signal AI Detector for High-Speed AI Scan-Burst (4 FPS / 0.25s) (v3.4.0)
+                    try:
+                        from app.ai_detector import smart_detector
+                        smart_detector.notify_hardware_motion()
+                    except Exception as me:
+                        logger.debug("Failed to notify smart_detector of hardware motion: %s", me)
+
                     # Vergelijk de 268 bytes met de vorige payload (negeer struTime timestamps bytes 4..12)
                     has_diff = False
                     if self._last_motion_payload is None or len(raw_bytes) != len(self._last_motion_payload):
@@ -737,6 +744,124 @@ class SDKAlarmListener:
                     except Exception:
                         pass
                     self._user_id = -1
+
+    async def log_passive_doorbell_status(self, trigger_source: str = "SHAZAM_CHIME") -> dict:
+        """
+        Passive Doorbell Network & SDK Analyser (v3.4.0).
+        Invoked upon doorbell events (e.g. SHAZAM_CHIME or ringing) to capture:
+        1. All active TCP connections to/from 192.168.2.31 via /proc/net/tcp.
+        2. C-SDK WorkState (NET_DVR_GetDVRWorkState_V30).
+        Logs structured diagnostics to daily black-box JSONL under DEURBEL_STATUS_MONITOR.
+        Zero network latency, 0 ARP spoofing.
+        """
+        return await asyncio.to_thread(self._log_passive_doorbell_status_sync, trigger_source)
+
+    def _log_passive_doorbell_status_sync(self, trigger_source: str = "SHAZAM_CHIME") -> dict:
+        from app.logger import log_blackbox
+        import socket
+
+        status_data: dict[str, Any] = {
+            "trigger_source": trigger_source,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "active_sockets": [],
+            "listen_sockets": [],
+            "csdk_workstate": {},
+            "sdk_alarm_channel": {
+                "user_id": self._user_id,
+                "alarm_handle_deploy0": self._alarm_handle_deploy0,
+                "alarm_handle_deploy1": self._alarm_handle_deploy1,
+                "listen_handle": self._listen_handle,
+                "is_connected": self.is_connected,
+            },
+        }
+
+        # 1. Inspect /proc/net/tcp for connections to/from 192.168.2.31
+        try:
+            def hex_to_ip_port(h_ip: str, h_port: str) -> tuple[str, int]:
+                ip = socket.inet_ntoa(struct.pack("<L", int(h_ip, 16)))
+                port = int(h_port, 16)
+                return ip, port
+
+            TCP_STATES = {
+                "01": "ESTABLISHED",
+                "02": "SYN_SENT",
+                "03": "SYN_RECV",
+                "04": "FIN_WAIT1",
+                "05": "FIN_WAIT2",
+                "06": "TIME_WAIT",
+                "07": "CLOSE",
+                "08": "CLOSE_WAIT",
+                "09": "LAST_ACK",
+                "0A": "LISTEN",
+                "0B": "CLOSING",
+            }
+
+            if os.path.exists("/proc/net/tcp"):
+                with open("/proc/net/tcp", "r") as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) >= 4 and parts[0] != "sl":
+                            l_ip, l_p = hex_to_ip_port(*parts[1].split(":"))
+                            r_ip, r_p = hex_to_ip_port(*parts[2].split(":"))
+                            st_hex = parts[3]
+                            st_name = TCP_STATES.get(st_hex, st_hex)
+
+                            if "192.168.2.31" in (l_ip, r_ip):
+                                status_data["active_sockets"].append({
+                                    "local": f"{l_ip}:{l_p}",
+                                    "remote": f"{r_ip}:{r_p}",
+                                    "state": st_name,
+                                })
+                            elif l_p == 7200 and st_hex == "0A":
+                                status_data["listen_sockets"].append({
+                                    "local": f"{l_ip}:{l_p}",
+                                    "state": st_name,
+                                })
+        except Exception as sock_err:
+            logger.debug("Failed reading /proc/net/tcp: %s", sock_err)
+
+        # 2. Query C-SDK NET_DVR_GetDVRWorkState_V30
+        try:
+            with self._channel_lock:
+                uid = self._user_id
+                sdk = self._sdk
+                if uid >= 0 and sdk is not None:
+                    # Allocate safe 128 KB buffer
+                    buf = (ctypes.c_uint8 * 131072)()
+                    sdk.NET_DVR_GetDVRWorkState_V30.restype = ctypes.c_bool
+                    sdk.NET_DVR_GetDVRWorkState_V30.argtypes = [ctypes.c_int32, ctypes.c_void_p]
+                    ok = sdk.NET_DVR_GetDVRWorkState_V30(uid, ctypes.byref(buf))
+                    if ok:
+                        raw = bytes(buf[:128])
+                        dw_dev_static = struct.unpack("<I", raw[:4])[0]
+                        status_data["csdk_workstate"] = {
+                            "success": True,
+                            "dwDeviceStatic": dw_dev_static,
+                            "raw_bytes_prefix_hex": raw[:32].hex(),
+                        }
+                    else:
+                        err = sdk.NET_DVR_GetLastError() if hasattr(sdk, "NET_DVR_GetLastError") else -1
+                        status_data["csdk_workstate"] = {"success": False, "error_code": err}
+                else:
+                    status_data["csdk_workstate"] = {"success": False, "reason": "C-SDK alarm not logged in"}
+        except Exception as csdk_err:
+            logger.debug("Failed getting C-SDK workstate: %s", csdk_err)
+            status_data["csdk_workstate"] = {"success": False, "error": str(csdk_err)}
+
+        # 3. Log to daily black-box JSONL
+        log_blackbox(
+            category="DEURBEL_STATUS_MONITOR",
+            event="DOORBELL_PASSIVE_STATE",
+            level="INFO",
+            data=status_data,
+        )
+        logger.info(
+            "📊 [Doorbell Status Monitor] Logged passive state: sockets=%d, workstate_ok=%s (trigger=%s)",
+            len(status_data["active_sockets"]),
+            status_data["csdk_workstate"].get("success", False),
+            trigger_source,
+        )
+        return status_data
 
 
 sdk_alarm_listener = SDKAlarmListener()

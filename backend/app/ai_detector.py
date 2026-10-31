@@ -59,12 +59,13 @@ logger = logging.getLogger("foxway.ai_detector")
 # COCO Class ID mappings for YOLOv8
 PERSON_CLASSES = {0}
 VEHICLE_CLASSES = {1, 2, 3, 5, 7}  # bicycle, car, motorcycle, bus, truck
-ANIMAL_CLASSES = {14, 15, 16}      # bird, cat, dog
+ANIMAL_CLASSES = {14, 15, 16, 17, 18, 19}  # bird, cat, dog, horse, sheep, cow
 
 COCO_NAMES = {
     0: "Persoon",
     1: "Fiets", 2: "Auto", 3: "Motor", 5: "Bus", 7: "Vrachtwagen",
     14: "Vogel", 15: "Kat", 16: "Hond",
+    17: "Paard", 18: "Schaap", 19: "Koe",
 }
 
 _MODEL_PATH = (
@@ -203,6 +204,17 @@ class SmartDetector:
         self.static_parked_boxes: list[tuple[float, float, float, float]] = []
         self.last_baseline_update: float = 0.0
 
+        # Stationary Parked-Car Memory (v3.4.0): 15-second dynamic vehicle memory
+        self.stationary_vehicles: list[dict] = []
+
+        # High-Speed AI Scan-Burst & Hardware Motion State (v3.4.0)
+        self._last_hardware_motion_time: float = 0.0
+        self._last_candidate_seen_time: float = 0.0
+
+        # Per-Category Cooldowns (v3.4.0: 5s same category, 0s different category)
+        self._last_trigger_per_category: dict[str, float] = {}
+        self._last_clip_end_per_category: dict[str, float] = {}
+
         # ByteTrack object tracking metrics
         self.track_origins: dict[int, tuple[float, float]] = {}       # tid -> (orig_cx, orig_cy)
         self.track_frame_counts: dict[int, int] = {}                  # tid -> frame count
@@ -216,9 +228,14 @@ class SmartDetector:
         self._running: bool = False
         self._task: Optional[asyncio.Task] = None
         self._last_trigger_time: float = 0.0
-        self._cooldown_seconds: float = 8.0
+        self._cooldown_seconds: float = 5.0
         self._last_verified_object_seen: float = 0.0
         self._last_person_seen: float = 0.0
+
+    def notify_hardware_motion(self) -> None:
+        """Signaled by Port 8000 SDK Alarm (0x4000 dwAlarmType == 3) to trigger 4 FPS High-Speed Scan Burst."""
+        self._last_hardware_motion_time = time.time()
+        logger.debug("Port 8000 hardware motion received -> High-Speed Scan Burst (4 FPS / 0.25s) active for 8s")
 
     def is_motion_active(self) -> bool:
         """Check if verified object motion was detected within the last 2.5 seconds."""
@@ -279,11 +296,99 @@ class SmartDetector:
 
             self.parked_vehicle_boxes = new_boxes
             self.last_baseline_update = time.time()
-            logger.info("Updated parked vehicle baseline: %d vehicles registered", len(self.parked_vehicle_boxes))
+            now_t = time.time()
+            for b in new_boxes:
+                bx1, by1, bx2, by2 = b
+                bcx = (bx1 + bx2) / 2.0
+                bcy = (by1 + by2) / 2.0
+                self.stationary_vehicles.append({
+                    "box": b,
+                    "cx": bcx,
+                    "cy": bcy,
+                    "first_seen": now_t - 60.0,
+                    "last_seen": now_t,
+                    "stationary_frames": 100,
+                    "is_baseline": True,
+                })
+            logger.info("Updated parked vehicle baseline: %d vehicles registered into stationary memory", len(self.parked_vehicle_boxes))
             return self.parked_vehicle_boxes
         except Exception as e:
             logger.warning("Error updating parked baseline: %s", e)
             return self.parked_vehicle_boxes
+
+    def is_stationary_parked(self, box: tuple[float, float, float, float], w: float, now: float) -> bool:
+        """
+        Returns True if box matches any confirmed stationary vehicle (parked car):
+        IoU >= 0.68 with stationary memory box and centroid shift < 0.04 * width.
+        """
+        bx1, by1, bx2, by2 = box
+        bcx = (bx1 + bx2) / 2.0
+        bcy = (by1 + by2) / 2.0
+
+        # Check static baseline boxes first
+        for p_box in self.parked_vehicle_boxes:
+            iou = compute_iou(box, p_box)
+            pcx = (p_box[0] + p_box[2]) / 2.0
+            pcy = (p_box[1] + p_box[3]) / 2.0
+            cdist = math.hypot(bcx - pcx, bcy - pcy) / max(1.0, w)
+            if iou >= 0.68 and cdist < 0.04:
+                return True
+
+        # Check dynamic stationary vehicles memory
+        for s in self.stationary_vehicles:
+            is_confirmed = (s.get("stationary_frames", 0) >= 4) or ((now - s.get("first_seen", now)) >= 10.0) or s.get("is_baseline", False)
+            if is_confirmed:
+                iou = compute_iou(box, s["box"])
+                cdist = math.hypot(bcx - s["cx"], bcy - s["cy"]) / max(1.0, w)
+                if iou >= 0.68 and cdist < 0.04:
+                    return True
+        return False
+
+    def update_stationary_vehicles(
+        self,
+        vehicle_boxes: list[tuple[float, float, float, float]],
+        now: float,
+        frame_width: int,
+    ) -> None:
+        """
+        Maintains dynamic memory of stationary parked vehicles over the last 15s.
+        IoU >= 0.72 and centroid displacement < 0.035 * frame_width marks a vehicle as stationary.
+        """
+        w = float(frame_width)
+        for box in vehicle_boxes:
+            bx1, by1, bx2, by2 = box
+            bcx = (bx1 + bx2) / 2.0
+            bcy = (by1 + by2) / 2.0
+
+            matched = False
+            for s in self.stationary_vehicles:
+                iou = compute_iou(box, s["box"])
+                cdist = math.hypot(bcx - s["cx"], bcy - s["cy"]) / max(1.0, w)
+                if iou >= 0.72 and cdist < 0.035:
+                    s["last_seen"] = now
+                    s["stationary_frames"] += 1
+                    s["box"] = box
+                    s["cx"] = bcx
+                    s["cy"] = bcy
+                    matched = True
+                    break
+
+            if not matched:
+                self.stationary_vehicles.append({
+                    "box": box,
+                    "cx": bcx,
+                    "cy": bcy,
+                    "first_seen": now,
+                    "last_seen": now,
+                    "stationary_frames": 1,
+                    "is_baseline": False,
+                })
+
+        # Prune vehicles not seen for > 120s (unless baseline)
+        self.stationary_vehicles = [
+            s for s in self.stationary_vehicles
+            if s.get("is_baseline", False) or ((now - s["last_seen"]) < 120.0)
+        ]
 
     def is_vehicle_moving(self, centroids: list[tuple[float, float]], width: float) -> bool:
         """Determines whether a vehicle's centroid sequence represents a moving vehicle."""
@@ -618,6 +723,10 @@ class SmartDetector:
 
                 # Run Temporal Pixel-Diff Masking Gatekeeper
                 await self._process_frame_gatekeeper(frame_640, now_t, cfg)
+
+                # High-Speed AI Scan-Burst: 4 FPS (0.25s) for 8s on hardware motion or active candidate
+                burst_active = (now_t - self._last_hardware_motion_time) < 8.0 or (now_t - self._last_candidate_seen_time) < 8.0
+                frame_interval = 0.25 if burst_active else 0.50
                 await asyncio.sleep(frame_interval)
 
             except asyncio.CancelledError:
@@ -671,34 +780,34 @@ class SmartDetector:
         # ── 2. Load Dynamic System Settings from SQLite ───────────────────
         try:
             sys_settings = await get_system_settings()
-            person_conf_thresh = float(sys_settings.get("person_conf_threshold", "0.40"))
-            vehicle_conf_thresh = float(sys_settings.get("vehicle_conf_threshold", "0.40"))
-            animal_conf_thresh = float(sys_settings.get("animal_conf_threshold", "0.42"))
-            min_person_disp = float(sys_settings.get("min_person_displacement_pct", "3.0")) / 100.0
-            min_vehicle_disp = float(sys_settings.get("min_vehicle_displacement_pct", "5.0")) / 100.0
+            person_conf_thresh = float(sys_settings.get("person_conf_threshold", "0.35"))
+            vehicle_conf_thresh = float(sys_settings.get("vehicle_conf_threshold", "0.38"))
+            animal_conf_thresh = float(sys_settings.get("animal_conf_threshold", "0.32"))
+            min_person_disp = float(sys_settings.get("min_person_displacement_pct", "1.5")) / 100.0
+            min_vehicle_disp = float(sys_settings.get("min_vehicle_displacement_pct", "4.5")) / 100.0
             verify_frames_req = int(sys_settings.get("verify_frames_required", "2"))
-            cooldown_sec = float(sys_settings.get("event_cooldown_seconds", "8"))
+            cooldown_sec = float(sys_settings.get("event_cooldown_seconds", "5.0"))
             self._cooldown_seconds = cooldown_sec
 
             zones_raw = sys_settings.get("exclusion_zones", "[]")
             exclusion_zones = json.loads(zones_raw) if zones_raw else []
         except Exception:
-            person_conf_thresh = 0.40
-            vehicle_conf_thresh = 0.40
-            animal_conf_thresh = 0.42
-            min_person_disp = 0.03
-            min_vehicle_disp = 0.05
+            person_conf_thresh = 0.35
+            vehicle_conf_thresh = 0.38
+            animal_conf_thresh = 0.32
+            min_person_disp = 0.015
+            min_vehicle_disp = 0.045
             verify_frames_req = 2
-            cooldown_sec = 8.0
-            self._cooldown_seconds = 8.0
+            cooldown_sec = 5.0
+            self._cooldown_seconds = 5.0
             exclusion_zones = []
 
         # ── 3. Layer 1: Fast YOLOv8n Inference (imgsz=640, <45ms) ─────────
         try:
             results = self.model(
                 frame,
-                classes=[0, 1, 2, 3, 5, 7, 14, 15, 16],
-                conf=0.35,
+                classes=[0, 1, 2, 3, 5, 7, 14, 15, 16, 17, 18, 19],
+                conf=0.30,
                 imgsz=640,
                 verbose=False,
             )
@@ -713,6 +822,14 @@ class SmartDetector:
         boxes = results[0].boxes.xyxy.cpu().numpy()
         confs = results[0].boxes.conf.cpu().numpy()
         classes = results[0].boxes.cls.cpu().numpy()
+
+        # Update Stationary Parked-Car Memory (v3.4.0) with all detected vehicle boxes
+        detected_vehicle_boxes = [
+            (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
+            for b, cls_val in zip(boxes, classes)
+            if int(cls_val) in VEHICLE_CLASSES
+        ]
+        self.update_stationary_vehicles(detected_vehicle_boxes, now, w)
 
         detected_candidates = []
 
@@ -762,40 +879,28 @@ class SmartDetector:
                 else 0.0
             )
 
-            # Static Parked Car & Parked Spots Pre-filtering:
+            # Static Parked Car & Stationary Spot Filter (v3.4.0)
             if category == "vehicle":
-                # Check overlap with known parked spots (TAAK 4)
-                all_parked = list(self.parked_spots) + self.parked_vehicle_boxes
-                is_on_parked_spot = any(compute_iou(box, p_box) >= 0.55 for p_box in all_parked)
-
-                if is_on_parked_spot and changed_pixel_ratio < 0.30:
-                    logger.debug("PARKED_SPOT_REJECTED at %s (IoU>=0.55, ratio=%.4f < 0.30)", box, changed_pixel_ratio)
+                if self.is_stationary_parked(box, float(w), now):
+                    logger.debug("STATIONARY_PARKED_CAR rejected at %s", box)
                     continue
 
-                if changed_pixel_ratio < 0.10:
-                    if not is_parked_vehicle(box, list(self.parked_spots), threshold=0.65):
-                        self.parked_spots.append(box)
-                    if not is_parked_vehicle(box, self.parked_vehicle_boxes, threshold=0.65):
-                        self.parked_vehicle_boxes.append(box)
-                        if len(self.parked_vehicle_boxes) > 20:
-                            self.parked_vehicle_boxes.pop(0)
-                    if changed_pixel_ratio < 0.04:
-                        logger.debug("STATIC_PARKED_CAR rejected at %s (ratio=%.4f < 0.04)", box, changed_pixel_ratio)
-                        continue
-
             detected_candidates.append((category, label, conf, box, changed_pixel_ratio))
+
+        if detected_candidates:
+            self._last_candidate_seen_time = now
 
         # Check person priority:
         has_person_now = any(cat == "person" for (cat, _, _, _, _) in detected_candidates)
         if has_person_now:
             self._last_person_seen = now
-        has_person_priority = (now - self._last_person_seen) < 20.0
+        has_person_priority = (now - self._last_person_seen) < 15.0
 
         # ── 4. Candidate Association & Verification ───────────────────────
         for category, label, conf, box, pixel_ratio in detected_candidates:
-            # Person Priority: if person active within 20s, suppress lower confidence vehicles
-            if category == "vehicle" and has_person_priority and conf < 0.70:
-                logger.debug("Vehicle candidate suppressed: person active within last 20s")
+            # Person Priority: if person active within 15s, suppress lower confidence vehicles
+            if category == "vehicle" and has_person_priority and conf < 0.65:
+                logger.debug("Vehicle candidate suppressed: person active within last 15s")
                 continue
 
             matched_id = None
@@ -809,23 +914,19 @@ class SmartDetector:
                     bcy = (box[1] + box[3]) / 2.0
                     lcx = (last_box[0] + last_box[2]) / 2.0
                     lcy = (last_box[1] + last_box[3]) / 2.0
-                    step_disp_x = abs(bcx - lcx) / float(w)
                     dist = math.hypot(bcx - lcx, bcy - lcy) / float(w)
                     bw = box[2] - box[0]
                     lbw = last_box[2] - last_box[0]
                     size_ratio = min(bw, lbw) / max(1.0, max(bw, lbw))
 
                     if category == "vehicle":
-                        # TAAK 5: Moving car in 5 FPS stream cannot jump >12% or <2% screen width in 0.2s, and must have continuous IoU overlap >= 0.15
-                        # This strictly prevents car swap bugs between adjacent parked cars (e.g. cx=0.42 to cx=0.62)
-                        if not (0.02 <= step_disp_x <= 0.12) or iou < 0.15:
-                            continue
-                        if iou > best_iou:
-                            best_iou = iou
-                            matched_id = tid
+                        if iou >= 0.15 or (dist < 0.20 and size_ratio > 0.40):
+                            if iou > best_iou or (best_iou == 0.0 and dist < 0.20):
+                                best_iou = max(iou, 0.01)
+                                matched_id = tid
                     else:
-                        if iou >= 0.20 or (dist < 0.12 and size_ratio > 0.50):
-                            if iou > best_iou or (best_iou == 0.0 and dist < 0.12):
+                        if iou >= 0.20 or (dist < 0.15 and size_ratio > 0.45):
+                            if iou > best_iou or (best_iou == 0.0 and dist < 0.15):
                                 best_iou = max(iou, 0.01)
                                 matched_id = tid
 
@@ -870,56 +971,50 @@ class SmartDetector:
                 verified_disp_pct = delta_d_pct
 
                 if track.category == "vehicle":
-                    is_parked_spot = is_parked_vehicle(last_box, self.parked_vehicle_boxes, threshold=0.50)
+                    was_stationary = self.is_stationary_parked(first_box, float(w), track.first_time)
 
-                    # Manier 1 (Nieuw in beeld verschenen rijdende auto - TAAK 4 aangescherpt):
-                    # Niet op een geparkeerde plek, minstens 4 opeenvolgende frames in dezelfde richting,
-                    # verplaatsing abs(cx2 - cx1) >= 0.18*w en changed_pixel_ratio >= 0.35.
-                    valid_steps = True
-                    same_direction = True
-                    if len(track.frames) < 4:
-                        valid_steps = False
-                        same_direction = False
+                    if was_stationary:
+                        # Departing parked car: must move >= 5.0% of screen width
+                        if delta_d >= 0.05:
+                            is_valid_object = True
+                            verified_disp_pct = delta_d_pct
+                            logger.info("Vehicle Departing Parked Spot APPROVED: %s disp=%.1f%%", track.label, delta_d_pct)
+                        elif duration_tracked >= 1.5:
+                            to_remove.append(tid)
+                            continue
                     else:
-                        xs = [((f[1][0] + f[1][2]) / 2.0) for f in track.frames]
-                        dxs = [xs[i] - xs[i - 1] for i in range(1, len(xs))]
-                        same_direction = all(d > 0 for d in dxs) or all(d < 0 for d in dxs)
-                        for idx in range(1, len(track.frames)):
-                            pb = track.frames[idx - 1][1]
-                            cb = track.frames[idx][1]
-                            sdx = abs(((cb[0] + cb[2]) / 2.0) - ((pb[0] + pb[2]) / 2.0)) / float(w)
-                            siou = compute_iou(pb, cb)
-                            if not (0.02 <= sdx <= 0.12) or siou < 0.15:
-                                valid_steps = False
-                                break
+                        # New / Passing vehicle driving by:
+                        # Over >= 2 frames (0.5s), center shift >= 4.5% width OR 2 consecutive frames tracked
+                        if delta_d >= 0.045 or len(track.frames) >= 2:
+                            is_valid_object = True
+                            verified_disp_pct = delta_d_pct
+                            logger.info("Vehicle Passing APPROVED: %s frames=%d disp=%.1f%%", track.label, len(track.frames), delta_d_pct)
+                        elif duration_tracked >= 1.5:
+                            to_remove.append(tid)
+                            continue
 
-                    total_dx = abs(cx2 - cx1) / float(w)
-                    if (not is_parked_spot) and max_pixel_ratio >= 0.35 and len(track.frames) >= 4 and valid_steps and same_direction and total_dx >= 0.18:
-                        is_valid_object = True
-                        verified_disp_pct = max(delta_d_pct, 18.0)
-                        logger.info("Vehicle Manier 1 (New Moving Vehicle): %s ratio=%.2f, frames=%d, disp=%.1f%%, dir=%s",
-                                    track.label, max_pixel_ratio, len(track.frames), delta_d_pct, same_direction)
-
-                    # Manier 2 (Wegrijdende of inparkerende auto):
-                    # Overlapt geparkeerde plek, ratio >= 0.35 én centroid shift >= 18% van schermbreedte
-                    elif is_parked_spot and max_pixel_ratio >= 0.35 and delta_d >= 0.18:
+                elif track.category == "person":
+                    # Pedestrian across street or nearby:
+                    # Over >= 2 frames: small displacement >= 1.5% screen width/height OR confidence >= 0.50
+                    dx = abs(cx2 - cx1) / float(w)
+                    dy = abs(cy2 - cy1) / float(h)
+                    if (dx >= 0.015 or dy >= 0.015) or track.best_conf >= 0.50:
                         is_valid_object = True
                         verified_disp_pct = delta_d_pct
-                        logger.info("Vehicle Manier 2 (Departing/Parking): %s ratio=%.2f, disp=%.1f%%", track.label, max_pixel_ratio, delta_d_pct)
-
-                    elif duration_tracked >= 1.2:
+                        logger.info("Person APPROVED: %s conf=%.2f disp=%.1f%% (dx=%.3f, dy=%.3f)", track.label, track.best_conf, delta_d_pct, dx, dy)
+                    elif duration_tracked >= 1.5:
                         to_remove.append(tid)
-                        logger.debug("Vehicle rejected: static/insufficient motion ratio=%.2f, disp=%.1f%%", max_pixel_ratio, delta_d_pct)
                         continue
 
-                elif track.category in ("person", "animal"):
-                    # Person / Animal: 2 opeenvolgende frames (0.4s), ratio >= 0.08, displacement >= 3%
-                    if max_pixel_ratio >= 0.08 and delta_d >= min_person_disp:
+                elif track.category == "animal":
+                    # Animal: Cat, dog, bird, horse, sheep, cow
+                    # Verified immediately on detection (>= 1 frame) with conf >= animal_conf_thresh
+                    if track.best_conf >= animal_conf_thresh:
                         is_valid_object = True
                         verified_disp_pct = delta_d_pct
+                        logger.info("Animal APPROVED: %s conf=%.2f", track.label, track.best_conf)
                     elif duration_tracked >= 1.0:
                         to_remove.append(tid)
-                        logger.debug("%s rejected: ratio=%.2f, disp=%.1f%%", track.label, max_pixel_ratio, delta_d_pct)
                         continue
 
                 # ✅ VERIFICATION PASSED!
@@ -1011,10 +1106,19 @@ class SmartDetector:
         Dispatches push notification within 1.5s of detection and launches background recording.
         """
         now_t = time.time()
-        if (now_t - self._last_trigger_time) < self._cooldown_seconds:
-            logger.debug("Cooldown active (%.1fs remaining), skipping event dispatch", self._cooldown_seconds - (now_t - self._last_trigger_time))
+        # Per-category cooldown: 5s for same category, 0s for different category (v3.4.0)
+        last_cat_trigger = self._last_trigger_per_category.get(category, 0.0)
+        last_cat_end = self._last_clip_end_per_category.get(category, 0.0)
+        cooldown = self._cooldown_seconds  # 5.0 seconds
+        if (now_t - last_cat_trigger) < cooldown or (now_t - last_cat_end) < cooldown:
+            logger.debug(
+                "Cooldown active for category '%s' (%.1fs remaining), skipping event dispatch",
+                category,
+                max(0.0, cooldown - (now_t - max(last_cat_trigger, last_cat_end))),
+            )
             return
 
+        self._last_trigger_per_category[category] = now_t
         self._last_trigger_time = now_t
 
         should_record = False
@@ -1252,6 +1356,8 @@ class SmartDetector:
                 await db_delete_clip(clip_id)
             except Exception:
                 pass
+        finally:
+            self._last_clip_end_per_category[category] = time.time()
 
 
 smart_detector = SmartDetector()

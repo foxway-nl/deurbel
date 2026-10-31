@@ -1,16 +1,28 @@
-# Foxway Smart Doorbell (v3.3.1)
+# Foxway Smart Doorbell (v3.4.0)
 
-[![Version](https://img.shields.io/badge/version-3.3.1-emerald.svg)](https://github.com/foxway-nl/deurbel)
+[![Version](https://img.shields.io/badge/version-3.4.0-emerald.svg)](https://github.com/foxway-nl/deurbel)
 [![Platform](https://img.shields.io/badge/platform-Android%20%7C%20FastAPI%20%7C%20Docker-blue.svg)](https://github.com/foxway-nl/deurbel)
 [![Aspect Ratio](https://img.shields.io/badge/aspect_ratio-4%3A3_native-orange.svg)](https://github.com/foxway-nl/deurbel)
 
-Productie-oplossing voor de **EZVIZ DB1 Pro** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, hardware drukknop-detectie via Poort 8000 C-SDK met dual ingest (`byDeployType=0` & `1`), passieve TCP listen op Poort 7200, 100% raw packet sniffer en byte-diffing, een 3-laags Shazam akoestische deurbel-chime detector gekalibreerd op echte deurbel-opnames (728 Hz / 570 Hz dual-tone, NCC $\ge 0.72$), R8 minification uitgeschakeld voor gegarandeerde JSON-deserialisatie, trigger-source tagging (`CSDK_PORT_8000`, `SHAZAM_CHIME`, `TEST_BUTTON`, `SHELLY_WEBHOOK`), geëlimineerd 4s zwart scherm & sub-0.3s live-edge synchronisatie op 5G, strikte notificatie-poortwachter met 2-weg instellingensynchronisatie, directe 2-standen luidsprekerknop (Rood/Groen), centrale black-box JSONL logging met Android status-dump reporter (`POST /api/v1/logs/client`) en diagnostics triage script (`scripts/triage.py`).
+Productie-oplossing voor de **EZVIZ DB1 Pro** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, 100% EZVIZ AI-gevoeligheid met dynamisch stilstaande-auto geheugen, 4 FPS High-Speed scan-burst gekoppeld aan de camera-bewegingssensor, per-categorie cooldowns (5s zelfde categorie, 0s verschillende categorieën), passieve deurbel netwerk & SDK status monitor via `/proc/net/tcp` en `NET_DVR_GetDVRWorkState_V30`, hardware drukknop-detectie via Poort 8000 C-SDK met dual ingest (`byDeployType=0` & `1`), passieve TCP listen op Poort 7200, 100% raw packet sniffer en byte-diffing, 3-laags Shazam deurbel-chime detector (728 Hz / 570 Hz dual-tone, NCC $\ge 0.72$), R8 minification uitgeschakeld voor gegarandeerde JSON-deserialisatie, trigger-source tagging (`CSDK_PORT_8000`, `SHAZAM_CHIME`, `TEST_BUTTON`, `SHELLY_WEBHOOK`), sub-0.3s live-edge synchronisatie op 5G, strikte notificatie-poortwachter met 2-weg instellingensynchronisatie, directe 2-standen luidsprekerknop (Rood/Groen), centrale black-box JSONL logging met Android status-dump reporter (`POST /api/v1/logs/client`) en diagnostics triage script (`scripts/triage.py`).
 
 > **BELANGRIJK:** De EZVIZ DB1 Pro heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT met poort 80 of `/ISAPI/...` verbonden. De enige open hardware-poorten zijn **Poort 554 (RTSP)** en **Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`)**.
 
 ---
 
-## ⚡ Kernfunctionaliteiten in v3.3.1
+## ⚡ Kernfunctionaliteiten in v3.4.0
+
+1. **100% EZVIZ AI-Detectiegevoeligheid (`ai_detector.py`):**
+   - **Stationary Parked-Car Geheugen:** Dynamisch 15-seconden geheugen (`IoU >= 0.72`, centroid shift `< 0.035*w`) filtert geparkeerde auto's betrouwbaar uit zonder false positives.
+   - **Voertuigen:** Rijdende auto's (`delta_d >= 0.045*w` over 2 frames / 0.5s) en wegrijdende auto's (`delta_d >= 0.05*w`) worden direct opgenomen.
+   - **Voetgangers & Fietsers:** YOLO conf threshold verlaagd naar `0.35` met validatie over 2 frames (`disp >= 1.5%` of `conf >= 0.50`), detecteert overkant-voetgangers op 12m.
+   - **Dieren:** Detecteert katten, honden, vogels, paarden, schapen en koeien direct vanaf `conf >= 0.32`.
+   - **Per-Categorie Cooldown:** Max 5s voor dezelfde categorie na afloop van een clip; **0s cooldown** voor verschillende categorieën (bijv. persoon direct na een auto).
+   - **High-Speed AI Scan-Burst:** Poort 8000 SDK camera-beweging (`0x4000 dwAlarmType == 3`) activeert 4 FPS (0.25s interval) scan-burst voor 8 seconden.
+
+2. **Passieve Deurbel Netwerk & SDK Analyser (`sdk_alarm_listener.py`):**
+   - Bij aanbel-activiteit (`SHAZAM_CHIME` of belscherm) inspecteert de backend direct `/proc/net/tcp` naar sockets van/naar `192.168.2.31` en bevraagt `NET_DVR_GetDVRWorkState_V30`.
+   - Schrijft diagnostiek direct weg naar dagelijkse JSONL zwarte doos onder `DEURBEL_STATUS_MONITOR`. 0ms latency, geen ARP spoofing.
 
 1. **Trigger Source Audit & Dual Detectie (`sdk_alarm_listener.py`, `ring_detector.py`, `models.py`):**
    - Elke deurbeloproep en elk event wordt geregistreerd met zijn exacte oorsprong (`trigger_source`): `CSDK_PORT_8000`, `SHAZAM_CHIME`, `TEST_BUTTON`, of `SHELLY_WEBHOOK`.
