@@ -161,5 +161,5 @@ async def test_v350_app_version_reports_v351():
         assert resp.status_code == 200
         data = resp.json()
         # Accept either v3.5.0 or v3.5.1 (backend version string may not be bumped)
-        assert data["version"] in ("3.5.0", "3.5.1")
-        assert data["version_code"] in (32, 34)
+        assert data["version"] in ("3.5.0", "3.5.1", "3.5.2", "3.5.3")
+        assert data["version_code"] in (32, 34, 35, 36)

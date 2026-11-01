@@ -876,11 +876,19 @@ fun SettingsScreen(
                         onClick = { showHardwareTestDialog = true },
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
-                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
                     ) {
                         Icon(imageVector = Icons.Default.GraphicEq, contentDescription = null, tint = BackgroundDark)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Start Deurbel Hardware Test", color = BackgroundDark, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = "Start Deurbel Hardware Test",
+                            color = BackgroundDark,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            textAlign = TextAlign.Center
+                        )
                     }
 
                     // Knop 2: Test Aanbel Trigger (Simuleer Drukknop) - exact zelfde styling als Knop 1
@@ -916,14 +924,22 @@ fun SettingsScreen(
                             containerColor = EmeraldPrimary,
                             disabledContainerColor = EmeraldPrimary.copy(alpha = 0.6f)
                         ),
-                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
                     ) {
                         if (isTriggeringShelly) {
                             CircularProgressIndicator(color = BackgroundDark, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
                         } else {
                             Icon(imageVector = Icons.Default.NotificationsActive, contentDescription = null, tint = BackgroundDark, modifier = Modifier.size(20.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Test Aanbel Trigger (Simuleer Drukknop)", color = BackgroundDark, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = "Test Aanbel Trigger (Simuleer Drukknop)",
+                                color = BackgroundDark,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                textAlign = TextAlign.Center
+                            )
                         }
                     }
 
@@ -970,59 +986,32 @@ fun SettingsScreen(
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanAccent),
                         border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.5f)),
-                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
                     ) {
                         if (isOpeningAdmin) {
                             CircularProgressIndicator(color = CyanAccent, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Inloggen & openen...", color = CyanAccent, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                text = "Inloggen & openen...",
+                                color = CyanAccent,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                textAlign = TextAlign.Center
+                            )
                         } else {
                             Icon(imageVector = Icons.Default.AdminPanelSettings, contentDescription = null, tint = CyanAccent)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Open Web Beheerpaneel (/admin)", color = CyanAccent, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                text = "Open Web Beheerpaneel (/admin)",
+                                color = CyanAccent,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                textAlign = TextAlign.Center
+                            )
                         }
-                    }
-
-                    HorizontalDivider(color = DividerDark)
-
-                    // ── Logboek & Foutrapportage ──
-                    Text(
-                        text = "Systeemlogboek & Diagnose",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary
-                    )
-
-                    // Knop: Bekijk Systeemlogboek (30 dagen)
-                    Button(
-                        onClick = { showLogsDialog = true },
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = SurfaceVariantDark,
-                            contentColor = CyanAccent
-                        ),
-                        border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.5f)),
-                        modifier = Modifier.fillMaxWidth().height(48.dp)
-                    ) {
-                        Icon(imageVector = Icons.Default.Info, contentDescription = null, tint = CyanAccent)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("📋 Bekijk Systeemlogboek (30 dagen)", color = CyanAccent, fontWeight = FontWeight.SemiBold)
-                    }
-
-                    // Knop: Rapporteer Fout / Status-Dump
-                    Button(
-                        onClick = { reportStatusDump() },
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = SurfaceVariantDark,
-                            contentColor = TextPrimary
-                        ),
-                        border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.5f)),
-                        modifier = Modifier.fillMaxWidth().height(48.dp)
-                    ) {
-                        Icon(imageVector = Icons.Default.Share, contentDescription = null, tint = EmeraldPrimary)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("📤 Rapporteer Fout / Status-Dump", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                     }
 
                     HorizontalDivider(color = DividerDark)
@@ -1039,11 +1028,19 @@ fun SettingsScreen(
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = CoralDecline),
                         border = BorderStroke(1.dp, CoralDecline),
-                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
                     ) {
                         Icon(imageVector = Icons.Default.LinkOff, contentDescription = null, tint = CoralDecline)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Apparaat Ontkoppelen", color = CoralDecline, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            text = "Apparaat Ontkoppelen",
+                            color = CoralDecline,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            textAlign = TextAlign.Center
+                        )
                     }
                 }
             }

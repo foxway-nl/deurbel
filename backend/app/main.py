@@ -804,13 +804,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "3.5.2",
-        "version_code": 35,
-        "build_time": "2026-11-01T20:00:00Z",
+        "version": "3.5.3",
+        "version_code": 36,
+        "build_time": "2026-11-01T21:10:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.5.2: Dynamische bewegingsopnames (20s pre-roll + keep-recording + post-roll), 100% 2-weg instellingen-sync (/admin & app), /admin live player & inspector thumbnails, en Android Wi-Fi/5G anti-flapping herstel.",
+        "changelog": "v3.5.3: Opschoning oude opnames t/m 20:16:52, vereenvoudigde instellingen (logboek uitsluitend via i-icoon), knoptekst fix en LAN/WAN verbindingsbadges.",
     }
 
 

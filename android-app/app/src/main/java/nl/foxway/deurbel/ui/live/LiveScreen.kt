@@ -432,12 +432,12 @@ fun LiveScreen() {
                                 .size(10.dp)
                                 .alpha(liveDotPulseAlpha)
                                 .background(
-                                    if (!isWanMode) LanGreen else CyanAccent,
+                                    if (!isWanMode) LanGreen else WanBlue,
                                     CircleShape
                                 )
                         )
                         Text(
-                            text = if (!isWanMode) "🟢 Lokaal" else "🔵 Online (5G)",
+                            text = if (!isWanMode) "LAN" else "WAN",
                             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                             color = TextPrimary
                         )
