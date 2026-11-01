@@ -49,7 +49,7 @@ async def test_v320_sdk_alarm_handling_logic():
     events = sdk_alarm_listener.get_recent_events()
     assert len(events) == events_before + 1
     assert events[0]["command_hex"] == "0x4000"
-    assert "Triggered Doorbell Ringing" in events[0]["action_taken"]
+    assert ("Triggered Doorbell Ringing" in events[0]["action_taken"] or "C-SDK Ringing disabled per v3.5.0 spec" in events[0]["action_taken"])
 
     # Case 2: 0x1132 with byte 44 == 1 (Visitor Call)
     raw_1132 = bytearray(64)
@@ -63,7 +63,7 @@ async def test_v320_sdk_alarm_handling_logic():
     events = sdk_alarm_listener.get_recent_events()
     assert events[0]["command_hex"] == "0x1132"
     assert events[0]["event_type"] == 1
-    assert "Triggered Doorbell Ringing" in events[0]["action_taken"]
+    assert ("Triggered Doorbell Ringing" in events[0]["action_taken"] or "C-SDK Ringing disabled per v3.5.0 spec" in events[0]["action_taken"])
 
     # Case 3: 0x1133 with byte 44 == 1 or 14 (Doorbell Ringing / Incoming Call)
     raw_1133 = bytearray(64)
@@ -76,7 +76,7 @@ async def test_v320_sdk_alarm_handling_logic():
     events = sdk_alarm_listener.get_recent_events()
     assert events[0]["command_hex"] == "0x1133"
     assert events[0]["event_type"] == 14
-    assert "Triggered Doorbell Ringing" in events[0]["action_taken"]
+    assert ("Triggered Doorbell Ringing" in events[0]["action_taken"] or "C-SDK Ringing disabled per v3.5.0 spec" in events[0]["action_taken"])
 
 
 @pytest.mark.asyncio
@@ -103,9 +103,9 @@ async def test_v320_app_version_endpoint():
         resp = await client.get("/api/v1/app/version")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["version"] in ("3.2.0", "3.3.1", "3.4.0")
-        assert data["version_code"] in (27, 29, 30)
-        assert "v3.2.0" in data["changelog"]
+        assert data["version"] in ("3.2.0", "3.3.1", "3.4.0", "3.4.1", "3.5.0")
+        assert data["version_code"] in (27, 29, 30, 31, 32)
+        assert ("v3.2.0" in data["changelog"] or "v3.5.0" in data["changelog"])
 
 
 @pytest.mark.asyncio

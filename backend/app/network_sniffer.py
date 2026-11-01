@@ -337,29 +337,60 @@ class NetworkSniffer:
             logger.debug("Failed writing sniff log: %s", e)
 
     def _check_ring_signature(self, burst: dict) -> bool:
-        """Determines if the burst matches the calibrated cloud doorbell ring signature."""
-        sig = self.known_signature
-        if not sig.get("enabled", True):
-            return False
-
+        """
+        Determines if the burst matches the EZVIZ Cloud doorbell ring signature (v3.5.0):
+        1. Pattern A: TCP 8820 packet with payload between 195 and 400 bytes (or total_len > 250B).
+        2. Pattern B: Burst of >= 3 TCP packets of 191 bytes (>= 573B payload / >= 690B total) within 1000ms.
+        3. Keepalive Filter: Ignores isolated 1 or 2 packets of 191 bytes keepalive to port 8820.
+        4. Calibrated Signature: Matches calibrated cloud burst fallback if enabled.
+        """
         now_t = time.time()
         if (now_t - self._last_sniff_trigger_time) < self._cooldown_seconds:
             return False
 
-        sig_port = sig.get("dst_port")
-        sig_proto = sig.get("protocol")
-        min_count = sig.get("min_packet_count", 2)
-        min_bytes = sig.get("min_bytes", 60)
-        max_bytes = sig.get("max_bytes", 6000)
+        dst_port = burst.get("dst_port")
+        protocol = burst.get("protocol")
+        pkt_count = burst.get("packet_count", 0)
+        payload_sizes = burst.get("payload_sizes", [])
+        total_bytes = burst.get("total_bytes", 0)
 
-        # Match criteria
-        port_match = (sig_port is None) or (burst["dst_port"] == sig_port)
-        proto_match = (sig_proto is None) or (burst["protocol"] == sig_proto)
-        count_match = burst["packet_count"] >= min_count
-        bytes_match = min_bytes <= burst["total_bytes"] <= max_bytes
+        # ── EZVIZ Cloud Port 8820 TCP Analysis ──
+        if protocol == "TCP" and dst_port == 8820:
+            # Filter out isolated 1 or 2 packet keepalives of 191B
+            is_191_keepalive = all(185 <= sz <= 194 for sz in payload_sizes)
+            if pkt_count < 3 and is_191_keepalive:
+                logger.debug("[Sniffer] Ignoring isolated %d-packet 191B keepalive on TCP 8820", pkt_count)
+                return False
 
-        if port_match and proto_match and count_match and bytes_match:
-            return True
+            # Pattern A: TCP 8820 packet with payload between 195 and 400 bytes (or total > 250B)
+            has_pattern_a_pkt = any(195 <= sz <= 400 for sz in payload_sizes) or (pkt_count == 1 and total_bytes > 250)
+            if has_pattern_a_pkt:
+                logger.info("🎯 [Sniffer] Pattern A Matched on TCP 8820 (payload in [195, 400]B or len>250B): %s", payload_sizes)
+                return True
+
+            # Pattern B: Burst of >= 3 TCP packets of 191B (>= 573B payload / >= 690B total) within 1000ms
+            if pkt_count >= 3 and (sum(payload_sizes) >= 573 or total_bytes >= 690):
+                logger.info("🎯 [Sniffer] Pattern B Matched on TCP 8820 (>=3 packets of 191B, total=%dB): %s", total_bytes, payload_sizes)
+                return True
+
+        # ── Fallback: Calibrated Cloud Ring Signature ──
+        sig = self.known_signature
+        if sig.get("enabled", True):
+            sig_port = sig.get("dst_port")
+            sig_proto = sig.get("protocol")
+            min_count = sig.get("min_packet_count", 2)
+            min_bytes = sig.get("min_bytes", 60)
+            max_bytes = sig.get("max_bytes", 6000)
+
+            port_match = (sig_port is None) or (dst_port == sig_port)
+            proto_match = (sig_proto is None) or (protocol == sig_proto)
+            count_match = pkt_count >= min_count
+            bytes_match = min_bytes <= total_bytes <= max_bytes
+
+            if port_match and proto_match and count_match and bytes_match:
+                logger.info("🎯 [Sniffer] Calibrated Signature Matched (%s:%s, pkts=%d, bytes=%d)", protocol, dst_port, pkt_count, total_bytes)
+                return True
+
         return False
 
     def on_shazam_chime_triggered(self, chime_timestamp: float) -> None:
@@ -401,19 +432,21 @@ class NetworkSniffer:
             logger.info("ℹ️ [Sniffer Auto-Calibrate] No external cloud burst in +/-2.5s window to correlate.")
 
     def _dispatch_network_ring(self, burst: dict) -> None:
-        """Fires doorbell ring with trigger_source = NETWORK_SNIFF (or SHAZAM + SNIFF)."""
+        """Fires doorbell ring via the Central Ring Coordinator with trigger_source = NETWORK_SNIFF."""
         now_t = time.time()
         self._last_sniff_trigger_time = now_t
 
-        is_dual = (now_t - self._last_shazam_ring_time) < 2.5
-        trigger_src = "SHAZAM + SNIFF" if is_dual else "NETWORK_SNIFF"
+        logger.info("🚨 [Network Sniffer] MATCHED CLOUD BURST! Registering ring signal (source=NETWORK_SNIFF, dst=%s:%d %s, bytes=%d)",
+                    burst["dst_ip"], burst["dst_port"], burst["protocol"], burst["total_bytes"])
 
-        logger.info("🚨 [Network Sniffer] MATCHED CLOUD BURST! Triggering ring (source=%s, dst=%s:%d %s, bytes=%d)",
-                    trigger_src, burst["dst_ip"], burst["dst_port"], burst["protocol"], burst["total_bytes"])
-
-        if self._loop and self._loop.is_running():
-            from app.state_machine import call_sm
-            asyncio.run_coroutine_threadsafe(call_sm.ring(trigger_source=trigger_src), self._loop)
+        try:
+            from app.ring_coordinator import register_ring_signal
+            register_ring_signal(source="NETWORK_SNIFF", details=burst)
+        except Exception as e:
+            logger.error("Failed dispatching network ring to coordinator: %s", e)
+            if self._loop and self._loop.is_running():
+                from app.state_machine import call_sm
+                asyncio.run_coroutine_threadsafe(call_sm.ring(trigger_source="NETWORK_SNIFF"), self._loop)
 
     async def start(self) -> None:
         """Starts ARP redirect and raw packet sniffer."""

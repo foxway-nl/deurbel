@@ -1,30 +1,49 @@
-# Foxway Smart Doorbell (v3.4.1)
+# Foxway Smart Doorbell (v3.5.0)
 
-[![Version](https://img.shields.io/badge/version-3.4.1-emerald.svg)](https://github.com/foxway-nl/deurbel)
+[![Version](https://img.shields.io/badge/version-3.5.0-emerald.svg)](https://github.com/foxway-nl/deurbel)
 [![Platform](https://img.shields.io/badge/platform-Android%20%7C%20FastAPI%20%7C%20Docker-blue.svg)](https://github.com/foxway-nl/deurbel)
 [![Aspect Ratio](https://img.shields.io/badge/aspect_ratio-4%3A3_native-orange.svg)](https://github.com/foxway-nl/deurbel)
 
-Productie-oplossing voor de **EZVIZ DB1 Pro** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, 10/10 EZVIZ AI-detectieniveau met 0.22 drempelwaarde en smart motion-fallback buiten geparkeerde auto's, host-level actieve ARP/Packet Sniffer voor EZVIZ Cloud aanbel-bursts (`trigger_source = NETWORK_SNIFF`), 3-laags Shazam deurbel-chime detector (728 Hz / 570 Hz dual-tone, NCC $\ge 0.72$), automatische herverbinding en WiFi/5G netwerkwissel-herstel in Android met backoff ladder (1s -> 3s -> 5s -> 15s), badges `[SHAZAM_CHIME]`, `[NETWORK_SNIFF]`, `[SHAZAM + SNIFF]`, sub-0.3s live-edge synchronisatie op 5G, en centrale black-box JSONL logging.
+Productie-oplossing voor de **EZVIZ DB1 Pro** deurbel met native 4:3 beeldsensor, realtime tweeweg-audio over Hikvision Poort 8000 C-SDK, Dual Aanbel-Coördinator (Shazam Audio-Chime + EZVIZ Cloud Packet-Sniffer met 3.5s kruis-verificatie), dag-mappen (`/clips/YYYY-MM-DD/`), 50.0 GB opslaglimiet, server-side filtering & paginering, Arlo-stijl timeline UI in de Android-app, 10/10 EZVIZ AI-detectieniveau met 0.22 drempelwaarde en smart motion-fallback, sub-0.3s live-edge synchronisatie op 5G, en centrale black-box JSONL logging.
 
 > **BELANGRIJK:** De EZVIZ DB1 Pro heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT met poort 80 of `/ISAPI/...` verbonden. De enige open hardware-poorten zijn **Poort 554 (RTSP)** en **Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`)**.
 
 ---
 
-## ⚡ Kernfunctionaliteiten in v3.4.1
+## ⚡ Kernfunctionaliteiten in v3.5.0
 
-1. **Host-Level Actieve ARP & EZVIZ Cloud Packet Sniffer (`network_sniffer.py`):**
-   - Omdat EZVIZ `0x1132` (aanbellen) blokkeert op Poort 8000, vangt een host-level packet sniffer de uitgaande cloud-burst (UDP 6404) direct op.
-   - Gerichte ARP-reply stuurt verkeer van `192.168.2.31` via host `192.168.2.1` (`eno1`) met automatische fail-safe gateway restore bij afsluiten.
-   - Auto-calibreert bij elke Shazam detectie en triggert oproep met `trigger_source = "NETWORK_SNIFF"` (of `"SHAZAM + SNIFF"`).
+1. **Dual Aanbel-Coördinator & Wederzijdse Foutcontrole (`ring_coordinator.py`):**
+   - Directe aanbel-triggering op milliseconde 0 (zero-latency) bij de allereerste trigger.
+   - Gelijktijdig achtergrondvenster van 3.5 seconden voor het tweede signaal:
+     - Bij ontvangst van beide detectoren binnen 3.5s: INFO logging `[RING VERIFIED] Dubbele aanbel-bevestiging geslaagd: SHAZAM_CHIME + NETWORK_SNIFF vuren allebei synchroon af!`.
+     - Indien één van beide ontbreekt: ERROR logging `[RING MISMATCH ERROR] Eén van de aanbel-detectoren vuurde niet binnen 3.5s! Actief: <source>, Ontbrekend: <missing_source>.`.
 
-2. **10/10 EZVIZ AI-Detectieniveau & Smart Motion Fallback (`ai_detector.py`):**
-   - Bij camera hardware beweging (`0x4000`) wordt de YOLOv8 detectiedrempel voor 10 seconden verlaagd naar `0.22` (4 FPS scan-burst).
-   - Indien YOLO geen objecten detecteert, activeert een slimme contour motion-fallback (`area >= 1.5%`, verplaatsing $\ge 2\%$ over 3 frames) buiten stilstaande geparkeerde voertuigen en boomkruinen en keurt goed als `label = "Beweging (Hardware)"`.
+2. **Geraffineerde EZVIZ Cloud Netwerk-Sniffer (`network_sniffer.py`):**
+   - Onderdrukt geïsoleerde 191B keepalive-pakketten naar TCP 8820.
+   - Detecteert Patroon A (TCP 8820 pakket met payload tussen 195 en 400 bytes of lengte > 250B).
+   - Detecteert Patroon B (>= 3 pakketten van 191B binnen 1000ms naar TCP 8820).
 
-3. **Netwerk- en WiFi/5G Herstel:**
-   - Zowel backend C-SDK als Shazam audio-consumer herverbinden binnen 3.0s met `[CAMERA RECONNECTED]`.
-   - Android `WebSocketForegroundService` detecteert via `ConnectivityManager.NetworkCallback()` direct netwerkwissels en herverbindt via backoff ladder `1s -> 3s -> 5s -> 15s`.
-   - Badges `[SHAZAM_CHIME]`, `[NETWORK_SNIFF]`, `[SHAZAM + SNIFF]` in Clips en 30-dagen Logboek.
+3. **Dag-Mappen (`/clips/YYYY-MM-DD/`) & 50.0 GB Opslaglimiet (`recorder.py`, `main.py`):**
+   - Alle nieuwe video's en thumbnails worden opgeslagen onder chronologische dag-mappen `/clips/YYYY-MM-DD/`.
+   - `resolve_clip_path()` zoekt transparant in dag-mappen, root clips en snapshots.
+   - Bij het verwijderen van clips worden lege dag-mappen automatisch opgeruimd.
+   - Standaard opslaglimiet verhoogd naar 50.0 GB (51200 MB).
+
+4. **Server-Side Paginering & SQL Filtering (`models.py`, `main.py`):**
+   - `GET /api/v1/clips?category=...&date=...&offset=...&limit=...` past filters toe in SQLite vóór `LIMIT` en `OFFSET`.
+   - On-disk repair & indexering bij het opstarten kent ontbrekende ring-categorieën toe.
+
+5. **Arlo-Stijl Timeline UI (`ClipsScreen.kt`):**
+   - Miniatuurfoto fungeert als afspeelknop met subtiele Play-overlay en duur-badge in de hoek (geen losse tekstknop "Afspelen").
+   - 3 strakke actieknoppen behouden: Downloaden (`Icons.Default.Download`), Ster/Favoriet vergrendeling (`⭐`/`☆`) en Verwijderen (`🗑️`).
+   - Schone `🔔 Aangebeld` badges zonder interne debug-tags in de app.
+   - Oneindig scrollen met 40 items per pagina.
+
+6. **Web Admin Dashboard Verbeteringen (`/admin`):**
+   - Live Dual Aanbel status en verificatietabel.
+   - Opgeloste AI Verificatie-Inspector miniatuurfoto's (`/api/v1/admin/inspector-snapshot/{log_id}`).
+   - Werkende "Test Push Melding" knop (`POST /api/v1/admin/test-push`).
+   - Foutenlogboek met 5s automatische live verversing.
 
 3. **Gekalibreerde Shazam Deurbel-Chime Detector (NCC $\ge 0.72$):**
    - Gekalibreerd op de fysieke testen van 31-10-2026 (NCC scores 0.7519 en 0.7765).

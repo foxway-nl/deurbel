@@ -296,20 +296,10 @@ class SDKAlarmListener:
         payload_ascii: str = "",
     ) -> None:
         now = time.time()
-        action = "Logged"
-        if (now - self._last_trigger_ts) >= 5.0:
-            self._last_trigger_ts = now
-            action = "Triggered Doorbell Ringing"
-            logger.info("🚨 [Port 8000 SDK Alarm] Ring trigger dispatched to Call State Machine!")
-            if self._loop and self._loop.is_running():
-                try:
-                    from app.main import call_sm
-                    asyncio.run_coroutine_threadsafe(call_sm.ring(trigger_source="CSDK_PORT_8000"), self._loop)
-                except Exception as e:
-                    logger.error("Failed to dispatch ring to call_sm: %s", e)
-        else:
-            action = "Debounced (<5s since last trigger)"
-            logger.info("Doorbell ring debounced (<5s)")
+        # Per v3.5.0 spec: Port 8000 C-SDK is disabled as a doorbell ring trigger.
+        # Rings are handled exclusively by Shazam Chime + EZVIZ Cloud Packet Sniffer.
+        action = "Logged (C-SDK Ringing disabled per v3.5.0 spec)"
+        logger.info("ℹ️ [Port 8000 SDK Alarm] Intercom event received: %s (ring triggering disabled per v3.5.0)", details)
 
         self._record_event(
             command_id=command_id,

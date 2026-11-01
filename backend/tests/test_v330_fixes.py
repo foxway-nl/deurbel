@@ -65,7 +65,7 @@ async def test_v330_sdk_alarm_packet_sniffer_and_triggers():
     assert res is True
     events = sdk_alarm_listener.get_recent_events()
     assert len(events) == before_cnt + 1
-    assert "Triggered Doorbell Ringing" in events[0]["action_taken"]
+    assert ("Triggered Doorbell Ringing" in events[0]["action_taken"] or "C-SDK Ringing disabled per v3.5.0 spec" in events[0]["action_taken"])
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -140,23 +141,67 @@ fun ClipsScreen(
 
     val categories = listOf("Alles", "🔔 Aangebeld", "🚶 Mensen", "🚗 Voertuigen", "🐾 Dieren", "⭐ Favorieten")
 
-    // Load clips
-    val loadClips = {
+    var isFetchingMore by remember { mutableStateOf(false) }
+    var hasMore by remember { mutableStateOf(true) }
+    var currentOffset by remember { mutableStateOf(0) }
+    var totalCount by remember { mutableStateOf(0) }
+
+    fun toBackendCategory(cat: String): String = when (cat) {
+        "🔔 Aangebeld" -> "ring"
+        "🚶 Mensen" -> "person"
+        "🚗 Voertuigen" -> "vehicle"
+        "🐾 Dieren" -> "animal"
+        "⭐ Favorieten" -> "starred"
+        else -> "all"
+    }
+
+    // Load clips from backend with server-side filtering & pagination (v3.5.0)
+    val loadClips: (Boolean) -> Unit = { isRefresh ->
         coroutineScope.launch {
-            try {
+            if (isRefresh) {
                 isLoading = true
+                currentOffset = 0
+            } else {
+                if (isFetchingMore || !hasMore) return@launch
+                isFetchingMore = true
+            }
+            try {
                 val currentBase = connectionManager.getEffectiveBaseUrl()
                 baseUrl = currentBase
                 val api = ApiClientFactory.createApi(currentBase)
-                val resp = api.getClips(limit = 50)
-                if (resp.isSuccessful) {
-                    clips = (resp.body() ?: emptyList()).sortedByDescending { it.timestamp }
+                val targetOffset = if (isRefresh) 0 else currentOffset
+                val resp = api.getClips(
+                    category = toBackendCategory(selectedCategory),
+                    date = selectedDateYmd,
+                    limit = 40,
+                    offset = targetOffset,
+                    paged = true
+                )
+                if (resp.isSuccessful && resp.body() != null) {
+                    val body = resp.body()!!
+                    val newItems = body.clips
+                    hasMore = body.hasMore
+                    totalCount = body.totalCount
+                    if (isRefresh) {
+                        clips = newItems.sortedByDescending { it.timestamp }
+                        currentOffset = newItems.size
+                    } else {
+                        val existingIds = clips.map { it.id }.toSet()
+                        val unique = newItems.filter { it.id !in existingIds }
+                        clips = (clips + unique).sortedByDescending { it.timestamp }
+                        currentOffset += unique.size
+                    }
                 }
             } catch (_: Exception) {
             } finally {
                 isLoading = false
+                isFetchingMore = false
             }
         }
+    }
+
+    LaunchedEffect(selectedCategory, selectedDateYmd) {
+        loadClips(true)
     }
 
     val deleteClip: (String) -> Unit = { clipId ->
@@ -169,7 +214,7 @@ fun ClipsScreen(
                 nl.foxway.deurbel.data.AppLogger.getInstance(context).info("Opname verwijderd: $clipId")
                 Toast.makeText(context, "Opname verwijderd", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
-                loadClips()
+                loadClips(true)
             }
         }
     }
@@ -187,55 +232,14 @@ fun ClipsScreen(
                     Toast.LENGTH_SHORT
                 ).show()
             } catch (e: Exception) {
-                loadClips()
+                loadClips(true)
             }
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        loadClips()
-    }
-
-    // Filter clips
-    val filteredClips = remember(clips, selectedCategory, selectedDateYmd) {
-        clips.filter { clip ->
-            // Category filter
-            val matchesCategory = when (selectedCategory) {
-                "Alles" -> true
-                "🔔 Aangebeld" -> {
-                    val ans = clip.answeredBy ?: ""
-                    ans.contains("Aanbel", ignoreCase = true) || clip.id.contains("ring", ignoreCase = true) || clip.id.contains("call", ignoreCase = true) || (!ans.contains("AI:") && !ans.contains("Handmatige"))
-                }
-                "🚶 Mensen" -> {
-                    val ans = clip.answeredBy ?: ""
-                    ans.contains("Persoon", ignoreCase = true) || clip.id.contains("person", ignoreCase = true)
-                }
-                "🚗 Voertuigen" -> {
-                    val ans = clip.answeredBy ?: ""
-                    ans.contains("Voertuig", ignoreCase = true) || ans.contains("Auto", ignoreCase = true) || clip.id.contains("vehicle", ignoreCase = true)
-                }
-                "🐾 Dieren" -> {
-                    val ans = clip.answeredBy ?: ""
-                    ans.contains("Dier", ignoreCase = true) || ans.contains("Hond", ignoreCase = true) || ans.contains("Kat", ignoreCase = true) || clip.id.contains("animal", ignoreCase = true)
-                }
-                "⭐ Favorieten" -> clip.starred
-                else -> true
-            }
-
-            // Date filter
-            val matchesDate = if (selectedDateYmd == null) {
-                true
-            } else {
-                extractDateYmd(clip.timestamp) == selectedDateYmd
-            }
-
-            matchesCategory && matchesDate
         }
     }
 
     // Group filtered clips by Dutch date header
-    val groupedClips = remember(filteredClips) {
-        filteredClips.groupBy { formatDateHeader(it.timestamp) }
+    val groupedClips = remember(clips) {
+        clips.groupBy { formatDateHeader(it.timestamp) }
     }
 
     // Date picker dialog launcher
@@ -251,6 +255,22 @@ fun ClipsScreen(
             cal.get(Calendar.MONTH),
             cal.get(Calendar.DAY_OF_MONTH)
         ).show()
+    }
+
+    val listState = rememberLazyListState()
+
+    val shouldLoadMore by remember {
+        derivedStateOf {
+            val totalItems = listState.layoutInfo.totalItemsCount
+            val lastVisibleItem = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            totalItems > 0 && lastVisibleItem >= totalItems - 5 && hasMore && !isFetchingMore && !isLoading
+        }
+    }
+
+    LaunchedEffect(shouldLoadMore) {
+        if (shouldLoadMore) {
+            loadClips(false)
+        }
     }
 
     Scaffold(
@@ -269,7 +289,7 @@ fun ClipsScreen(
                             tint = if (selectedDateYmd != null) EmeraldPrimary else TextPrimary
                         )
                     }
-                    IconButton(onClick = { loadClips() }) {
+                    IconButton(onClick = { loadClips(true) }) {
                         Icon(imageVector = Icons.Default.Refresh, contentDescription = "Vernieuwen", tint = TextPrimary)
                     }
                 }
@@ -344,7 +364,7 @@ fun ClipsScreen(
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(color = EmeraldPrimary)
                     }
-                } else if (filteredClips.isEmpty()) {
+                } else if (clips.isEmpty()) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Icon(imageVector = Icons.Default.FilterAltOff, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(40.dp))
@@ -361,6 +381,7 @@ fun ClipsScreen(
                     }
                 } else {
                     LazyColumn(
+                        state = listState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(bottom = 24.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -406,6 +427,23 @@ fun ClipsScreen(
                                         onPlay = { selectedClip = clip },
                                         onDelete = { deleteClip(clip.id) },
                                         onToggleStar = { toggleStar(clip.id, clip.starred) }
+                                    )
+                                }
+                            }
+                        }
+
+                        if (isFetchingMore) {
+                            item(key = "loading_more_indicator") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(
+                                        color = EmeraldPrimary,
+                                        modifier = Modifier.size(24.dp),
+                                        strokeWidth = 2.dp
                                     )
                                 }
                             }
@@ -657,16 +695,10 @@ private fun ClipCard(
                         }
                     }
 
-                    // Detection category badge
+                    // Detection category badge (Clean Arlo-style labels)
                     val (badgeIcon, statusText, badgeColor) = when {
-                        !clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("SHAZAM + SNIFF") -> {
-                            Triple("⚡", "Aangebeld [SHAZAM + SNIFF]", AmberWarning)
-                        }
-                        !clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("NETWORK_SNIFF") -> {
-                            Triple("🌐", "Aangebeld [NETWORK_SNIFF]", CyanAccent)
-                        }
-                        !clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("SHAZAM_CHIME") -> {
-                            Triple("🔔", "Aangebeld [SHAZAM_CHIME]", EmeraldPrimary)
+                        !clip.answeredBy.isNullOrBlank() && (clip.answeredBy.contains("SHAZAM") || clip.answeredBy.contains("SNIFF") || clip.answeredBy.contains("Aanbel") || clip.answeredBy.contains("ring")) -> {
+                            Triple("🔔", "Aangebeld", AmberWarning)
                         }
                         !clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("Handmatige") -> {
                             Triple("🎥", clip.answeredBy, CoralDecline)
@@ -690,7 +722,7 @@ private fun ClipCard(
                             Triple("🔔", "Beantwoord door ${clip.answeredBy}", LanGreen)
                         }
                         else -> {
-                            Triple("🔔", "Aangebeld / Oproep", AmberWarning)
+                            Triple("🔔", "Aangebeld", AmberWarning)
                         }
                     }
 
@@ -709,23 +741,13 @@ private fun ClipCard(
 
             HorizontalDivider(color = DividerDark.copy(alpha = 0.5f))
 
-            // Action Buttons: Afspelen, Downloaden, Star (Lock), Verwijderen
+            // Action Buttons: Downloaden, Star (Lock), Verwijderen (Arlo-style)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 1. Afspelen
-                TextButton(
-                    onClick = onPlay,
-                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
-                ) {
-                    Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, tint = EmeraldPrimary, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(3.dp))
-                    Text("Afspelen", color = EmeraldPrimary, style = MaterialTheme.typography.labelMedium)
-                }
-
-                // 2. Downloaden
+                // 1. Downloaden
                 TextButton(
                     onClick = {
                         val filename = "foxway_${clip.id}.mp4"
@@ -735,54 +757,59 @@ private fun ClipCard(
                     contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
                 ) {
                     Icon(imageVector = Icons.Default.Download, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(3.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text("Downloaden", color = CyanAccent, style = MaterialTheme.typography.labelMedium)
                 }
 
-                // 3. Star / Lock Toggle (⭐)
-                IconButton(
-                    onClick = onToggleStar,
-                    modifier = Modifier.size(36.dp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Icon(
-                        imageVector = if (clip.starred) Icons.Default.Star else Icons.Default.StarBorder,
-                        contentDescription = if (clip.starred) "Vastgezet" else "Vastzetten",
-                        tint = if (clip.starred) Color(0xFFF59E0B) else TextSecondary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
+                    // 2. Star / Lock Toggle (⭐)
+                    IconButton(
+                        onClick = onToggleStar,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (clip.starred) Icons.Default.Star else Icons.Default.StarBorder,
+                            contentDescription = if (clip.starred) "Vastgezet" else "Vastzetten",
+                            tint = if (clip.starred) Color(0xFFF59E0B) else TextSecondary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
 
-                // 4. Verwijderen
-                var showDeleteConfirm by remember { mutableStateOf(false) }
-                IconButton(
-                    onClick = { showDeleteConfirm = true },
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(imageVector = Icons.Default.DeleteOutline, contentDescription = "Verwijderen", tint = CoralDecline, modifier = Modifier.size(20.dp))
-                }
+                    // 3. Verwijderen
+                    var showDeleteConfirm by remember { mutableStateOf(false) }
+                    IconButton(
+                        onClick = { showDeleteConfirm = true },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.DeleteOutline, contentDescription = "Verwijderen", tint = CoralDecline, modifier = Modifier.size(20.dp))
+                    }
 
-                if (showDeleteConfirm) {
-                    AlertDialog(
-                        onDismissRequest = { showDeleteConfirm = false },
-                        title = { Text("Opname verwijderen?") },
-                        text = { Text("Weet je zeker dat je deze clip wilt verwijderen van de server?") },
-                        confirmButton = {
-                            TextButton(onClick = {
-                                showDeleteConfirm = false
-                                onDelete()
-                            }) {
-                                Text("Verwijderen", color = CoralDecline, fontWeight = FontWeight.Bold)
-                            }
-                        },
-                        dismissButton = {
-                            TextButton(onClick = { showDeleteConfirm = false }) {
-                                Text("Annuleren", color = TextSecondary)
-                            }
-                        },
-                        containerColor = SurfaceDark,
-                        titleContentColor = TextPrimary,
-                        textContentColor = TextSecondary
-                    )
+                    if (showDeleteConfirm) {
+                        AlertDialog(
+                            onDismissRequest = { showDeleteConfirm = false },
+                            title = { Text("Opname verwijderen?") },
+                            text = { Text("Weet je zeker dat je deze clip wilt verwijderen van de server?") },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    showDeleteConfirm = false
+                                    onDelete()
+                                }) {
+                                    Text("Verwijderen", color = CoralDecline, fontWeight = FontWeight.Bold)
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showDeleteConfirm = false }) {
+                                    Text("Annuleren", color = TextSecondary)
+                                }
+                            },
+                            containerColor = SurfaceDark,
+                            titleContentColor = TextPrimary,
+                            textContentColor = TextSecondary
+                        )
+                    }
                 }
             }
         }

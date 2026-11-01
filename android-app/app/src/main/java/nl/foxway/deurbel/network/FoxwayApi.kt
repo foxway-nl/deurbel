@@ -52,9 +52,12 @@ interface FoxwayApi {
 
     @GET("/api/v1/clips")
     suspend fun getClips(
-        @Query("limit") limit: Int = 100,
-        @Query("offset") offset: Int = 0
-    ): Response<List<ClipItem>>
+        @Query("category") category: String? = null,
+        @Query("date") date: String? = null,
+        @Query("limit") limit: Int = 40,
+        @Query("offset") offset: Int = 0,
+        @Query("paged") paged: Boolean = true
+    ): Response<ClipsResponseDto>
 
     @GET("/api/v1/clips/{clipId}")
     suspend fun getClipDetail(

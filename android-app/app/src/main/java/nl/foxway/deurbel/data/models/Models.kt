@@ -63,6 +63,14 @@ data class FcmTokenUpdate(
 //  Domain models
 // ──────────────────────────────────────────────────────────────────
 
+data class ClipsResponseDto(
+    @SerializedName("clips") val clips: List<ClipItem> = emptyList(),
+    @SerializedName("total_count") val totalCount: Int = 0,
+    @SerializedName("has_more") val hasMore: Boolean = false,
+    @SerializedName("offset") val offset: Int = 0,
+    @SerializedName("limit") val limit: Int = 40
+)
+
 /** Clip item from GET /api/v1/clips */
 data class ClipItem(
     val id: String,
@@ -247,9 +255,9 @@ data class DetectionSettingsDto(
 
 data class StorageStatsDto(
     @SerializedName("retention_days") val retentionDays: Int = 30,
-    @SerializedName("max_storage_gb") val maxStorageGb: Double = 10.0,
+    @SerializedName("max_storage_gb") val maxStorageGb: Double = 50.0,
     @SerializedName("used_mb") val usedMb: Double = 0.0,
-    @SerializedName("max_mb") val maxMb: Double = 10240.0,
+    @SerializedName("max_mb") val maxMb: Double = 51200.0,
     @SerializedName("total_clips") val totalClips: Int = 0,
     @SerializedName("usage_percent") val usagePercent: Double = 0.0
 )

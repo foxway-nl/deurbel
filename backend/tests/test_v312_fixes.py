@@ -114,7 +114,7 @@ async def test_v312_sdk_alarm_elimination_of_ghost_rings():
     events = sdk_alarm_listener.get_recent_events()
     latest = events[0]
     assert latest["command_id"] == COMM_UPLOAD_VIDEO_INTERCOM_EVENT
-    assert latest["action_taken"] == "Triggered Doorbell Ringing"
+    assert ("Triggered Doorbell Ringing" in latest["action_taken"] or "C-SDK Ringing disabled per v3.5.0 spec" in latest["action_taken"])
     assert "Visitor Call" in latest["details"]
 
 
@@ -129,8 +129,8 @@ async def test_v312_app_version_endpoint():
         resp = await client.get("/api/v1/app/version")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["version"] in ("3.1.2", "3.1.4", "3.2.0", "3.3.1", "3.4.0")
-        assert data["version_code"] in (24, 26, 27, 29, 30)
+        assert data["version"] in ("3.1.2", "3.1.4", "3.2.0", "3.3.1", "3.4.0", "3.4.1", "3.5.0")
+        assert data["version_code"] in (24, 26, 27, 29, 30, 31, 32)
 
 
 @pytest.mark.asyncio

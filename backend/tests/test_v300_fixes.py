@@ -171,8 +171,8 @@ async def test_app_version_v300():
         resp = await client.get("/api/v1/app/version")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["version"] in ("3.0.0", "3.1.2", "3.1.4", "3.2.0", "3.3.1", "3.4.0")
-        assert data["version_code"] in (21, 24, 26, 27, 29, 30)
+        assert data["version"] in ("3.0.0", "3.1.2", "3.1.4", "3.2.0", "3.3.1", "3.4.0", "3.4.1", "3.5.0")
+        assert data["version_code"] in (21, 24, 26, 27, 29, 30, 31, 32)
 
 
 @pytest.mark.asyncio

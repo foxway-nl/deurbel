@@ -8,6 +8,7 @@ and audit logs in a robust SQLite database using WAL mode and write-lock seriali
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
@@ -18,6 +19,8 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.database import get_db, init_wal_mode
+
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────
 #  Pydantic request / response schemas
@@ -666,14 +669,175 @@ async def save_clip(
         )
 
 
-async def list_clips(limit: int = 100, offset: int = 0) -> list[dict]:
+async def list_clips(
+    category: str = "all",
+    date: Optional[str] = None,
+    limit: int = 40,
+    offset: int = 0
+) -> tuple[list[dict], int]:
+    """
+    List clips with server-side category and date filtering applied BEFORE limit and offset (v3.5.0).
+    Returns: (list_of_clips, total_count)
+    """
+    where_clauses: list[str] = []
+    params: list[Any] = []
+
+    # Category filter
+    cat_lower = (category or "").lower().strip()
+    if cat_lower and cat_lower != "all" and cat_lower != "alles":
+        if cat_lower == "ring" or "aangebel" in cat_lower or "aanbel" in cat_lower:
+            where_clauses.append(
+                "(category = 'ring' OR answered_by LIKE '%Aanbel%' OR answered_by LIKE '%SHAZAM%' OR answered_by LIKE '%SNIFF%' OR clip_id LIKE 'ring_%' OR clip_id LIKE 'call_%')"
+            )
+        elif cat_lower == "person" or "mensen" in cat_lower or "persoon" in cat_lower:
+            where_clauses.append(
+                "(category = 'person' OR answered_by LIKE '%Persoon%' OR answered_by LIKE '%Person%' OR clip_id LIKE 'person_%')"
+            )
+        elif cat_lower == "vehicle" or "voertuig" in cat_lower or "auto" in cat_lower:
+            where_clauses.append(
+                "(category = 'vehicle' OR answered_by LIKE '%Voertuig%' OR answered_by LIKE '%Auto%' OR answered_by LIKE '%Vehicle%' OR clip_id LIKE 'vehicle_%')"
+            )
+        elif cat_lower == "animal" or "dier" in cat_lower:
+            where_clauses.append(
+                "(category = 'animal' OR answered_by LIKE '%Dier%' OR answered_by LIKE '%Animal%' OR answered_by LIKE '%Hond%' OR answered_by LIKE '%Kat%' OR clip_id LIKE 'animal_%')"
+            )
+        elif cat_lower == "starred" or "favoriet" in cat_lower:
+            where_clauses.append("starred = 1")
+        else:
+            where_clauses.append("(category = ? OR answered_by LIKE ?)")
+            params.extend([cat_lower, f"%{cat_lower}%"])
+
+    # Date filter: YYYY-MM-DD
+    if date:
+        date_clean = date.strip()[:10]
+        where_clauses.append("(strftime('%Y-%m-%d', created_at) = ? OR created_at LIKE ?)")
+        params.extend([date_clean, f"{date_clean}%"])
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
     async with get_db(write=False) as db:
-        cursor = await db.execute(
-            "SELECT * FROM clips ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (limit, offset),
+        # 1. Total count with identical WHERE conditions
+        count_cursor = await db.execute(f"SELECT COUNT(*) FROM clips {where_sql}", tuple(params))
+        total_count = (await count_cursor.fetchone())[0]
+
+        # 2. Paginated rows
+        page_params = list(params) + [max(1, limit), max(0, offset)]
+        data_cursor = await db.execute(
+            f"SELECT * FROM clips {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            tuple(page_params),
         )
+        rows = await data_cursor.fetchall()
+        return [dict(row) for row in rows], total_count
+
+
+async def sync_and_index_clips_on_disk() -> dict:
+    """
+    On-disk auto-indexer and category restoration (v3.5.0):
+    1. Repairs existing clips with empty/null categories based on answered_by.
+    2. Explicitly maps ring events to category='ring' so they show under [🔔 Aangebeld].
+    3. Scans /mnt/opslag/deurbel/clips/ (and day subdirectories) for unindexed .mp4 files.
+    """
+    from app.config import settings
+    updated_categories = 0
+    newly_indexed = 0
+
+    async with get_db(write=True) as db:
+        # 1. Fix missing categories from answered_by
+        cursor = await db.execute("SELECT clip_id, answered_by FROM clips WHERE category = '' OR category IS NULL")
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        for r in rows:
+            cid = r["clip_id"]
+            ans = r["answered_by"] or ""
+            cat = ""
+            if any(k in ans for k in ("Voertuig", "Auto", "Vehicle")):
+                cat = "vehicle"
+            elif any(k in ans for k in ("Persoon", "Person")):
+                cat = "person"
+            elif any(k in ans for k in ("Dier", "Animal", "Hond", "Kat")):
+                cat = "animal"
+            elif any(k in ans for k in ("Aanbel", "SHAZAM", "SNIFF", "call")):
+                cat = "ring"
+            if cat:
+                await db.execute("UPDATE clips SET category = ? WHERE clip_id = ?", (cat, cid))
+                updated_categories += 1
+
+        # 2. Map ring events to clips
+        # Any clip that corresponds to a call_logs entry or ring event:
+        await db.execute(
+            """
+            UPDATE clips SET category = 'ring'
+            WHERE clip_id IN (SELECT call_id FROM call_logs)
+               OR clip_id IN (SELECT clip_id FROM events WHERE category = 'ring' OR type LIKE '%ring%')
+            """
+        )
+
+        # Correlate ring events with near-simultaneous clips (within +-30s)
+        evt_cur = await db.execute("SELECT id, created_at, clip_id FROM events WHERE category = 'ring' OR type LIKE '%ring%'")
+        ring_events = await evt_cur.fetchall()
+        for rev in ring_events:
+            e_ts = rev["created_at"]
+            if e_ts:
+                # Find clip within +-30 seconds
+                try:
+                    c_cand = await db.execute(
+                        """
+                        SELECT clip_id, answered_by FROM clips
+                        WHERE abs(strftime('%s', created_at) - strftime('%s', ?)) <= 35
+                        ORDER BY abs(strftime('%s', created_at) - strftime('%s', ?)) ASC LIMIT 1
+                        """,
+                        (e_ts, e_ts),
+                    )
+                    matched_clip = await c_cand.fetchone()
+                    if matched_clip:
+                        m_cid = matched_clip["clip_id"]
+                        m_ans = matched_clip["answered_by"] or ""
+                        if not m_ans.startswith("Aanbellen"):
+                            new_ans = f"Aanbellen [{m_ans}]" if m_ans else "Aanbellen"
+                        else:
+                            new_ans = m_ans
+                        await db.execute("UPDATE clips SET category = 'ring', answered_by = ? WHERE clip_id = ?", (new_ans, m_cid))
+                        updated_categories += 1
+                except Exception:
+                    pass
+
+        # 3. Check for any unindexed .mp4 files on disk
+        c_all = await db.execute("SELECT clip_id FROM clips")
+        existing_cids = set(r[0] for r in await c_all.fetchall())
+
+    if settings.CLIPS_DIR.exists():
+        for mp4_file in settings.CLIPS_DIR.rglob("*.mp4"):
+            cid = mp4_file.stem
+            if cid in existing_cids or mp4_file.name.endswith(".apk") or cid.endswith("_trimmed") or cid.endswith("_tmp"):
+                continue
+
+            try:
+                f_size = mp4_file.stat().st_size
+                if f_size < 1000:
+                    continue
+                file_dt = datetime.fromtimestamp(mp4_file.stat().st_mtime, timezone.utc).isoformat()
+                thumb_cand = mp4_file.parent / f"thumb_{cid}.jpg"
+                snap_path = str(thumb_cand) if thumb_cand.exists() else ""
+                cat = "ring" if ("call" in cid or "ring" in cid) else "motion"
+                ans = "Aanbellen" if cat == "ring" else "Gearchiveerde opname"
+
+                await save_clip(
+                    clip_id=cid,
+                    call_id=cid,
+                    video_path=str(mp4_file),
+                    snapshot_path=snap_path,
+                    answered_by=ans,
+                    status="READY",
+                    category=cat,
+                    file_size=f_size,
+                    created_at=file_dt,
+                )
+                existing_cids.add(cid)
+                newly_indexed += 1
+            except Exception:
+                pass
+
+    logger.info("📦 On-disk indexer complete: %d categories repaired, %d new clips indexed", updated_categories, newly_indexed)
+    return {"updated_categories": updated_categories, "newly_indexed": newly_indexed}
 
 
 async def get_clip(clip_id: str) -> Optional[dict]:

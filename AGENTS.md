@@ -7,8 +7,8 @@ Welkom in het Foxway Smart Doorbell project. Lees deze regels zorgvuldig voordat
 ## 🚨 HARDE ANTI-REGRESSIE REGELS
 
 1. **NOOIT OUDE SPECS GEBRUIKEN:**
-   - De codebase bevindt zich op versie **v3.4.1** (`versionCode = 31`).
-   - Oude documenten over v1.0 / v2.0 / v2.3 / v2.4 / v2.5 / v2.6 / v2.8 / v2.9 / v3.0 / v3.1.2 / v3.1.4 / v3.2.0 / v3.3.0 / v3.3.1 / v3.4.0 mogen nooit leidend zijn.
+   - De codebase bevindt zich op versie **v3.5.0** (`versionCode = 32`).
+   - Oude documenten over v1.0 / v2.0 / v2.3 / v2.4 / v2.5 / v2.6 / v2.8 / v2.9 / v3.0 / v3.1.2 / v3.1.4 / v3.2.0 / v3.3.0 / v3.3.1 / v3.4.0 / v3.4.1 mogen nooit leidend zijn.
 
 2. **STRIKTE COMMANDO-TIMEOUT (NOOIT MEER LANG WACHTEN):**
    - Draai `pytest`, Gradle builds of Docker-taken **NOOIT** zonder harde timeout! Gebruik altijd `timeout 90s pytest ...` en `timeout 300s ./gradlew ...`.
@@ -21,6 +21,10 @@ Welkom in het Foxway Smart Doorbell project. Lees deze regels zorgvuldig voordat
    - Wanneer je één bug oplost, controleer je direct of omliggende functionaliteit nog heel is.
 
 4. **BESCHERMDE KERN-COMPONENTEN & HARDWARE-FEITEN (NIET AANRAKEN):**
+   - **Dual Aanbel-Coördinator & Wederzijdse Foutcontrole (`backend/app/ring_coordinator.py`, `network_sniffer.py`, `ring_detector.py`):** Drukknop-detectie vuurt op milliseconde 0 direct af bij het eerste signaal (Shazam Audio-Chime óf EZVIZ Cloud Netwerk-Sniffer). Een achtergrondvenster van 3.5s verifieert het tweede signaal: synchroon vuren logt `[RING VERIFIED]`; ontbreekt één van beide dan logt het systeem direct `[RING MISMATCH ERROR]`. Sniffer negeert geïsoleerde 191B keepalives op TCP 8820 en detecteert Patroon A (payload 195-400B) en Patroon B (>=3 pkts 191B binnen 1s).
+   - **Dag-Mappen (`/clips/YYYY-MM-DD/`) & 50.0 GB Opslaglimiet (`recorder.py`, `main.py`):** Alle nieuwe opnames en miniaturen worden opgeslagen in dag-mappen (`resolve_clip_path` zoekt in dag-mappen, root en snapshots). Bij verwijderen worden lege mappen opgeruimd. APK blijft in root `/clips/foxway-deurbel.apk`. Opslaglimiet staat standaard op 50.0 GB (51200 MB).
+   - **Server-Side Paginering & Filtering (`models.py`, `main.py`, `ClipsScreen.kt`):** `GET /api/v1/clips?category=...&date=...&offset=...&limit=...` filtert in SQL vóór limit/offset. Android app gebruikt oneindige scroll met 40 items per pagina.
+   - **Arlo-Stijl Opnames UI (`ClipsScreen.kt`):** Klikbare thumbnail met Play-icoon en duur-badge fungeert als afspeelknop. Behoudt Download-, Ster (vastzetten)- en Verwijder-knoppen. Technische tags zijn vervangen door een strakke `🔔 Aangebeld` badge in de app.
    - **Hardware-Feiten EZVIZ DB1 Pro (192.168.2.31):** Poort 80 (HTTP / ISAPI / ONVIF) is **NIET BESCHIKBAAR**! Verbind **NOOIT** met poort 80 of `/ISAPI/...`. De enige open poorten zijn **Poort 554 (RTSP)** en **Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`)**.
    - **Hardware Drukknop-Detectie, Shazam Chime & Host-Level Cloud Packet Sniffer (`backend/app/network_sniffer.py`, `ring_detector.py`, `sdk_alarm_listener.py`):** EZVIZ blokkeert hardware intercom event `0x1132` op Poort 8000. Drukknop-detectie is daarom dubbel gewaarborgd: (1) **Real-Time 3-Layer Shazam Deurbel-Chime Detector** (`ring_detector.py`, 728 Hz / 570 Hz dual-tone akoestische correlatie NCC $\ge 0.72$, 12s cooldown); (2) **Host-Level Actieve ARP/EZVIZ Cloud Sniffer** (`network_sniffer.py`): stuurt gerichte ARP-reply elke 2.0s naar `192.168.2.31` via host `192.168.2.1` (`eno1`) met fail-safe atexit/signal gateway restore (3x ARP reply naar router MAC `00:f8:cc:d0:9e:00`), aggregeert uitgaande WAN-pakketten in 1000ms vensters en triggert `trigger_source = "NETWORK_SNIFF"` (of `"SHAZAM + SNIFF"` binnen 2.5s van chime). C-SDK Poort 8000 vangt hardware beweging `0x4000 dwAlarmType == 3` op en verzorgt tweeweg-audio.
    - **AI-Detectie 10/10 EZVIZ-Niveau & Smart Motion Fallback (`backend/app/ai_detector.py`):** Bij camera hardware beweging (`0x4000`) wordt de YOLOv8 detectie-drempel verlaagd naar `0.22` voor 10 seconden en 4 FPS scan-burst geactiveerd. Indien YOLO geen objecten detecteert, activeert een slimme contour motion-fallback (`area >= 1.5%`, verplaatsing $\ge 2\%$ over 3 frames) buiten stilstaande geparkeerde voertuigen (`stationary_vehicles`) en boomkruinen (`y < 0.22*h` en `x > 0.60*w, y < 0.35*h`).

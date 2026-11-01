@@ -193,13 +193,15 @@ class ShazamChimeDetector:
             now = time.time()
             if (now - self._last_trigger_ts) >= self.cooldown_seconds:
                 self._last_trigger_ts = now
-                logger.info("🚨 [Shazam Chime] 100% MATCH (NCC=%.4f)! Triggering Doorbell Ringing...", ncc)
-                if self._loop and self._loop.is_running():
-                    try:
+                logger.info("🚨 [Shazam Chime] 100% MATCH (NCC=%.4f)! Registering ring signal with coordinator...", ncc)
+                try:
+                    from app.ring_coordinator import register_ring_signal
+                    register_ring_signal(source="SHAZAM_CHIME", details={"ncc": float(ncc), "details": str(details)})
+                except Exception as e:
+                    logger.error("Failed triggering ring from Shazam: %s", e)
+                    if self._loop and self._loop.is_running():
                         from app.main import call_sm
                         asyncio.run_coroutine_threadsafe(call_sm.ring(trigger_source="SHAZAM_CHIME"), self._loop)
-                    except Exception as e:
-                        logger.error("Failed triggering ring from Shazam: %s", e)
             else:
                 logger.info("[Shazam Chime] Match debounced (<%.1fs cooldown)", self.cooldown_seconds)
 

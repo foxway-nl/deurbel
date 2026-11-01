@@ -280,7 +280,7 @@ async def get_admin_system_status(request: Request):
     # 2. Disk Storage via recorder stats
     from app.recorder import get_storage_stats
     retention_days = int(await get_system_setting("retention_days", "30"))
-    max_storage_gb = float(await get_system_setting("max_storage_gb", "10.0"))
+    max_storage_gb = float(await get_system_setting("max_storage_gb", "50.0"))
     storage_stats = get_storage_stats(max_storage_gb)
 
     # 3. LiveHub Frame Age in ms
@@ -324,6 +324,14 @@ async def get_admin_system_status(request: Request):
         "signature": network_sniffer.known_signature,
     }
 
+    from app.ring_coordinator import ring_coordinator
+    dual_ring_status = {
+        "shazam_active": ring_detector._running,
+        "sniffer_active": network_sniffer._running,
+        "iface": network_sniffer.iface,
+        "recent_verifications": ring_coordinator.get_recent_verifications(),
+    }
+
     return {
         "status": "ok",
         "cpu_percent": cpu_pct,
@@ -339,6 +347,7 @@ async def get_admin_system_status(request: Request):
         "sdk_alarm_listener": sdk_status,
         "shazam_status": shazam_status,
         "network_sniffer": sniffer_status,
+        "dual_ring": dual_ring_status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -374,24 +383,97 @@ async def admin_test_ring(request: Request):
     }
 
 
+@router.post("/api/v1/admin/test-push")
 @router.post("/api/v1/admin/test-notification")
-async def admin_test_notification(request: Request):
-    """Pushes a test notification to all connected Android apps."""
+async def admin_test_push(request: Request):
+    """Pushes a test notification to all connected Android apps with required text (v3.5.0)."""
     require_admin(request)
+    from app.push_service import push_event
     test_data = {
         "event_id": int(time.time()),
         "clip_id": "test_notification_clip",
         "category": "person",
-        "label": "Test Melding",
-        "title": "🔔 Test Melding vanuit Web Admin",
-        "confidence": 0.99,
+        "label": "Foxway Test Melding",
+        "title": "🔔 Foxway Test Melding: Push-verbinding werkt 100%!",
+        "confidence": 1.0,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "snapshot_url": "/api/v1/live/instant.jpg",
         "in_quiet_hours": False,
         "should_notify": True,
     }
     await push_event("AI_DETECTION", test_data)
-    return {"status": "ok", "message": "Test push-notificatie verzonden via WebSocket en FCM"}
+    return {"status": "ok", "message": "🔔 Foxway Test Melding: Push-verbinding werkt 100%!"}
+
+
+@router.get("/api/v1/admin/inspector-snapshot/{log_id}")
+async def get_inspector_snapshot_endpoint(log_id: int, request: Request):
+    """Serve debug/inspector snapshot for AI audit log entry (v3.5.0)."""
+    require_admin(request)
+    from app.database import get_db
+    from app.recorder import resolve_clip_path
+    from fastapi.responses import FileResponse
+    async with get_db(write=False) as db:
+        cursor = await db.execute("SELECT id, snapshot_path, timestamp, category FROM ai_audit_logs WHERE id = ?", (log_id,))
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(404, "Audit log not found")
+
+    snap_path = row["snapshot_path"]
+    # Check direct path
+    if snap_path and os.path.exists(snap_path) and os.path.getsize(snap_path) > 0:
+        return FileResponse(snap_path, media_type="image/jpeg")
+
+    # Try resolving via resolve_clip_path
+    base = os.path.basename(snap_path) if snap_path else f"{log_id}.jpg"
+    resolved = resolve_clip_path(base, ext=".jpg")
+    if resolved and resolved.exists() and resolved.stat().st_size > 0:
+        return FileResponse(str(resolved), media_type="image/jpeg")
+
+    # Check clean snapshot
+    clean_stem = base.replace("_debug.jpg", "").replace(".jpg", "")
+    alt_snap = settings.SNAPSHOTS_DIR / f"{clean_stem}.jpg"
+    if alt_snap.exists() and alt_snap.stat().st_size > 0:
+        return FileResponse(str(alt_snap), media_type="image/jpeg")
+
+    # Fallback: extract frame 1 from matching mp4
+    v_resolved = resolve_clip_path(f"{clean_stem}.mp4", ext=".mp4")
+    if v_resolved and v_resolved.exists():
+        extracted_path = settings.SNAPSHOTS_DIR / f"{clean_stem}_debug.jpg"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "nice", "-n", "15",
+                "ffmpeg", "-y",
+                "-ss", "1.0",
+                "-i", str(v_resolved),
+                "-vframes", "1",
+                "-q:v", "2",
+                str(extracted_path),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate()
+            if extracted_path.exists() and extracted_path.stat().st_size > 0:
+                return FileResponse(str(extracted_path), media_type="image/jpeg")
+        except Exception:
+            pass
+
+    # Instant live snapshot fallback
+    instant_snap = settings.SNAPSHOTS_DIR / "instant.jpg"
+    if instant_snap.exists() and instant_snap.stat().st_size > 0:
+        return FileResponse(str(instant_snap), media_type="image/jpeg")
+
+    raise HTTPException(404, "Snapshot image not found")
+
+
+@router.get("/api/v1/admin/ring-verifications")
+async def get_ring_verifications_endpoint(request: Request):
+    """Returns recent dual ring cross-verifications (v3.5.0)."""
+    require_admin(request)
+    from app.ring_coordinator import ring_coordinator
+    return {
+        "status": "ok",
+        "verifications": ring_coordinator.get_recent_verifications(),
+    }
 
 
 @router.get("/api/v1/admin/crash-logs")

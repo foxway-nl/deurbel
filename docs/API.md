@@ -1,4 +1,4 @@
-# Foxway Smart Doorbell API Documentatie (v3.4.1)
+# Foxway Smart Doorbell API Documentatie (v3.5.0)
 
 De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8090`, WAN: `https://deurbel.foxway.nl`).
 
@@ -6,7 +6,64 @@ De API draait op de FastAPI backend via poort `8090` (LAN: `http://192.168.2.1:8
 
 ---
 
-## 1. Host-Level EZVIZ Cloud Packet Sniffer (`v3.4.1`)
+## 1. Dual Aanbel-Coördinator & Netwerk-Sniffer (`v3.5.0`)
+
+### `GET /api/v1/admin/ring-verifications`
+- **Beschrijving:** Haalt de geschiedenis van de Dual Aanbel-Coördinator op (`VERIFIED` vs `MISMATCH`).
+- **Output:**
+  ```json
+  {
+    "status": "ok",
+    "verifications": [
+      {
+        "timestamp": "2026-11-01T00:15:30.123",
+        "status": "VERIFIED",
+        "first_source": "SHAZAM_CHIME",
+        "second_source": "NETWORK_SNIFF",
+        "delta_ms": 142.5,
+        "details": "Dubbele aanbel-bevestiging geslaagd in 142.5ms!"
+      }
+    ]
+  }
+  ```
+
+### `GET /api/v1/admin/inspector-snapshot/{log_id}`
+- **Beschrijving:** Serveert de verificatiefoto voor de opgegeven AI audit log met automatische pad-resolutie of frame-extractie via ffmpeg.
+- **Output:** `image/jpeg` (HTTP 200).
+
+### `POST /api/v1/admin/test-push`
+- **Beschrijving:** Verstuurt direct een test push-melding (`🔔 Foxway Test Melding: Push-verbinding werkt 100%!`) naar alle actieve verbindingen (WebSocket + FCM).
+
+---
+
+## 2. Server-Side Paginering & Dag-Mappen (`v3.5.0`)
+
+### `GET /api/v1/clips`
+- **Beschrijving:** Haalt chronologische videoclips op met server-side SQL-filtering vóór `LIMIT` en `OFFSET`.
+- **Query Parameters:**
+  - `category`: `all`, `ring`, `person`, `vehicle`, `animal`, `starred`
+  - `date`: `YYYY-MM-DD` (optioneel dag-filter)
+  - `limit`: aantal items (bijv. 40)
+  - `offset`: start-offset (bijv. 0, 40, 80)
+  - `paged`: `true` om het gestructureerde pagineringsmodel te ontvangen
+- **Output (bij `paged=true`):**
+  ```json
+  {
+    "clips": [ ... ],
+    "total_count": 245,
+    "has_more": true,
+    "offset": 0,
+    "limit": 40
+  }
+  ```
+
+### `GET /api/v1/settings/storage` & `PUT /api/v1/settings/storage`
+- **Beschrijving:** Beheert de retentie- en opslaglimieten.
+- **Standaard limiet:** 50.0 GB (`51200` MB).
+
+---
+
+## 3. Host-Level EZVIZ Cloud Packet Sniffer
 
 ### `GET /api/v1/admin/network-sniff-bursts`
 - **Beschrijving:** Exposeert recente uitgaande WAN-pakket bursts van de deurbel (`192.168.2.31`), verzameld in 1000ms vensters via actieve ARP redirect.

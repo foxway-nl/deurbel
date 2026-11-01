@@ -1,7 +1,7 @@
-# Foxway Smart Doorbell System Specification (v3.4.1)
+# Foxway Smart Doorbell System Specification (v3.5.0)
 
-**Versie:** `v3.4.1` (`versionCode = 31`)  
-**Datum:** 31 Oktober 2026  
+**Versie:** `v3.5.0` (`versionCode = 32`)  
+**Datum:** 1 November 2026  
 **Productie-omgeving:** `foxway` (`192.168.2.1`), WAN: `https://deurbel.foxway.nl`  
 **Camera:** EZVIZ DB1 Pro (`192.168.2.31`), native **4:3 aspect ratio** (`768x576` / `960x720`)
 
@@ -13,25 +13,23 @@ Het Foxway Deurbelsysteem is een end-to-end, privacy-vriendelijk en ultra-low-la
    - **BELANGRIJK:** Poort 80 (HTTP / ISAPI / ONVIF) is **NIET AANWEZIG** op de camera. Er wordt NOOIT verbonden met poort 80 of `/ISAPI/...`.
    - Native 4:3 beeldsensor met microfoon en luidspreker.
    - Tweeweg-audio gestuurd via `libhcnetsdk.so` C-SDK (`app/audio_bridge.py`) over TCP poort 8000.
-   - **Hardware Drukknop-Detectie & Host-Level Cloud Sniffer (`backend/app/network_sniffer.py`):**
+   - **Dual Aanbel-Coördinator & Wederzijdse Foutcontrole (`backend/app/ring_coordinator.py`, `network_sniffer.py`, `ring_detector.py`):**
      - Omdat EZVIZ hardware intercom event `0x1132` op Poort 8000 blokkeert, is de drukknop detectie dubbel gewaarborgd:
-       - **Shazam Chime Detector** (`ring_detector.py`, 728 Hz / 570 Hz dual-tone, NCC $\ge 0.72$).
-       - **Host-Level Actieve ARP/Packet Sniffer** (`network_sniffer.py`): stuurt gerichte ARP reply naar `192.168.2.31` elke 2.0s via host `192.168.2.1` (`eno1`), vangt uitgaand WAN cloudverkeer op in 1000ms vensters en triggert `trigger_source = 'NETWORK_SNIFF'` (of `'SHAZAM + SNIFF'` bij gelijktijdige detectie).
-       - Fail-safe atexit/signal handlers versturen 3x ARP restore packets (`00:f8:cc:d0:9e:00`) zodat internettoegang nooit verstoord raakt.
+       - (1) **Real-Time 3-Layer Shazam Deurbel-Chime Detector** (`ring_detector.py`, 728 Hz / 570 Hz dual-tone akoestische correlatie NCC $\ge 0.72$, 12s cooldown).
+       - (2) **Host-Level Actieve ARP/EZVIZ Cloud Sniffer** (`network_sniffer.py`): negeert geïsoleerde 191B keepalives op TCP 8820, detecteert Patroon A (payload 195-400B) en Patroon B (>=3 pkts van 191B binnen 1000ms).
+       - **Centrale Ring Coördinator (`ring_coordinator.py`):** Roept bij het allereerste signaal direct `call_sm.ring(...)` aan op ms 0 (zero latency). Een achtergrondvenster van 3.5s verifieert de komst van het andere signaal (`[RING VERIFIED]` bij gelijktijdige aflevering; `[RING MISMATCH ERROR]` bij ontbreken van één signaal).
      - C-SDK Poort 8000 vangt hardware bewegingsalarm `0x4000 dwAlarmType == 3` op en verzorgt tweeweg-audio.
 2. **FastAPI & Python Media Server (`backend` in Docker):**
    - Draait op poort 8090 met `network_mode: host`.
-   - **Real-Time 3-Layer Shazam Deurbel-Chime Detector (`ring_detector.py`):** Gekalibreerd op echte fysieke deurbelopnames (728 Hz / 570 Hz dual-tone). Laag 1: spectrale whitening, Laag 2: kwarts-klok toonstabiliteit binnen +-15 Hz, Laag 3: 2D Normalized Cross-Correlation (NCC $\ge 0.72$, 12s cooldown). Logt alle evaluaties $\ge 0.45$ NCC in daily JSONL en triggert oproep met `trigger_source = 'SHAZAM_CHIME'`.
+   - **Dag-Mappen (`/clips/YYYY-MM-DD/`) & 50.0 GB Opslaglimiet (`recorder.py`, `main.py`):** Alle nieuwe video-opnames en miniaturen worden chronologisch opgeslagen in dag-mappen. Bij verwijderen worden lege dag-mappen opgeruimd. Standaard opslaglimiet verhoogd naar 50.0 GB (51200 MB).
+   - **Server-Side Paginering & SQL-Filtering (`models.py`, `main.py`):** `GET /api/v1/clips?category=...&date=...&offset=...&limit=...` filtert direct in SQLite vóór `LIMIT` en `OFFSET`.
    - **Zero-UI Live Player op `/api/v1/live/player`:** Minimalistische speler gebaseerd op `<zero-player>` en `/api/go2rtc/video-rtc.js`. Instant 4:3 poster gerenderd op ms 0 via `<img id="instant-poster">`, direct verwijderd op eerste video-frame. Live-edge lag recovery op `<0.3s` via 250ms interval, `window.setAudioMuted()`, `window.killStream()`, `window.setVideoZoom()`, en stabiele WS-herverbinding uitsluitend bij `onclose`/`onerror`.
    - **Notificatie-Poortwachter & Stille Uren (23:30 - 07:30):** Wanneer een categorie `Melding` op UIT staat, zet de backend `silent = True` en `should_notify = False`, waardoor FCM en client-notificaties 100% worden onderdrukt. Deurbeloproepen (`CALL_RINGING`) rinkelen altijd en worden nooit onderdrukt.
-   - **10/10 EZVIZ AI-Gevoeligheid & Smart Motion Fallback (`app/ai_detector.py`):**
-     - Dynamisch geheugen voor stilstaande auto's filtert geparkeerde auto's betrouwbaar uit.
-     - Bij camera hardware beweging (`0x4000`) wordt de YOLOv8 detectiedrempel voor 10s verlaagd naar `0.22` en 4 FPS scan-burst geactiveerd.
-     - Indien YOLO geen objecten detecteert, activeert slimme contour motion fallback (`area >= 1.5%`, verplaatsing $\ge 2\%$ over 3 frames) buiten stilstaande auto's en boomkruinen en keurt goed als `label = "Beweging (Hardware)"`.
-   - **Netwerk- en WiFi/5G Herstel:** Zowel backend C-SDK als Shazam herverbinden binnen 3.0s met `[CAMERA RECONNECTED]`. Android `WebSocketForegroundService` detecteert via `ConnectivityManager.NetworkCallback()` direct netwerkwissels en herverbindt via backoff ladder `1s -> 3s -> 5s -> 15s`.
-   - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met live preview player, real-time Poort 8000 SDK packet sniffer tabel, native C-SDK log viewer modal, Shazam Chime live monitor en Live EZVIZ Cloud-Sniffer tabel.
+   - **10/10 EZVIZ AI-Gevoeligheid & Smart Motion Fallback (`app/ai_detector.py`):** Dynamisch geheugen voor stilstaande auto's filtert geparkeerde auto's betrouwbaar uit. Contour motion fallback buiten geparkeerde auto's en boomkruinen bij hardware beweging.
+   - **Web Admin Paneel (`/admin`):** Dark-mode dashboard met live preview player, Dual Aanbel-Detectie status en verificatietabel, werkende AI Verificatie-Inspector miniatuurfoto's (`/api/v1/admin/inspector-snapshot/{log_id}`), werkende "Test Push Melding" knop (`POST /api/v1/admin/test-push`), en foutenlogboek met 5s auto-refresh.
 3. **Android Client App (`android-app`):**
-   - Native Jetpack Compose, Kotlin coroutines, versie 3.4.1 (`versionCode = 31`). Badges `[SHAZAM_CHIME]`, `[NETWORK_SNIFF]`, `[SHAZAM + SNIFF]` in Clips en 30-dagen Logboek.
+   - Native Jetpack Compose, Kotlin coroutines, versie 3.5.0 (`versionCode = 32`).
+   - **Arlo-Stijl Opnames UI (`ClipsScreen.kt`):** Klikbare miniatuurfoto met duidelijke Play-overlay en duur-badge fungeert als afspeelknop (geen losse "Afspelen" knop). Behoudt Downloaden, Ster (favoriet/vergrendelen) en Verwijderen knoppen. Technische badges vervangen door strakke `🔔 Aangebeld` badge. Oneindig scrollen met automatische paginering van de server.
    - **R8 Minification Uitgeschakeld:** `isMinifyEnabled = false` en `isShrinkResources = false` waarborgen foutloze JSON/Gson deserialisatie van data-classes (`DoorbellEvent`, `CallRingingPayload`, instellingen DTOs).
    - **Verbeterde Foreground Service Compatibiliteit:** Special-use foreground service types worden uitsluitend op Android 14+ (`API 34`) meegegeven, waardoor crashes op Android 10-13 zijn verholpen.
    - **Real-Time Belscherm Activatie:** Directe activering van inkomende oproepen zonder foutieve klokskew-suppressie.

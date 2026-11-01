@@ -39,6 +39,79 @@ from app.models import (
 
 logger = logging.getLogger("foxway.recorder")
 
+
+def get_day_clip_dir(dt: Optional[datetime] = None) -> Path:
+    """Returns /mnt/opslag/deurbel/clips/YYYY-MM-DD/, creating it automatically."""
+    today_str = (dt or datetime.now()).strftime("%Y-%m-%d")
+    day_dir = settings.CLIPS_DIR / today_str
+    day_dir.mkdir(parents=True, exist_ok=True)
+    return day_dir
+
+
+def resolve_clip_path(target: str, ext: Optional[str] = None) -> Optional[Path]:
+    """
+    Robust clip and snapshot resolver (v3.5.0):
+    1. If target is an existing path on disk, returns it immediately.
+    2. Searches day subdirectories (/clips/YYYY-MM-DD/) in reverse chronological order.
+    3. Fallback searches root /clips/.
+    4. Fallback searches /snapshots/.
+    """
+    if not target:
+        return None
+
+    p_direct = Path(target)
+    if p_direct.is_file() and p_direct.stat().st_size > 0:
+        return p_direct
+
+    base = p_direct.name
+    search_names = [base]
+    if ext and not base.endswith(ext):
+        search_names.append(f"{base}{ext}")
+
+    if ext == ".jpg" or base.endswith(".jpg") or "thumb" in base:
+        clean_id = base.replace(".jpg", "").replace("thumb_", "")
+        for variant in [f"thumb_{clean_id}.jpg", f"{clean_id}.jpg", f"{clean_id}_debug.jpg"]:
+            if variant not in search_names:
+                search_names.append(variant)
+    elif ext == ".mp4" or base.endswith(".mp4"):
+        clean_id = base.replace(".mp4", "")
+        for variant in [f"{clean_id}.mp4", f"{clean_id}_trimmed.mp4"]:
+            if variant not in search_names:
+                search_names.append(variant)
+
+    # 1. Search day folders (/clips/YYYY-MM-DD/) in reverse chronological order
+    if settings.CLIPS_DIR.exists():
+        day_dirs = []
+        try:
+            for d in settings.CLIPS_DIR.iterdir():
+                if d.is_dir() and len(d.name) == 10 and d.name[4] == '-' and d.name[7] == '-':
+                    day_dirs.append(d)
+        except Exception:
+            pass
+        day_dirs.sort(key=lambda d: d.name, reverse=True)
+
+        for d in day_dirs:
+            for sname in search_names:
+                cand = d / sname
+                if cand.is_file() and cand.stat().st_size > 0:
+                    return cand
+
+    # 2. Search root /clips/
+    if settings.CLIPS_DIR.exists():
+        for sname in search_names:
+            cand = settings.CLIPS_DIR / sname
+            if cand.is_file() and cand.stat().st_size > 0:
+                return cand
+
+    # 3. Search /snapshots/
+    if settings.SNAPSHOTS_DIR.exists():
+        for sname in search_names:
+            cand = settings.SNAPSHOTS_DIR / sname
+            if cand.is_file() and cand.stat().st_size > 0:
+                return cand
+
+    return None
+
 # ──────────────────────────────────────────────────────────────────────
 #  Snapshot fetcher
 # ──────────────────────────────────────────────────────────────────────
@@ -468,7 +541,7 @@ async def _record(call_id: str, clip_path: str) -> None:
         if proc.returncode not in (0, 255):
             logger.warning("FFmpeg raw record exited %d for %s: %s", proc.returncode, call_id, stderr.decode()[-500:])
     except asyncio.CancelledError:
-        logger.info("Recording cancelled for %s, terminating FFmpeg", call_id)
+        logger.info("Recording cancelled for %s, terminating FFmpeg raw capture", call_id)
         proc = _active_recorders.get(call_id)
         if proc:
             proc.terminate()
@@ -478,97 +551,116 @@ async def _record(call_id: str, clip_path: str) -> None:
                 proc.kill()
     finally:
         _active_recorders.pop(call_id, None)
+        # Finalize and transcode the clip in a detached background task so cancellation does not abort saving
+        asyncio.create_task(_finalize_call_recording(call_id, clip_path, preroll_files, raw_ts, call_work_dir))
 
-    # 2. Combine pre-roll + live recording into final transcode
-    all_segments = list(preroll_files)
-    if os.path.exists(raw_ts) and os.path.getsize(raw_ts) > 1000:
-        all_segments.append(Path(raw_ts))
 
-    if all_segments:
-        concat_list = call_work_dir / "concat_call.txt"
-        with open(concat_list, "w") as f:
-            for s in all_segments:
-                f.write(f"file '{s.resolve()}'\n")
-
-        transcode_cmd = [
-            "nice", "-n", "15",
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_list),
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "26",
-            "-vf", "scale=960:720,setsar=1:1",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "64k",
-            "-af", "aresample=async=1000",
-            "-movflags", "+faststart",
-            clip_path,
-        ]
-        try:
-            t_proc = await asyncio.create_subprocess_exec(
-                *transcode_cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await t_proc.communicate()
-        except Exception as e:
-            logger.warning("Call record transcode failed: %s", e)
-
-    # Cleanup temp directory
-    shutil.rmtree(call_work_dir, ignore_errors=True)
-
-    # Probe duration and persist clip metadata
-    duration = await _probe_duration(clip_path)
-    snapshot_path = await ensure_thumbnail(call_id, clip_path)
-
-    # Look up call log to preserve answered_by or trigger_source badge
-    ans = ""
+async def _finalize_call_recording(
+    call_id: str,
+    clip_path: str,
+    preroll_files: list[Path],
+    raw_ts: str,
+    call_work_dir: Path,
+) -> None:
+    """Non-cancellable background worker that stitches and saves the completed call clip (v3.5.0)."""
     try:
-        from app.database import get_db
-        async with get_db(write=False) as db:
-            c = await db.execute("SELECT trigger_source, answered_by FROM call_logs WHERE call_id = ?", (call_id,))
-            row = await c.fetchone()
-            if row:
-                if row["answered_by"]:
-                    ans = row["answered_by"]
-                elif row["trigger_source"]:
-                    ans = f"Aanbellen [{row['trigger_source']}]"
-    except Exception:
-        pass
-    if not ans:
-        from app.state_machine import call_sm
-        if call_sm._current and call_sm._current.call_id == call_id:
-            ans = call_sm._current.claimed_by or f"Aanbellen [{call_sm._current.trigger_source}]"
+        all_segments = list(preroll_files)
+        if os.path.exists(raw_ts) and os.path.getsize(raw_ts) > 1000:
+            all_segments.append(Path(raw_ts))
 
-    await save_clip(
-        clip_id=call_id,
-        call_id=call_id,
-        video_path=clip_path,
-        snapshot_path=snapshot_path,
-        duration=duration,
-        answered_by=ans,
-    )
+        if all_segments:
+            concat_list = call_work_dir / "concat_call.txt"
+            with open(concat_list, "w") as f:
+                for s in all_segments:
+                    f.write(f"file '{s.resolve()}'\n")
+
+            os.makedirs(os.path.dirname(clip_path), exist_ok=True)
+            transcode_cmd = [
+                "nice", "-n", "15",
+                "ffmpeg", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(concat_list),
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "26",
+                "-vf", "scale=960:720,setsar=1:1",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "64k",
+                "-af", "aresample=async=1000",
+                "-movflags", "+faststart",
+                clip_path,
+            ]
+            try:
+                t_proc = await asyncio.create_subprocess_exec(
+                    *transcode_cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await t_proc.communicate()
+            except Exception as e:
+                logger.warning("Call record transcode failed: %s", e)
+
+        # Probe duration and persist clip metadata
+        duration = await _probe_duration(clip_path)
+        snapshot_path = await ensure_thumbnail(call_id, clip_path)
+        file_size = os.path.getsize(clip_path) if os.path.exists(clip_path) else 0
+
+        # Look up call log to preserve answered_by or trigger_source badge
+        ans = "Aanbellen"
+        try:
+            from app.database import get_db
+            async with get_db(write=False) as db:
+                c = await db.execute("SELECT trigger_source, answered_by FROM call_logs WHERE call_id = ?", (call_id,))
+                row = await c.fetchone()
+                if row:
+                    if row["answered_by"]:
+                        ans = row["answered_by"]
+                    elif row["trigger_source"]:
+                        ans = f"Aanbellen [{row['trigger_source']}]"
+        except Exception:
+            pass
+        if not ans or ans == "Aanbellen":
+            from app.state_machine import call_sm
+            if call_sm._current and call_sm._current.call_id == call_id:
+                ans = call_sm._current.claimed_by or f"Aanbellen [{call_sm._current.trigger_source}]"
+
+        await save_clip(
+            clip_id=call_id,
+            call_id=call_id,
+            video_path=clip_path,
+            snapshot_path=snapshot_path,
+            duration=duration,
+            answered_by=ans,
+            status="READY",
+            category="ring",
+            file_size=file_size,
+        )
+        logger.info("✅ Saved completed call recording: %s (%.1fs, %d bytes)", clip_path, duration, file_size)
+    except Exception as e:
+        logger.error("Failed finalizing call recording for %s: %s", call_id, e)
+    finally:
+        shutil.rmtree(call_work_dir, ignore_errors=True)
 
 
 async def ensure_thumbnail(clip_id: str, video_path: Optional[str] = None, preroll_seconds: float = 20.0) -> str:
     """
     Ensure a thumbnail exists for a clip. If not present on disk, extract
-    the frame at preroll_seconds (the moment of detection) from the MP4 using FFmpeg
-    so no clip ever has a black or gray missing thumbnail.
+    the frame at preroll_seconds from the MP4 using FFmpeg (v3.5.0 Day-Folder aware).
     """
-    # Check thumb in clips dir or snapshots dir first
-    thumb_path = settings.CLIPS_DIR / f"thumb_{clip_id}.jpg"
-    if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 1000:
-        return str(thumb_path)
+    # 1. Check if thumbnail already exists anywhere on disk
+    resolved_thumb = resolve_clip_path(f"thumb_{clip_id}.jpg", ext=".jpg")
+    if resolved_thumb and resolved_thumb.stat().st_size > 1000:
+        return str(resolved_thumb)
 
-    snapshot_path = str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg")
-    if os.path.exists(snapshot_path) and os.path.getsize(snapshot_path) > 1000:
-        return snapshot_path
+    resolved_snap = resolve_clip_path(f"{clip_id}.jpg", ext=".jpg")
+    if resolved_snap and resolved_snap.stat().st_size > 1000:
+        return str(resolved_snap)
 
-    # Try live_hub frame if available
+    # 2. Try live_hub frame if available
+    day_dir = get_day_clip_dir()
+    snapshot_path = str(day_dir / f"thumb_{clip_id}.jpg")
     try:
         from app.live_hub import live_hub
         jpeg = live_hub.get_latest_frame()
@@ -579,10 +671,13 @@ async def ensure_thumbnail(clip_id: str, video_path: Optional[str] = None, prero
     except Exception:
         pass
 
+    # 3. Find video path via resolve_clip_path
     if not video_path:
-        video_path = str(settings.CLIPS_DIR / f"{clip_id}.mp4")
+        v_found = resolve_clip_path(clip_id, ext=".mp4")
+        if v_found:
+            video_path = str(v_found)
 
-    if not os.path.exists(video_path):
+    if not video_path or not os.path.exists(video_path):
         return ""
 
     try:
@@ -600,7 +695,7 @@ async def ensure_thumbnail(clip_id: str, video_path: Optional[str] = None, prero
         )
         await proc.communicate()
         if os.path.exists(snapshot_path) and os.path.getsize(snapshot_path) > 0:
-            logger.info("Generated thumbnail from video for %s at ss=%.1fs", clip_id, ss_val)
+            logger.info("Generated thumbnail from video for %s at ss=%.1fs in %s", clip_id, ss_val, snapshot_path)
             try:
                 await update_clip(clip_id, snapshot_path=snapshot_path)
             except Exception:
@@ -848,22 +943,42 @@ async def inject_audio_reply(reply_id: str) -> bool:
 
 
 async def remove_clip(clip_id: str) -> bool:
-    """Delete clip files from disk and remove from the database."""
+    """Delete clip files from disk and remove from the database (v3.5.0 Day-Folder aware)."""
     clip = await get_clip(clip_id)
     if not clip:
         return False
 
-    # Delete video file
-    video_path = clip.get("video_path", "")
-    if video_path and os.path.exists(video_path):
-        os.remove(video_path)
-        logger.info("Deleted video: %s", video_path)
+    def _safe_remove(fpath: Optional[Path]) -> None:
+        if not fpath or not fpath.exists():
+            return
+        # Never remove APK
+        if fpath.name == "foxway-deurbel.apk":
+            return
+        parent_dir = fpath.parent
+        try:
+            fpath.unlink(missing_ok=True)
+            logger.info("Deleted file: %s", fpath)
+        except Exception as e:
+            logger.warning("Error deleting file %s: %s", fpath, e)
 
-    # Delete snapshot file
-    snapshot_path = clip.get("snapshot_path", "")
-    if snapshot_path and os.path.exists(snapshot_path):
-        os.remove(snapshot_path)
-        logger.info("Deleted snapshot: %s", snapshot_path)
+        # If parent_dir is a day folder (YYYY-MM-DD) and now empty, clean it up
+        if parent_dir != settings.CLIPS_DIR and parent_dir.is_dir():
+            try:
+                if not any(parent_dir.iterdir()):
+                    parent_dir.rmdir()
+                    logger.info("Cleaned up empty day folder: %s", parent_dir)
+            except Exception:
+                pass
+
+    # 1. Delete video file
+    v_raw = clip.get("video_path")
+    v_target = Path(v_raw) if (v_raw and os.path.exists(v_raw)) else resolve_clip_path(f"{clip_id}.mp4", ext=".mp4")
+    _safe_remove(v_target)
+
+    # 2. Delete snapshot/thumbnail file
+    s_raw = clip.get("snapshot_path")
+    s_target = Path(s_raw) if (s_raw and os.path.exists(s_raw)) else resolve_clip_path(f"thumb_{clip_id}.jpg", ext=".jpg")
+    _safe_remove(s_target)
 
     await db_delete_clip(clip_id)
     return True
@@ -953,7 +1068,8 @@ async def start_manual_recording(user_name: str = "Gezinslid", stream_name: str 
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     clip_id = f"manual_{timestamp_str}"
     clip_filename = f"{clip_id}.mp4"
-    clip_path = str(settings.CLIPS_DIR / clip_filename)
+    day_dir = get_day_clip_dir()
+    clip_path = str(day_dir / clip_filename)
 
     rtsp_url = f"rtsp://127.0.0.1:8554/{stream_name}"
     cmd = [
@@ -1107,14 +1223,17 @@ async def cleanup_today_false_clips() -> dict:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def get_storage_stats(max_storage_gb: float = 10.0) -> dict:
-    """Calculate disk usage of clips directory."""
+def get_storage_stats(max_storage_gb: float = 50.0) -> dict:
+    """Calculate disk usage of clips directory (including day subfolders, v3.5.0 50GB limit)."""
     clips_dir = settings.CLIPS_DIR
     total_bytes = 0
     clip_count = 0
     if clips_dir.exists():
-        for f in clips_dir.glob("*.mp4"):
+        for f in clips_dir.rglob("*.mp4"):
             try:
+                # Exclude temporary or non-clip files
+                if f.name.endswith(".apk"):
+                    continue
                 total_bytes += f.stat().st_size
                 clip_count += 1
             except Exception:
@@ -1130,12 +1249,12 @@ def get_storage_stats(max_storage_gb: float = 10.0) -> dict:
     }
 
 
-async def cleanup_storage_and_retention(retention_days: int = 30, max_storage_gb: float = 10.0) -> dict:
+async def cleanup_storage_and_retention(retention_days: int = 30, max_storage_gb: float = 50.0) -> dict:
     """
-    Two-tier retention and storage protection:
+    Two-tier retention and storage protection (v3.5.0):
       1. Purge unlocked clips older than retention_days.
       2. If total size exceeds max_storage_gb, purge oldest unlocked clips until within cap.
-    Starred/locked clips are NEVER removed.
+    Starred/locked clips and the APK file are NEVER removed.
     """
     removed_count = 0
     freed_bytes = 0
@@ -1159,7 +1278,7 @@ async def cleanup_storage_and_retention(retention_days: int = 30, max_storage_gb
     from app.models import get_unlocked_clips_oldest_first
     unlocked = await get_unlocked_clips_oldest_first()
 
-    total_bytes = sum(f.stat().st_size for f in settings.CLIPS_DIR.glob("*.mp4") if f.exists())
+    total_bytes = sum(f.stat().st_size for f in settings.CLIPS_DIR.rglob("*.mp4") if f.exists() and not f.name.endswith(".apk"))
     idx = 0
     while total_bytes > max_bytes and idx < len(unlocked):
         c = unlocked[idx]
@@ -1182,6 +1301,6 @@ async def cleanup_storage_and_retention(retention_days: int = 30, max_storage_gb
 
 async def cleanup_expired_clips() -> int:
     """Legacy helper for periodic retention cleanup."""
-    stats = await cleanup_storage_and_retention(settings.CLIP_RETENTION_DAYS, 10.0)
+    stats = await cleanup_storage_and_retention(settings.CLIP_RETENTION_DAYS, 50.0)
     return stats.get("removed_count", 0)
 

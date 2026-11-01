@@ -1205,13 +1205,14 @@ class SmartDetector:
             should_notify = False
 
         clip_id = str(uuid.uuid4())
-        clip_path = str(settings.CLIPS_DIR / f"{clip_id}.mp4")
+        from app.recorder import get_day_clip_dir
+        day_dir = get_day_clip_dir()
+        clip_path = str(day_dir / f"{clip_id}.mp4")
         t0_iso = datetime.now(timezone.utc).isoformat()
 
         # 1. Stap 1 — Sla EERST de Snapshot op schijf op (VÓÓR het event wordt verstuurd!) (TAAK 1.1)
-        settings.CLIPS_DIR.mkdir(parents=True, exist_ok=True)
         settings.SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-        thumb_clip_path = str(settings.CLIPS_DIR / f"thumb_{clip_id}.jpg")
+        thumb_clip_path = str(day_dir / f"thumb_{clip_id}.jpg")
         clean_snapshot_path = str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg")
 
         cv2.imwrite(thumb_clip_path, keyframe)

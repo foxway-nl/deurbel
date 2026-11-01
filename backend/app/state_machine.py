@@ -149,9 +149,11 @@ class CallStateMachine:
             # Persist initial call log
             await save_call_log(call_id, CallState.RINGING.value)
 
-        clip_path = str(settings.CLIPS_DIR / f"{call_id}.mp4")
+        from app.recorder import get_day_clip_dir
+        day_dir = get_day_clip_dir()
+        clip_path = str(day_dir / f"{call_id}.mp4")
         call.clip_path = clip_path
-        call.snapshot_path = str(settings.SNAPSHOTS_DIR / f"{call_id}.jpg")
+        call.snapshot_path = str(day_dir / f"thumb_{call_id}.jpg")
 
         # 1. Fire RINGING callback IMMEDIATELY (broadcast WS + FCM with zero latency)
         if self.on_ringing:

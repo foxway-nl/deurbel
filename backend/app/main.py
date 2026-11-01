@@ -133,7 +133,7 @@ async def _periodic_cleanup() -> None:
     while True:
         try:
             retention_days = int(await get_setting("retention_days", "30"))
-            max_storage_gb = float(await get_setting("max_storage_gb", "10.0"))
+            max_storage_gb = float(await get_setting("max_storage_gb", "50.0"))
             await cleanup_storage_and_retention(retention_days, max_storage_gb)
         except Exception:
             logger.exception("Storage cleanup error")
@@ -294,7 +294,13 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("🚀 Foxway Doorbell Backend starting on port %d", settings.HOST_PORT)
     await init_db()
+    from app.models import sync_and_index_clips_on_disk
+    await sync_and_index_clips_on_disk()
     await mdns_service.start()
+
+    # Wire Ring Coordinator (v3.5.0 Dual Detectie)
+    from app.ring_coordinator import ring_coordinator
+    ring_coordinator.set_loop(asyncio.get_running_loop())
 
     # Wire state machine callbacks
     call_sm.on_ringing = _on_ringing
@@ -403,7 +409,7 @@ openapi_tags = [
 
 app = FastAPI(
     title="Foxway Smart Doorbell API",
-    version="3.1.4",
+    version="3.5.0",
     description="Signaling, state management, media proxy, and clip API for the Foxway Doorbell system.",
     openapi_tags=openapi_tags,
     lifespan=lifespan,
@@ -782,13 +788,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "3.4.1",
-        "version_code": 31,
-        "build_time": "2026-10-31T17:15:00Z",
+        "version": "3.5.0",
+        "version_code": 32,
+        "build_time": "2026-11-01T00:00:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.4.1 (v3.4.0 / v3.3.1 / v3.2.0 / v3.1.4): Host-level EZVIZ Cloud ARP/Packet Sniffer (NETWORK_SNIFF), AI-detectie 10/10 met 0.22 conf drempel en smart motion-fallback buiten geparkeerde auto's, automatische herverbinding en WiFi/5G netwerkwissel-herstel.",
+        "changelog": "v3.5.0: Dual Aanbel-Coördinator (Shazam Audio-Chime + EZVIZ Cloud Sniffer TCP 8820 met cross-verificatie), dag-mappen (/clips/YYYY-MM-DD/), 50 GB opslaglimiet, server-side filtering & paginering, Arlo-stijl UI en admin inspecteur fixes.",
     }
 
 
@@ -1042,17 +1048,16 @@ async def serve_snapshot(filename: str):
 @app.get("/api/v1/clips/{clip_id}/thumbnail")
 @app.get("/api/clips/{clip_id}/thumbnail")
 async def get_clip_thumbnail_endpoint(clip_id: str):
-    """Serve thumbnail for clip. Looks in clips/thumb_<id>.jpg and snapshots/<id>.jpg."""
+    """Serve thumbnail for clip. Resolves from day folders, clips dir, or snapshots (v3.5.0)."""
     clean_id = clip_id.replace(".jpg", "").replace("thumb_", "")
-    candidates = [
-        settings.CLIPS_DIR / f"thumb_{clean_id}.jpg",
-        settings.SNAPSHOTS_DIR / f"{clean_id}.jpg",
-        settings.SNAPSHOTS_DIR / f"thumb_{clean_id}.jpg",
-        settings.CLIPS_DIR / f"{clean_id}.jpg",
-    ]
-    for p in candidates:
-        if p.exists() and p.stat().st_size > 0:
-            return FileResponse(str(p), media_type="image/jpeg")
+    from app.recorder import resolve_clip_path, ensure_thumbnail
+    found = resolve_clip_path(f"thumb_{clean_id}.jpg", ext=".jpg")
+    if found and found.exists() and found.stat().st_size > 0:
+        return FileResponse(str(found), media_type="image/jpeg")
+
+    found_snap = resolve_clip_path(f"{clean_id}.jpg", ext=".jpg")
+    if found_snap and found_snap.exists() and found_snap.stat().st_size > 0:
+        return FileResponse(str(found_snap), media_type="image/jpeg")
 
     ensured = await ensure_thumbnail(clean_id)
     if ensured and os.path.exists(ensured):
@@ -1066,26 +1071,28 @@ async def get_clip_thumbnail_endpoint(clip_id: str):
 
 @app.get("/api/v1/clips")
 @app.get("/api/clips")
-async def get_clips(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
-    """List all clips sorted newest first with duration and file size."""
-    clips = await list_clips(limit=limit, offset=offset)
+async def get_clips(
+    category: str = Query("all"),
+    date: Optional[str] = Query(None),
+    limit: int = Query(40, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    paged: Optional[bool] = Query(None),
+    response: Response = None,
+):
+    """List all clips sorted newest first with duration, size, server-side filtering & pagination (v3.5.0)."""
+    from app.recorder import resolve_clip_path, ensure_thumbnail
+    clips, total_count = await list_clips(category=category, date=date, limit=limit, offset=offset)
     result = []
     for c in clips:
         clip_id = c["clip_id"]
         status = c.get("status") or "READY"
 
-        # Trigger thumbnail generation in background if missing
-        thumb_path = settings.CLIPS_DIR / f"thumb_{clip_id}.jpg"
-        snap_path = settings.SNAPSHOTS_DIR / f"{clip_id}.jpg"
-        if not (thumb_path.exists() and thumb_path.stat().st_size > 0) and not (snap_path.exists() and snap_path.stat().st_size > 0):
-            asyncio.create_task(ensure_thumbnail(clip_id, c.get("video_path")))
-
         size_bytes = c.get("file_size") or 0
         if size_bytes == 0:
-            v_path = c.get("video_path") or str(settings.CLIPS_DIR / f"{clip_id}.mp4")
-            if os.path.exists(v_path):
+            resolved_v = resolve_clip_path(c.get("video_path") or clip_id, ext=".mp4")
+            if resolved_v and resolved_v.exists():
                 try:
-                    size_bytes = os.path.getsize(v_path)
+                    size_bytes = resolved_v.stat().st_size
                 except Exception:
                     pass
 
@@ -1103,24 +1110,40 @@ async def get_clips(limit: int = Query(50, ge=1, le=100), offset: int = Query(0,
             "answered_by": c.get("answered_by"),
             "starred": bool(c.get("starred", 0)),
         })
+
+    has_more = (offset + len(result)) < total_count
+    if response:
+        response.headers["X-Total-Count"] = str(total_count)
+        response.headers["X-Has-More"] = "true" if has_more else "false"
+
+    is_paged = (paged is True) or (category != "all" and category != "") or (date is not None)
+    if is_paged:
+        return {
+            "clips": result,
+            "total_count": total_count,
+            "has_more": has_more,
+            "offset": offset,
+            "limit": limit,
+        }
     return result
 
 
 @app.get("/api/v1/clips/{clip_id}")
 @app.get("/api/clips/{clip_id}")
 async def get_clip_detail(clip_id: str, request: Request):
-    """Retrieve metadata and status (RECORDING/READY) for a specific clip."""
+    """Retrieve metadata and status (RECORDING/READY) for a specific clip (v3.5.0)."""
     clean_id = clip_id.replace(".mp4", "")
     accept = request.headers.get("accept", "")
     if clip_id.endswith(".mp4") or "video/" in accept:
         return await stream_clip_endpoint(clean_id, request)
 
+    from app.recorder import resolve_clip_path
     clip = await get_clip(clean_id)
     if not clip:
-        alt_path = settings.CLIPS_DIR / f"{clean_id}.mp4"
-        if not alt_path.exists():
+        alt_path = resolve_clip_path(f"{clean_id}.mp4", ext=".mp4")
+        if not alt_path or not alt_path.exists():
             raise HTTPException(404, "Clip not found")
-        v_size = os.path.getsize(alt_path)
+        v_size = alt_path.stat().st_size
         return {
             "id": clean_id,
             "clip_id": clean_id,
@@ -1140,10 +1163,10 @@ async def get_clip_detail(clip_id: str, request: Request):
     status = clip.get("status") or "READY"
     size_bytes = clip.get("file_size") or 0
     if size_bytes == 0:
-        v_path = clip.get("video_path") or str(settings.CLIPS_DIR / f"{clean_id}.mp4")
-        if os.path.exists(v_path):
+        resolved_v = resolve_clip_path(clip.get("video_path") or clean_id, ext=".mp4")
+        if resolved_v and resolved_v.exists():
             try:
-                size_bytes = os.path.getsize(v_path)
+                size_bytes = resolved_v.stat().st_size
             except Exception:
                 pass
 
@@ -1169,19 +1192,23 @@ async def get_clip_detail(clip_id: str, request: Request):
 @app.get("/api/clips/{clip_id}/stream")
 @app.get("/api/clips/{clip_id}/file")
 async def stream_clip_endpoint(clip_id: str, request: Request):
-    """Stream a clip with HTTP Range support (206 Partial Content) via FileResponse."""
+    """Stream a clip with HTTP Range support (206 Partial Content) via FileResponse (v3.5.0)."""
     clean_id = clip_id.replace(".mp4", "")
     clip = await get_clip(clean_id)
     if clip and clip.get("status") == "RECORDING":
         raise HTTPException(404, "Opname wordt nog opgenomen (status: RECORDING)")
 
-    file_path = clip.get("video_path") if clip else str(settings.CLIPS_DIR / f"{clean_id}.mp4")
-    if not os.path.exists(file_path):
-        alt_path = str(settings.CLIPS_DIR / f"{clean_id}.mp4")
-        if os.path.exists(alt_path):
-            file_path = alt_path
-        else:
-            raise HTTPException(404, "Clip not found")
+    from app.recorder import resolve_clip_path
+    file_path = None
+    if clip and clip.get("video_path") and os.path.exists(clip["video_path"]):
+        file_path = clip["video_path"]
+    else:
+        resolved = resolve_clip_path(f"{clean_id}.mp4", ext=".mp4")
+        if resolved:
+            file_path = str(resolved)
+
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(404, "Clip not found")
 
     return FileResponse(
         file_path,
@@ -1232,16 +1259,10 @@ async def star_clip(clip_id: str, body: dict):
 
 @app.delete("/api/v1/clips/{clip_id}")
 async def delete_clip_endpoint(clip_id: str):
-    """Delete a clip and its snapshot from disk and database."""
+    """Delete a clip and its snapshot from disk and database (cleans empty day folders, v3.5.0)."""
     clean_id = clip_id.replace(".mp4", "")
+    from app.recorder import remove_clip
     ok = await remove_clip(clean_id)
-    # Also clean up disk files if leftover
-    for p in [settings.CLIPS_DIR / f"{clean_id}.mp4", settings.SNAPSHOTS_DIR / f"{clean_id}.jpg"]:
-        if p.exists():
-            try:
-                p.unlink()
-            except Exception:
-                pass
     return {"status": "deleted", "clip_id": clean_id}
 
 
@@ -2007,7 +2028,7 @@ async def activity_zone_preview(top_pct: int = Query(20, ge=0, le=80)):
 
 class StorageSettingsModel(BaseModel):
     retention_days: int = 30
-    max_storage_gb: float = 10.0
+    max_storage_gb: float = 50.0
 
 
 class StorageStatsResponse(BaseModel):
@@ -2023,7 +2044,7 @@ class StorageStatsResponse(BaseModel):
 async def get_storage_settings_endpoint():
     """Return storage disk usage, clip count, and configured retention days."""
     retention_days = int(await get_setting("retention_days", "30"))
-    max_storage_gb = float(await get_setting("max_storage_gb", "10.0"))
+    max_storage_gb = float(await get_setting("max_storage_gb", "50.0"))
     stats = get_storage_stats(max_storage_gb)
     stats["retention_days"] = retention_days
     return StorageStatsResponse(**stats)

@@ -1,6 +1,6 @@
-# Foxway Smart Doorbell Architectuur (v3.4.1)
+# Foxway Smart Doorbell Architectuur (v3.5.0)
 
-Dit document beschrijft de technische opzet en datastromen van versie 3.4.1.
+Dit document beschrijft de technische opzet en datastromen van versie 3.5.0.
 
 > **HARDWARE SPECIFICATIE:** De EZVIZ DB1 Pro (`192.168.2.31`) heeft **GEEN** Poort 80 (HTTP / ISAPI / ONVIF). Er wordt NOOIT naar Poort 80 verbonden. Alle camera-interacties verlopen strikt via Poort 554 (RTSP) en Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`).
 
@@ -20,34 +20,38 @@ flowchart TD
     subgraph Server ["Foxway Server (192.168.2.1)"]
         RTSP["go2rtc (Poort 8554/1984)"]
         SDK["Hikvision C-SDK (Poort 8000 Motion 0x4000 & Tweeweg-Audio)"]
-        Shazam["3-Layer Shazam Chime Detector (728Hz / 570Hz, NCC >= 0.72)"]
-        NetSniff["Host-Level ARP Cloud-Sniffer (network_sniffer.py, UDP 6404)"]
+        Shazam["3-Layer Shazam Chime Detector (728Hz / 570Hz, NCC >= 0.70)"]
+        NetSniff["Host-Level Cloud-Sniffer (network_sniffer.py, TCP 8820)"]
+        Coordinator["Dual Ring-Coördinator (ring_coordinator.py, 3.5s Venster)"]
         RingBuffer["RAM Ring-Buffer (/dev/shm/deurbel_ring - Unix TS seg_%s.ts)"]
+        Storage["Dag-Mappen (/mnt/opslag/deurbel/clips/YYYY-MM-DD/ - 50 GB)"]
         BlackBox["Centrale Black-Box Logging (/mnt/opslag/deurbel/logs/YYYY-MM-DD.jsonl)"]
         
         subgraph Backend ["FastAPI Backend (Docker :8090)"]
-            Router["FastAPI Router"]
+            Router["FastAPI Router (Paginering & SQL-Filtering)"]
             LivePlayer["Zero-UI Live Player (<0.3s edge-sync, instant poster)"]
-            StateEngine["Call State Machine & Trigger Source Tagger (NETWORK_SNIFF / SHAZAM)"]
+            StateEngine["Call State Machine (ms 0 ring trigger)"]
             AI["Temporal AI Detector (YOLOv8n + Stationary Car Memory + 0.22 Conf + Fallback)"]
-            SDKListener["SDK Alarm Listener & Auto-Reconnect Supervisor"]
+            Admin["Web Admin Dashboard (/admin - Dual Status & Snapshot Inspector)"]
         end
     end
 
-    subgraph Client ["Android App (v3.4.1, versionCode 31)"]
+    subgraph Client ["Android App (v3.5.0, versionCode 32)"]
         LiveView["Live Kijken (2-State Mute Knop)"]
         CallView["Aanbelscherm (Tweeweg Audio)"]
-        ClipsView["Opnames & Clips (Badges: SHAZAM, NETWORK_SNIFF)"]
+        ClipsView["Arlo-Stijl Timeline (Download, Ster, Verwijder, Badge: 🔔 Aangebeld)"]
         WSClient["WebSocket Foreground Service & NetworkCallback Auto-Reconnect"]
         StatusReporter["Status-Dump Reporter"]
     end
 
-    CamBtn -->|Poort 8000 C-SDK| SDKListener
+    CamBtn -->|EZVIZ Cloud Burst TCP 8820| NetSniff
     CamMic -->|RTSP Audio| Shazam
-    Shazam -->|NCC >= 0.82| StateEngine
-    SDKListener -->|Alarm Packet| StateEngine
-    SDKListener --> BlackBox
-    Shazam --> BlackBox
+    Shazam -->|Signaal 1: ms 0| Coordinator
+    NetSniff -->|Signaal 2: ms 0| Coordinator
+    Coordinator -->|Direct ms 0 Trigger| StateEngine
+    Coordinator -->|Verificatie & Mismatch Logs| BlackBox
+    Coordinator -->|Status & Geschiedenis| Admin
+    StateEngine -->|Dag-Map Video & Thumb| Storage
     Backend --> BlackBox
     StatusReporter -->|POST /api/v1/logs/client| BlackBox
 ```
