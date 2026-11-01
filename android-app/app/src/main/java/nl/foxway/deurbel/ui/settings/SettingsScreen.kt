@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -787,22 +788,6 @@ fun SettingsScreen(
                 ) {
                     Text("Systeem & Diagnose", fontWeight = FontWeight.Bold, color = TextPrimary)
 
-                    // 📋 Prominente Logboek Knop direct bovenaan
-                    Button(
-                        onClick = { showLogsDialog = true },
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = CyanAccent.copy(alpha = 0.15f),
-                            contentColor = CyanAccent
-                        ),
-                        border = BorderStroke(1.dp, CyanAccent),
-                        modifier = Modifier.fillMaxWidth().height(48.dp)
-                    ) {
-                        Icon(imageVector = Icons.Default.Info, contentDescription = null, tint = CyanAccent)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("📋 Bekijk Systeemlogboek (30 dagen)", color = CyanAccent, fontWeight = FontWeight.Bold)
-                    }
-
                     // 1. Android Permissies & Betrouwbaarheid status
                     val allPermsOk = permState.allGranted
                     Surface(
@@ -1491,13 +1476,13 @@ private fun LogViewerDialog(
 
                 // Category Filter Chips
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     FilterChip(
                         selected = selectedCategory == null,
                         onClick = { selectedCategory = null },
-                        label = { Text("Alles") },
+                        label = { Text("Alles", maxLines = 1, softWrap = false) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = EmeraldPrimary,
                             selectedLabelColor = BackgroundDark
@@ -1506,7 +1491,7 @@ private fun LogViewerDialog(
                     FilterChip(
                         selected = selectedCategory == LogCategory.CALL,
                         onClick = { selectedCategory = if (selectedCategory == LogCategory.CALL) null else LogCategory.CALL },
-                        label = { Text("Oproepen") },
+                        label = { Text("Oproepen", maxLines = 1, softWrap = false) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = LanGreen,
                             selectedLabelColor = BackgroundDark
@@ -1515,7 +1500,7 @@ private fun LogViewerDialog(
                     FilterChip(
                         selected = selectedCategory == LogCategory.NETWORK,
                         onClick = { selectedCategory = if (selectedCategory == LogCategory.NETWORK) null else LogCategory.NETWORK },
-                        label = { Text("Netwerk") },
+                        label = { Text("Netwerk", maxLines = 1, softWrap = false) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = CyanAccent,
                             selectedLabelColor = BackgroundDark
@@ -1524,7 +1509,7 @@ private fun LogViewerDialog(
                     FilterChip(
                         selected = selectedCategory == LogCategory.ERROR,
                         onClick = { selectedCategory = if (selectedCategory == LogCategory.ERROR) null else LogCategory.ERROR },
-                        label = { Text("Errors") },
+                        label = { Text("Errors", maxLines = 1, softWrap = false) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = CoralDecline,
                             selectedLabelColor = Color.White

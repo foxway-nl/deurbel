@@ -141,17 +141,17 @@ async def fetch_snapshot(call_id: str) -> str:
 # ──────────────────────────────────────────────────────────────────────
 
 # ──────────────────────────────────────────────────────────────────────
-#  Continuous 2-Second RAM Ring Buffer (/dev/shm/deurbel_ring)
+#  Continuous 1-Second RAM Ring Buffer (/dev/shm/deurbel_preroll)
 # ──────────────────────────────────────────────────────────────────────
 
-RING_BUFFER_DIR = Path("/dev/shm/deurbel_ring")
+RING_BUFFER_DIR = Path("/dev/shm/deurbel_preroll")
 
 
 class RamRingBuffer:
     """
-    Continuous 2-second RAM ring-buffer in /dev/shm/deurbel_ring.
+    Continuous 1-second RAM ring-buffer in /dev/shm/deurbel_preroll.
     Ingests RTSP with Unix-timestamped segments (seg_%s.ts) without -segment_wrap corruption.
-    Background cleaner purges segments older than 45 seconds every 5 seconds.
+    Background cleaner purges segments older than 60 seconds every 5 seconds.
     """
 
     def __init__(self, ring_dir: Optional[Path] = None):
@@ -166,6 +166,13 @@ class RamRingBuffer:
             return
         self._running = True
         self.ring_dir.mkdir(parents=True, exist_ok=True)
+        # Backward compatibility symlink for /dev/shm/deurbel_ring
+        legacy_dir = Path("/dev/shm/deurbel_ring")
+        if not legacy_dir.exists():
+            try:
+                legacy_dir.symlink_to(self.ring_dir, target_is_directory=True)
+            except Exception:
+                pass
         self._task = asyncio.create_task(self._supervise_loop())
         self._cleaner_task = asyncio.create_task(self._cleaner_loop())
         logger.info("RAM Ring Buffer supervisor and cleaner started (%s)", self.ring_dir)
@@ -189,23 +196,29 @@ class RamRingBuffer:
 
     def get_available_segments(self) -> list[tuple[float, Path]]:
         """Return list of existing completed .ts segments sorted chronologically by epoch timestamp."""
-        if not self.ring_dir.exists():
-            return []
+        dirs_to_check = [self.ring_dir]
+        legacy_dir = Path("/dev/shm/deurbel_ring")
+        if legacy_dir.exists() and not legacy_dir.is_symlink():
+            dirs_to_check.append(legacy_dir)
+
         segs = []
-        for p in self.ring_dir.glob("seg_*.ts"):
-            try:
-                st = p.stat()
-                if st.st_size > 1000:
-                    stem = p.stem.replace("seg_", "")
-                    epoch = float(stem) if stem.isdigit() else st.st_mtime
-                    segs.append((epoch, p))
-            except Exception:
-                pass
+        seen_stems = set()
+        for d in dirs_to_check:
+            for p in d.glob("seg_*.ts"):
+                try:
+                    st = p.stat()
+                    if st.st_size > 1000 and p.stem not in seen_stems:
+                        seen_stems.add(p.stem)
+                        stem = p.stem.replace("seg_", "")
+                        epoch = float(stem) if stem.isdigit() else st.st_mtime
+                        segs.append((epoch, p))
+                except Exception:
+                    pass
         segs.sort(key=lambda x: x[0])
         return segs
 
     async def _cleaner_loop(self) -> None:
-        """Purges TS segments older than 45 seconds from RAM to prevent memory bloat."""
+        """Purges TS segments older than 60 seconds from RAM to prevent memory bloat."""
         while self._running:
             try:
                 await asyncio.sleep(5.0)
@@ -215,7 +228,7 @@ class RamRingBuffer:
                         st = p.stat()
                         stem = p.stem.replace("seg_", "")
                         epoch = float(stem) if stem.isdigit() else st.st_mtime
-                        if (now - epoch) > 45.0 or (now - st.st_mtime) > 45.0:
+                        if (now - epoch) > 60.0 or (now - st.st_mtime) > 60.0:
                             p.unlink(missing_ok=True)
                     except Exception:
                         pass
@@ -235,7 +248,7 @@ class RamRingBuffer:
                 "-c:v", "copy",
                 "-c:a", "aac",
                 "-f", "segment",
-                "-segment_time", "2",
+                "-segment_time", "1",
                 "-strftime", "1",
                 str(self.ring_dir / "seg_%s.ts"),
             ]
@@ -265,11 +278,28 @@ _active_recording_info: dict = {
     "category": "motion",
     "label": "Beweging",
     "extend_until": 0.0,
+    "last_motion_timestamp": 0.0,
 }
 
 def is_recording_active() -> bool:
     """Return True if a smart clip recording is currently underway."""
     return recording_lock.locked()
+
+def notify_ongoing_motion(category: Optional[str] = None, label: Optional[str] = None) -> bool:
+    """
+    Signaled by AI detector (on active verified motion) or Port 8000 SDK (0x4000).
+    Updates last_motion_timestamp so the active recording keeps rolling until post_roll_seconds
+    after motion completely stops.
+    """
+    if not _active_recording_info.get("clip_id") and not recording_lock.locked():
+        return False
+    now = time.time()
+    _active_recording_info["last_motion_timestamp"] = now
+    if category == "person":
+        _active_recording_info["category"] = "person"
+        if label:
+            _active_recording_info["label"] = label
+    return True
 
 def extend_active_recording(category: str, label: str, duration_sec: float = 30.0) -> bool:
     """
@@ -279,6 +309,7 @@ def extend_active_recording(category: str, label: str, duration_sec: float = 30.
     if not recording_lock.locked():
         return False
     now = time.time()
+    _active_recording_info["last_motion_timestamp"] = now
     _active_recording_info["extend_until"] = max(
         _active_recording_info.get("extend_until", 0.0),
         now + duration_sec
@@ -298,21 +329,21 @@ async def record_smart_clip(
     preroll_seconds: float = 20.0,
     postroll_seconds: float = 20.0,
     motion_active_func: Optional[Callable[[], bool]] = None,
-    max_duration: float = 30.0,
+    max_duration: float = 180.0,
     t0: Optional[float] = None,
 ) -> float:
     """
-    Dynamic Clip-Opbouw (v2.5.0):
-      1. Grabs exact segments prior to T0 within [T0 - preroll_seconds, T0] (e.g. 10x 2s = 20s pre-roll).
-      2. Appends incoming 2s segments as long as motion continues (extensible via extend_active_recording).
-      3. Appends exact postroll_seconds segments (e.g. 10x 2s = 20s post-roll) after motion stops.
-      4. Validates strict chronological continuity (discards segments prior to any >4s time gap).
-      5. Stitches with -fflags +genpts -avoid_negative_ts make_zero in native 4:3 (768x576) +faststart.
+    Dynamic Keep-Recording-While-Motion Clip-Opbouw (v3.5.2):
+      1. Grabs exact 1s segments prior to T0 within [T0 - preroll_seconds, T0] (e.g. 20s pre-roll).
+      2. Appends incoming segments continuously as long as motion continues (via notify_ongoing_motion or motion_active_func).
+      3. Continues recording until postroll_seconds after motion has completely stopped (safety cap: max_duration, default 180s).
+      4. Stitches segments via fast stream-copy (-c copy), with automatic fallback to ultrafast transcode if needed.
     """
     if t0 is None:
         t0 = time.time()
 
     _active_recording_info["clip_id"] = clip_id
+    _active_recording_info["last_motion_timestamp"] = time.time()
 
     # Save immediate clean snapshot from live_hub frame if not already present
     try:
@@ -338,7 +369,7 @@ async def record_smart_clip(
         available = ring_buffer.get_available_segments()
         completed = available[:-1] if len(available) > 1 else available
 
-        target_preroll_count = max(1, int(round(preroll_seconds / 2.0)))
+        target_preroll_count = max(1, int(round(preroll_seconds)))
         preroll_segs = [s for s in completed if (t0 - preroll_seconds - 2.5) <= s[0] <= (t0 + 1.0)]
         if len(preroll_segs) > target_preroll_count:
             preroll_segs = preroll_segs[-target_preroll_count:]
@@ -351,41 +382,43 @@ async def record_smart_clip(
                 raw_collected_segments.append((epoch, seg_path))
 
         logger.info(
-            "Smart clip %s pre-roll captured: %d segments (%.1fs) for T0=%.2f",
-            clip_id, len(raw_collected_segments), len(raw_collected_segments) * 2.0, t0,
+            "Smart clip %s pre-roll captured: %d segments (%.1fs) for T0=%.2f (target=%.1fs)",
+            clip_id, len(raw_collected_segments), float(len(raw_collected_segments)), t0, preroll_seconds,
         )
 
-        # 2. Active motion collection (capped at max_duration or extended deadline)
+        # 2. Dynamic Motion Collection: Keep recording WHILE motion lasts + postroll_seconds
         motion_start = time.time()
+        _active_recording_info["last_motion_timestamp"] = motion_start
+
         while True:
             now = time.time()
-            current_deadline = max(motion_start + max_duration, _active_recording_info.get("extend_until", 0.0))
-            if now >= current_deadline:
-                break
-
-            await asyncio.sleep(1.8)
-
-            current_segs = ring_buffer.get_available_segments()
-            completed_now = current_segs[:-1] if len(current_segs) > 1 else current_segs
-
-            for epoch, seg_path in completed_now:
-                if seg_path not in seen_paths:
-                    seen_paths.add(seg_path)
-                    raw_collected_segments.append((epoch, seg_path))
-
+            # Check if active motion was detected by AI detector / Port 8000
             is_motion = motion_active_func() if motion_active_func else False
-            # Check if active motion stopped and not extended
-            if not is_motion and now >= _active_recording_info.get("extend_until", 0.0):
+            if is_motion:
+                _active_recording_info["last_motion_timestamp"] = now
+
+            last_motion = _active_recording_info.get("last_motion_timestamp", motion_start)
+            time_since_motion = now - last_motion
+
+            # Stop when motion has ceased for at least postroll_seconds
+            if time_since_motion >= postroll_seconds and now >= _active_recording_info.get("extend_until", 0.0):
+                logger.info(
+                    "Smart clip %s motion ended (silent for %.1fs >= postroll %.1fs). Finalizing recording.",
+                    clip_id, time_since_motion, postroll_seconds,
+                )
                 break
 
-        # 3. Post-Roll collection: exactly postroll_seconds worth of segments
-        target_postroll_count = max(1, int(round(postroll_seconds / 2.0)))
-        postroll_start = time.time()
-        postroll_segs_collected = 0
+            # Safety cap (default 180s)
+            if (now - motion_start) >= max_duration:
+                logger.warning(
+                    "Smart clip %s reached safety max_duration (%.1fs). Finalizing clip to prevent infinite recording.",
+                    clip_id, max_duration,
+                )
+                break
 
-        while (time.time() - postroll_start) < (postroll_seconds + 3.0) and postroll_segs_collected < target_postroll_count:
-            await asyncio.sleep(1.8)
+            await asyncio.sleep(1.0)
 
+            # Ingest newly completed segments
             current_segs = ring_buffer.get_available_segments()
             completed_now = current_segs[:-1] if len(current_segs) > 1 else current_segs
 
@@ -393,7 +426,6 @@ async def record_smart_clip(
                 if seg_path not in seen_paths:
                     seen_paths.add(seg_path)
                     raw_collected_segments.append((epoch, seg_path))
-                    postroll_segs_collected += 1
 
         if not raw_collected_segments:
             logger.warning("No segments collected for smart clip %s, falling back to direct record", clip_id)
@@ -402,7 +434,7 @@ async def record_smart_clip(
                 "ffmpeg", "-y",
                 "-rtsp_transport", "tcp",
                 "-i", "rtsp://127.0.0.1:8554/deurbel",
-                "-t", "20",
+                "-t", str(int(postroll_seconds)),
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
                 "-crf", "26",
@@ -420,14 +452,13 @@ async def record_smart_clip(
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
-                await asyncio.wait_for(proc.communicate(), timeout=30.0)
+                await asyncio.wait_for(proc.communicate(), timeout=40.0)
             except Exception as e:
                 logger.error("Direct record fallback failed for %s: %s", clip_id, e)
             dur = await _probe_duration(clip_path)
             return dur if dur > 0 else 15.0
 
-        # 4. Strict Chronological Sorting & Gap-Sanitization
-        # Discard segments prior to any time-gap > 4.0s to ensure video NEVER jumps backward in time!
+        # 3. Strict Chronological Sorting & Gap-Sanitization
         raw_collected_segments.sort(key=lambda s: s[0])
         continuous_segments: list[tuple[float, Path]] = []
 
@@ -458,50 +489,76 @@ async def record_smart_clip(
             logger.warning("No valid continuous segments copied for %s", clip_id)
             return 0.0
 
-        # 5. Concatenate and transcode to standard H.264 yuv420p 4:3 (1280x960 15fps) + faststart
+        # 4. Concatenate and assemble MP4: try fast stream-copy first (0% CPU, 10x faster)
         concat_list = work_dir / "concat_list.txt"
         with open(concat_list, "w") as f:
             for seg in copied_files:
                 f.write(f"file '{seg.resolve()}'\n")
 
-        cmd = [
+        cmd_copy = [
             "nice", "-n", "15",
             "ffmpeg", "-y",
-            "-fflags", "+genpts",
-            "-avoid_negative_ts", "make_zero",
             "-f", "concat",
             "-safe", "0",
             "-i", str(concat_list),
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "26",
-            "-vf", "scale=1280:960,setsar=1:1",
-            "-r", "15",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "64k",
-            "-af", "aresample=async=1000",
+            "-c", "copy",
             "-movflags", "+faststart",
             clip_path,
         ]
 
+        copy_success = False
         try:
             proc = await asyncio.create_subprocess_exec(
-                *cmd,
+                *cmd_copy,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await asyncio.wait_for(proc.communicate(), timeout=30.0)
+            if os.path.exists(clip_path) and os.path.getsize(clip_path) > 10000:
+                copy_success = True
         except Exception as e:
-            logger.warning("Concat FFmpeg error or timeout for %s: %s", clip_id, e)
+            logger.debug("Fast copy concat failed or timed out for %s: %s (falling back to transcode)", clip_id, e)
+
+        # Fallback to ultrafast transcode if copy failed or was too small
+        if not copy_success:
+            cmd_transcode = [
+                "nice", "-n", "15",
+                "ffmpeg", "-y",
+                "-fflags", "+genpts",
+                "-avoid_negative_ts", "make_zero",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(concat_list),
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "26",
+                "-vf", "scale=1280:960,setsar=1:1",
+                "-r", "15",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "64k",
+                "-af", "aresample=async=1000",
+                "-movflags", "+faststart",
+                clip_path,
+            ]
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd_transcode,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(proc.communicate(), timeout=35.0)
+            except Exception as e:
+                logger.warning("Concat FFmpeg error or timeout for %s: %s", clip_id, e)
 
         dur = await _probe_duration(clip_path)
-        return dur if dur > 0 else (len(copied_files) * 2.0)
+        return dur if dur > 0 else float(len(copied_files))
 
     finally:
         if _active_recording_info.get("clip_id") == clip_id:
             _active_recording_info["clip_id"] = None
             _active_recording_info["extend_until"] = 0.0
+            _active_recording_info["last_motion_timestamp"] = 0.0
         shutil.rmtree(work_dir, ignore_errors=True)
 
 

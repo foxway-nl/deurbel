@@ -323,6 +323,12 @@ class NetworkSniffer:
             has_syn = any(p["is_syn"] for p in group_pkts)
             is_p2p = (proto == "UDP" and dst_port in (6404, 8555, 8666, 8883))
 
+            first_payload_hex = ""
+            for p in group_pkts:
+                if p.get("payload_hex"):
+                    first_payload_hex = p.get("payload_hex")[:48]
+                    break
+
             burst_dict = {
                 "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                 "dst_ip": dst_ip,
@@ -334,6 +340,7 @@ class NetworkSniffer:
                 "is_new_tcp_syn": has_syn,
                 "is_p2p_burst": is_p2p,
                 "signature_matched": False,
+                "payload_hex": first_payload_hex,
             }
 
             # Check if this matches known doorbell ring signature (Shadow Evaluation only)

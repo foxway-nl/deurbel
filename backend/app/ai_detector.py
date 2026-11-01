@@ -236,10 +236,16 @@ class SmartDetector:
         """Signaled by Port 8000 SDK Alarm (0x4000 dwAlarmType == 3) to trigger 4 FPS High-Speed Scan Burst."""
         self._last_hardware_motion_time = time.time()
         logger.debug("Port 8000 hardware motion received -> High-Speed Scan Burst (4 FPS / 0.25s) active for 8s")
+        try:
+            from app.recorder import notify_ongoing_motion
+            notify_ongoing_motion(category="motion", label="Beweging")
+        except Exception:
+            pass
 
     def is_motion_active(self) -> bool:
-        """Check if verified object motion was detected within the last 2.5 seconds."""
-        return (time.time() - self._last_verified_object_seen) < 2.5
+        """Check if verified object motion or camera hardware motion was detected within the last 3.0 seconds."""
+        now = time.time()
+        return (now - self._last_verified_object_seen) < 3.0 or (now - self._last_hardware_motion_time) < 3.0
 
     def init_model(self) -> bool:
         """Initialize official Ultralytics YOLOv8n model and Roboflow Supervision components."""
@@ -1076,6 +1082,12 @@ class SmartDetector:
                     self._last_verified_object_seen = now
                     to_remove.append(tid)
 
+                    try:
+                        from app.recorder import notify_ongoing_motion
+                        notify_ongoing_motion(category=track.category, label=track.label)
+                    except Exception:
+                        pass
+
                     logger.info(
                         "Gatekeeper APPROVED [%s]: %s (conf=%.2f, Delta d=%.1f%%, ratio=%.2f)",
                         tid, track.label, track.best_conf, verified_disp_pct, max_pixel_ratio
@@ -1358,7 +1370,7 @@ class SmartDetector:
             sys_settings = await get_system_settings()
             preroll = float(sys_settings.get("pre_roll_seconds", "20"))
             postroll = float(sys_settings.get("post_roll_seconds", "20"))
-            max_duration = float(sys_settings.get("max_active_motion_seconds", sys_settings.get("max_clip_seconds", "30")))
+            max_duration = float(sys_settings.get("max_active_motion_seconds", sys_settings.get("max_clip_seconds", "180")))
 
             # Single recording lock check (TAAK 2.2):
             if is_recording_active():
@@ -1369,6 +1381,7 @@ class SmartDetector:
 
             async with recording_lock:
                 duration = 0.0
+                safety_timeout = max(60.0, max_duration + 45.0)
                 try:
                     duration = await asyncio.wait_for(
                         record_smart_clip(
@@ -1379,16 +1392,19 @@ class SmartDetector:
                             motion_active_func=self.is_motion_active,
                             max_duration=max_duration,
                         ),
-                        timeout=32.0,
+                        timeout=safety_timeout,
                     )
                 except asyncio.TimeoutError:
-                    logger.warning("Recording timeout (32s) for clip %s", clip_id)
+                    logger.warning("Recording reached max safety timeout (%.1fs) for clip %s", safety_timeout, clip_id)
                 except Exception as re:
                     logger.error("Error during record_smart_clip for %s: %s", clip_id, re)
 
-                if not clean_snapshot_path:
-                    clean_snapshot_path = str(settings.CLIPS_DIR / f"thumb_{clip_id}.jpg")
-                snapshot_path = await ensure_thumbnail(clip_id, clip_path, preroll_seconds=preroll)
+                if clean_snapshot_path and os.path.exists(clean_snapshot_path) and os.path.getsize(clean_snapshot_path) > 1000:
+                    snapshot_path = clean_snapshot_path
+                else:
+                    if not clean_snapshot_path:
+                        clean_snapshot_path = str(settings.CLIPS_DIR / f"thumb_{clip_id}.jpg")
+                    snapshot_path = await ensure_thumbnail(clip_id, clip_path, preroll_seconds=preroll)
 
                 file_size = os.path.getsize(clip_path) if os.path.exists(clip_path) else 0
 

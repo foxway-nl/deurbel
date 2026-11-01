@@ -7,8 +7,8 @@ Welkom in het Foxway Smart Doorbell project. Lees deze regels zorgvuldig voordat
 ## 🚨 HARDE ANTI-REGRESSIE REGELS
 
 1. **NOOIT OUDE SPECS GEBRUIKEN:**
-   - De codebase bevindt zich op versie **v3.5.1** (`versionCode = 34`).
-   - Oude documenten over v1.0 / v2.0 / v2.3 / v2.4 / v2.5 / v2.6 / v2.8 / v2.9 / v3.0 / v3.1.2 / v3.1.4 / v3.2.0 / v3.3.0 / v3.3.1 / v3.4.0 / v3.4.1 / v3.5.0 mogen nooit leidend zijn.
+   - De codebase bevindt zich op versie **v3.5.2** (`versionCode = 35`).
+   - Oude documenten over v1.0 / v2.0 / v2.3 / v2.4 / v2.5 / v2.6 / v2.8 / v2.9 / v3.0 / v3.1.2 / v3.1.4 / v3.2.0 / v3.3.0 / v3.3.1 / v3.4.0 / v3.4.1 / v3.5.0 / v3.5.1 mogen nooit leidend zijn.
 
 2. **VERPLICHTE AGENT START- & EIND-ROUTINE:**
    - **START:** Elke agent draait ALTIJD eerst `python3 /mnt/opslag/deurbel/scripts/triage.py` om de huidige status en eventuele errors te controleren.

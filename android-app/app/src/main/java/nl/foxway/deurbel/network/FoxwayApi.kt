@@ -200,7 +200,7 @@ interface FoxwayApi {
 
     @POST("/api/v1/logs/client")
     suspend fun postClientStatusDump(
-        @Body body: Map<String, Any>
+        @Body body: @JvmSuppressWildcards Map<String, Any>
     ): Response<Map<String, Any>>
 
     // ── Admin Auto-Login Token ────────────────────────────────────────

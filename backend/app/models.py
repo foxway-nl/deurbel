@@ -888,21 +888,79 @@ async def get_unlocked_clips_oldest_first() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+# ── System & App Settings Synchronization (v3.5.2) ───────────────────
+
+SETTING_ALIASES = {
+    "detection_enabled": "smart_ai_enabled",
+    "smart_ai_enabled": "detection_enabled",
+    "conf_person": "person_conf_threshold",
+    "person_conf_threshold": "conf_person",
+    "conf_vehicle": "vehicle_conf_threshold",
+    "vehicle_conf_threshold": "conf_vehicle",
+    "conf_animal": "animal_conf_threshold",
+    "animal_conf_threshold": "conf_animal",
+    "min_displacement_person": "min_person_displacement_pct",
+    "min_person_displacement_pct": "min_displacement_person",
+    "min_displacement_vehicle": "min_vehicle_displacement_pct",
+    "min_vehicle_displacement_pct": "min_displacement_vehicle",
+    "cooldown_seconds": "event_cooldown_seconds",
+    "event_cooldown_seconds": "cooldown_seconds",
+}
+
+
 async def get_setting(key: str, default: str = "") -> str:
-    """Retrieve an application setting by key."""
+    """Retrieve setting from system_settings (source of truth) with app_settings fallback."""
+    alias = SETTING_ALIASES.get(key)
     async with get_db(write=False) as db:
-        cursor = await db.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
+        if alias:
+            cursor = await db.execute(
+                "SELECT value FROM system_settings WHERE key IN (?, ?) ORDER BY CASE WHEN key = ? THEN 0 ELSE 1 END LIMIT 1",
+                (key, alias, key),
+            )
+        else:
+            cursor = await db.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
         row = await cursor.fetchone()
-        return row[0] if row else default
+        if row and row[0] is not None:
+            return str(row[0])
+
+        if alias:
+            cursor = await db.execute(
+                "SELECT value FROM app_settings WHERE key IN (?, ?) ORDER BY CASE WHEN key = ? THEN 0 ELSE 1 END LIMIT 1",
+                (key, alias, key),
+            )
+        else:
+            cursor = await db.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
+        row = await cursor.fetchone()
+        return str(row[0]) if (row and row[0] is not None) else default
 
 
 async def set_setting(key: str, value: str) -> None:
-    """Save or update an application setting."""
+    """Save setting to system_settings (source of truth) and mirror to app_settings."""
+    val_str = str(value)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    alias = SETTING_ALIASES.get(key)
+    keys_to_write = [key]
+    if alias and alias not in keys_to_write:
+        keys_to_write.append(alias)
+
     async with get_db(write=True) as db:
-        await db.execute(
-            "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )
+        for k in keys_to_write:
+            await db.execute(
+                """
+                INSERT INTO system_settings (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (k, val_str, now_iso),
+            )
+            await db.execute(
+                """
+                INSERT INTO app_settings (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (k, val_str),
+            )
 
 
 async def save_event(
@@ -993,58 +1051,104 @@ async def set_dynamic_wan_url(url: str) -> None:
 # ── System Settings (Task 1 & Task 3) ────────────────────────────────
 
 async def get_system_settings() -> dict[str, str]:
-    """Return all system settings as a dictionary."""
+    """Return all system settings as a dictionary, unified with app_settings and aliases."""
     async with get_db(write=False) as db:
         cursor = await db.execute("SELECT key, value FROM system_settings")
         rows = await cursor.fetchall()
-        return {r[0]: r[1] for r in rows}
+        res = {r[0]: r[1] for r in rows}
+
+        # Merge app_settings for any keys not yet present in system_settings
+        cursor_app = await db.execute("SELECT key, value FROM app_settings")
+        app_rows = await cursor_app.fetchall()
+        for k, v in app_rows:
+            if k not in res:
+                res[k] = v
+
+        # Populate canonical aliases
+        if "smart_ai_enabled" in res and "detection_enabled" not in res:
+            res["detection_enabled"] = res["smart_ai_enabled"]
+        elif "detection_enabled" in res and "smart_ai_enabled" not in res:
+            res["smart_ai_enabled"] = res["detection_enabled"]
+
+        for k, alias in SETTING_ALIASES.items():
+            if k in res and alias not in res:
+                res[alias] = res[k]
+
+        return res
 
 
 async def get_system_setting(key: str, default: str = "") -> str:
-    """Get a single system setting value by key."""
-    async with get_db(write=False) as db:
-        cursor = await db.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
-        row = await cursor.fetchone()
-        return row[0] if row else default
+    """Get a single system setting value by key (checks aliases)."""
+    return await get_setting(key, default)
 
 
 async def set_system_setting(key: str, value: str, description: str = "") -> None:
-    """Update or insert a system setting."""
+    """Update or insert a system setting and mirror to app_settings."""
     now_iso = datetime.now(timezone.utc).isoformat()
+    val_str = str(value)
+    alias = SETTING_ALIASES.get(key)
+    keys_to_write = [key]
+    if alias and alias not in keys_to_write:
+        keys_to_write.append(alias)
+
     async with get_db(write=True) as db:
-        if description:
+        for k in keys_to_write:
+            if description and k == key:
+                await db.execute(
+                    """
+                    INSERT INTO system_settings (key, value, description, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, description = excluded.description, updated_at = excluded.updated_at
+                    """,
+                    (k, val_str, description, now_iso),
+                )
+            else:
+                await db.execute(
+                    """
+                    INSERT INTO system_settings (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (k, val_str, now_iso),
+                )
             await db.execute(
                 """
-                INSERT INTO system_settings (key, value, description, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value, description = excluded.description, updated_at = excluded.updated_at
+                INSERT INTO app_settings (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """,
-                (key, value, description, now_iso),
-            )
-        else:
-            await db.execute(
-                """
-                INSERT INTO system_settings (key, value, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-                """,
-                (key, value, now_iso),
+                (k, val_str),
             )
 
 
 async def update_system_settings(updates: dict[str, str]) -> None:
-    """Batch update multiple system settings."""
+    """Batch update multiple system settings and mirror to app_settings."""
     now_iso = datetime.now(timezone.utc).isoformat()
     async with get_db(write=True) as db:
         for k, v in updates.items():
-            await db.execute(
-                """
-                INSERT INTO system_settings (key, value, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-                """,
-                (k, str(v), now_iso),
-            )
+            val_str = str(v)
+            alias = SETTING_ALIASES.get(k)
+            keys_to_write = [k]
+            if alias and alias not in keys_to_write:
+                keys_to_write.append(alias)
+
+            for target_k in keys_to_write:
+                await db.execute(
+                    """
+                    INSERT INTO system_settings (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (target_k, val_str, now_iso),
+                )
+                await db.execute(
+                    """
+                    INSERT INTO app_settings (key, value)
+                    VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (target_k, val_str),
+                )
 
 
 # ── AI Audit Logs (Task 1 & Task 3) ──────────────────────────────────

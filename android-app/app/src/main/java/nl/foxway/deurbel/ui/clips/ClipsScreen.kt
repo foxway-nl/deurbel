@@ -458,8 +458,9 @@ fun ClipsScreen(
                                                 .background(SurfaceVariantDark, CircleShape)
                                                 .padding(horizontal = 8.dp, vertical = 2.dp)
                                         ) {
+                                            val countText = if (dateHeader.startsWith("Vandaag") && totalCount > 0) "$totalCount" else "${clipList.size}"
                                             Text(
-                                                text = "${clipList.size}",
+                                                text = countText,
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = TextSecondary
                                             )

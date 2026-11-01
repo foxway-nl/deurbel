@@ -804,13 +804,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "3.5.1",
-        "version_code": 34,
-        "build_time": "2026-11-01T18:50:00Z",
+        "version": "3.5.2",
+        "version_code": 35,
+        "build_time": "2026-11-01T20:00:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.5.1: Passieve Hex-Learner Sniffer (Shadow Mode), Arlo-Feed UI, Stuck-Recording Auto-Sweeper, Fallback Thumbnail Generator, Live Audio Herstel en Module Guard beveiliging.",
+        "changelog": "v3.5.2: Dynamische bewegingsopnames (20s pre-roll + keep-recording + post-roll), 100% 2-weg instellingen-sync (/admin & app), /admin live player & inspector thumbnails, en Android Wi-Fi/5G anti-flapping herstel.",
     }
 
 
@@ -1522,7 +1522,7 @@ async def proxy_go2rtc_asset(asset_name: str):
 
 @app.get("/api/v1/live/player", response_class=HTMLResponse)
 @app.get("/live/player", response_class=HTMLResponse)
-async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(False)):
+async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(True)):
     """
     Clean Zero-UI fullscreen 4:3 HTML5 player for native go2rtc hardware streaming (MSE + WebRTC).
     Zero controls, object-fit fill, <0.3s live-edge lag sync, audio mute toggle, killStream & setVideoZoom.

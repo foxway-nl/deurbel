@@ -47,11 +47,14 @@ class ConnectionManager private constructor(private val context: Context) {
     val isWanMode: StateFlow<Boolean> = _isWanMode.asStateFlow()
 
     private val pingClient = OkHttpClient.Builder()
-        .connectTimeout(300, TimeUnit.MILLISECONDS)
-        .readTimeout(300, TimeUnit.MILLISECONDS)
-        .callTimeout(400, TimeUnit.MILLISECONDS)
+        .connectTimeout(1500, TimeUnit.MILLISECONDS)
+        .readTimeout(1500, TimeUnit.MILLISECONDS)
+        .callTimeout(2000, TimeUnit.MILLISECONDS)
         .retryOnConnectionFailure(false)
         .build()
+
+    private var failedLanPings = 0
+    private var lastCapabilitiesChangeTime = 0L
 
     init {
         // Load initial URLs from preferences
@@ -86,7 +89,12 @@ class ConnectionManager private constructor(private val context: Context) {
                 }
 
                 override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-                    Log.d(TAG, "Network capabilities changed, refreshing route")
+                    val now = System.currentTimeMillis()
+                    if (now - lastCapabilitiesChangeTime < 3000L) {
+                        return
+                    }
+                    lastCapabilitiesChangeTime = now
+                    Log.d(TAG, "Network capabilities changed (debounced), refreshing route")
                     refreshRoute()
                 }
             })
@@ -164,13 +172,37 @@ class ConnectionManager private constructor(private val context: Context) {
 
     private suspend fun pingLanHost(lanBaseUrl: String): Boolean = withContext(Dispatchers.IO) {
         val url = "$lanBaseUrl/api/v1/status"
-        try {
-            val req = Request.Builder().url(url).get().build()
-            pingClient.newCall(req).execute().use { response ->
-                response.isSuccessful
+        fun singlePing(): Boolean {
+            return try {
+                val req = Request.Builder().url(url).get().build()
+                pingClient.newCall(req).execute().use { response ->
+                    response.isSuccessful
+                }
+            } catch (e: Exception) {
+                false
             }
-        } catch (e: Exception) {
-            false
+        }
+
+        var ok = singlePing()
+        if (!ok && !_isWanMode.value) {
+            // Already in LAN mode: retry once after 200ms to ignore momentary Wi-Fi jitter
+            try {
+                Thread.sleep(200)
+            } catch (e: Exception) {}
+            ok = singlePing()
+        }
+
+        if (ok) {
+            failedLanPings = 0
+            true
+        } else {
+            failedLanPings++
+            // If currently connected via LAN, require 3 consecutive failed pings before dropping to WAN
+            if (!_isWanMode.value && failedLanPings < 3) {
+                true
+            } else {
+                false
+            }
         }
     }
 

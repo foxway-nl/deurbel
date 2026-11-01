@@ -151,11 +151,11 @@ class LiveStreamController private constructor(private val context: Context) {
                 if (isRunning.get() && _isConnected.value) {
                     val last = _lastNewFrameMs.value
                     val now = System.currentTimeMillis()
-                    if (last > 0L && (now - last) > 2500L) {
+                    if (last > 0L && (now - last) > 10000L) {
                         if (!_isFrozen.value) {
                             _isFrozen.value = true
-                            Log.w(TAG, "Live stream freeze detected (>2.5s without fresh frame). Auto-healing...")
-                            restartStream(forceServerRestart = true)
+                            Log.w(TAG, "Live stream freeze detected (>10s without fresh frame). Reconnecting stream...")
+                            restartStream(forceServerRestart = false)
                         }
                     }
                 }

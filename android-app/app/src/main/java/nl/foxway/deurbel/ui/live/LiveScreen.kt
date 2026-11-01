@@ -96,7 +96,7 @@ fun LiveScreen() {
             currentSystemTimeMs = System.currentTimeMillis()
         }
     }
-    val isActuallyFrozen = isFrozen || (lastNewFrameMs > 0L && (currentSystemTimeMs - lastNewFrameMs) > 2000L)
+    val isActuallyFrozen = isFrozen || (lastNewFrameMs > 0L && (currentSystemTimeMs - lastNewFrameMs) > 6000L)
 
     val audioStreamer = remember { DoorbellAudioStreamer() }
 

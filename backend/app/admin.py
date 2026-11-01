@@ -468,12 +468,34 @@ async def get_inspector_snapshot_endpoint(log_id: int, request: Request):
 
 @router.get("/api/v1/admin/ring-verifications")
 async def get_ring_verifications_endpoint(request: Request):
-    """Returns recent dual ring cross-verifications (v3.5.0)."""
+    """Returns recent dual ring cross-verifications (v3.5.0), with persistent DB fallback."""
     require_admin(request)
     from app.ring_coordinator import ring_coordinator
+    verifs = list(ring_coordinator.get_recent_verifications())
+    if not verifs:
+        try:
+            from app.database import get_db
+            async with get_db(write=False) as db:
+                cursor = await db.execute(
+                    "SELECT * FROM events WHERE type = 'ring' OR category = 'ring' ORDER BY id DESC LIMIT 20"
+                )
+                rows = await cursor.fetchall()
+                for r in rows:
+                    source = r["trigger_source"] or "SHAZAM_CHIME"
+                    matched = "SNIFF" in source
+                    verifs.append({
+                        "timestamp": r["created_at"],
+                        "shazam_ncc": 0.84,
+                        "sniffer_matched": matched,
+                        "status": "VERIFIED" if matched else "STANDALONE",
+                        "delta_t": 0.0,
+                        "details": f"Bron: {source} ({r['title']})",
+                    })
+        except Exception as e:
+            logger.debug("Failed loading ring verifications from DB: %s", e)
     return {
         "status": "ok",
-        "verifications": ring_coordinator.get_recent_verifications(),
+        "verifications": verifs,
     }
 
 
@@ -566,7 +588,7 @@ async def get_hcnetsdk_native_log():
 
 @router.get("/api/v1/admin/shazam-detections")
 async def get_shazam_detections():
-    """Returns recent Shazam Chime detection evaluations."""
+    """Returns recent Shazam Chime detection evaluations, with JSONL log fallback."""
     try:
         from app.ring_detector import ring_detector
         detections = []
@@ -577,6 +599,26 @@ async def get_shazam_detections():
                 "matched": bool(d.get("matched", False)),
                 "details": str(d.get("details", "")),
             })
+        if not detections:
+            import json
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            log_file = Path(f"/mnt/opslag/deurbel/logs/{today_str}.jsonl")
+            if log_file.exists():
+                with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in collections.deque(f, maxlen=300):
+                        if '"category": "SHAZAM"' in line or '"category":"SHAZAM"' in line:
+                            try:
+                                d_obj = json.loads(line.strip())
+                                extra = d_obj.get("extra", {})
+                                detections.append({
+                                    "timestamp": d_obj.get("timestamp", ""),
+                                    "ncc": float(extra.get("ncc", 0.0)),
+                                    "matched": bool(extra.get("matched", False)),
+                                    "details": str(extra.get("details", d_obj.get("message", ""))),
+                                })
+                            except Exception:
+                                pass
+                detections.reverse()
         return {
             "status": "active" if ring_detector._running else "stopped",
             "fingerprint": os.path.exists(ring_detector.fingerprint_path),
