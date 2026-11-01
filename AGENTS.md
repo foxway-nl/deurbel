@@ -7,24 +7,34 @@ Welkom in het Foxway Smart Doorbell project. Lees deze regels zorgvuldig voordat
 ## 🚨 HARDE ANTI-REGRESSIE REGELS
 
 1. **NOOIT OUDE SPECS GEBRUIKEN:**
-   - De codebase bevindt zich op versie **v3.5.0** (`versionCode = 32`).
-   - Oude documenten over v1.0 / v2.0 / v2.3 / v2.4 / v2.5 / v2.6 / v2.8 / v2.9 / v3.0 / v3.1.2 / v3.1.4 / v3.2.0 / v3.3.0 / v3.3.1 / v3.4.0 / v3.4.1 mogen nooit leidend zijn.
+   - De codebase bevindt zich op versie **v3.5.1** (`versionCode = 34`).
+   - Oude documenten over v1.0 / v2.0 / v2.3 / v2.4 / v2.5 / v2.6 / v2.8 / v2.9 / v3.0 / v3.1.2 / v3.1.4 / v3.2.0 / v3.3.0 / v3.3.1 / v3.4.0 / v3.4.1 / v3.5.0 mogen nooit leidend zijn.
 
-2. **STRIKTE COMMANDO-TIMEOUT (NOOIT MEER LANG WACHTEN):**
+2. **VERPLICHTE AGENT START- & EIND-ROUTINE:**
+   - **START:** Elke agent draait ALTIJD eerst `python3 /mnt/opslag/deurbel/scripts/triage.py` om de huidige status en eventuele errors te controleren.
+   - **EIND:** Elke agent sluit ALTIJD af met `python3 /mnt/opslag/deurbel/scripts/module_guard.py --verify`. Zorg dat alle 5 smoke checks én hash checks slagen!
+
+3. **STRIKTE COMMANDO-TIMEOUT (NOOIT MEER LANG WACHTEN):**
    - Draai `pytest`, Gradle builds of Docker-taken **NOOIT** zonder harde timeout! Gebruik altijd `timeout 90s pytest ...` en `timeout 300s ./gradlew ...`.
    - Als een test of container langer dan 90 seconden hangt, kap je het proces direct af, los je de blokkade op en ga je door.
    - Test **incrementeel per aangepast onderdeel** (`pytest tests/test_specifiek.py`), NIET blind alles in één hangende sessie!
 
-3. **ZERO-REGRESSION WET ("NIKS KAPOTMAKEN WAT AL WERKT"):**
+4. **ZERO-REGRESSION WET ("NIKS KAPOTMAKEN WAT AL WERKT"):**
    - De **AI-detectie van Mensen, Voertuigen én Dieren** werkt uitstekend! **RAAK DE AI-DETECTIE DREMPELS EN LOGICA IN `ai_detector.py` NIET AAN!**
-   - De **Aanbel-detectie in de backend** werkt uitstekend! **MAAK DE AANBEL-TRIGGERS IN DE BACKEND NIET KAPOT!**
-   - Wanneer je één bug oplost, controleer je direct of omliggende functionaliteit nog heel is.
+   - De **Aanbel-detectie via Shazam Audio-Chime** werkt uitstekend! Alleen `SHAZAM_CHIME` (en testknop) mag de telefoon laten rinkelen.
+   - **FROZEN MODULES (VERGRENDELD IN `.locked_hashes.json`):** `ai_detector.py`, `ring_detector.py`, `audio_bridge.py`, `WebSocketForegroundService.kt`, `CallActivity.kt`. Wijzig deze NOOIT zonder expliciete reden en `--unlock-module`.
 
-4. **BESCHERMDE KERN-COMPONENTEN & HARDWARE-FEITEN (NIET AANRAKEN):**
-   - **Dual Aanbel-Coördinator & Wederzijdse Foutcontrole (`backend/app/ring_coordinator.py`, `network_sniffer.py`, `ring_detector.py`):** Drukknop-detectie vuurt op milliseconde 0 direct af bij het eerste signaal (Shazam Audio-Chime óf EZVIZ Cloud Netwerk-Sniffer). Een achtergrondvenster van 3.5s verifieert het tweede signaal: synchroon vuren logt `[RING VERIFIED]`; ontbreekt één van beide dan logt het systeem direct `[RING MISMATCH ERROR]`. Sniffer negeert geïsoleerde 191B keepalives op TCP 8820 en detecteert Patroon A (payload 195-400B) en Patroon B (>=3 pkts 191B binnen 1s).
+5. **BESCHERMDE KERN-COMPONENTEN & HARDWARE-FEITEN (NIET AANRAKEN):**
+   - **Aanbel-Triggering & Passieve Sniffer Shadow-Mode (`backend/app/network_sniffer.py`, `ring_coordinator.py`, `ring_detector.py`):**
+     * De telefoon rinkelt **UITSLUITEND** bij `SHAZAM_CHIME` (728 Hz / 570 Hz audio-chime) of de handmatige testknop. De netwerk-sniffer triggert NOOIT zelfstandig `CALL_RINGING`.
+     * De netwerk-sniffer draait als **Differential Byte Learner (Shadow Mode)**: vergelijkt payloads met `background_noise_hashes` en logt kandidaten naar `sniffer_learning.jsonl`.
+     * Als Shazam afgaat en de sniffer ziet binnen 3.5s niets, wordt een `WARNING` gelogd (`[RING MISMATCH WARNING]`), GEEN error.
+   - **Stuck Recording Sweeper & Thumbnail Fallback (`recorder.py`, `main.py`):**
+     * Achtergrond-sweeper controleert elke 15s (en bij elke `/api/v1/clips` call) op clips die >40s in `RECORDING` hangen en zet ze op `READY` (indien >10KB) of ruimt ze op.
+     * Thumbnail endpoint `/api/v1/clips/{id}/thumbnail` retourneert ALTIJD HTTP 200 (genereert desnoods een 1x1 black fallback JPEG, nooit 404).
+   - **Arlo-Stijl Opnames Feed UI (`ClipsScreen.kt`):** Compacte 96dp kaarten met 136dp 4:3 miniatuur links (inclusief play-icoon en duur-badge) en rechts categorie-badge, tijdstip, HD-resolutie, bestandsgrootte en 3 actieknoppen (Download, Ster/Favoriet, Verwijderen). Automatische polling zolang een opname bezig is.
    - **Dag-Mappen (`/clips/YYYY-MM-DD/`) & 50.0 GB Opslaglimiet (`recorder.py`, `main.py`):** Alle nieuwe opnames en miniaturen worden opgeslagen in dag-mappen (`resolve_clip_path` zoekt in dag-mappen, root en snapshots). Bij verwijderen worden lege mappen opgeruimd. APK blijft in root `/clips/foxway-deurbel.apk`. Opslaglimiet staat standaard op 50.0 GB (51200 MB).
    - **Server-Side Paginering & Filtering (`models.py`, `main.py`, `ClipsScreen.kt`):** `GET /api/v1/clips?category=...&date=...&offset=...&limit=...` filtert in SQL vóór limit/offset. Android app gebruikt oneindige scroll met 40 items per pagina.
-   - **Arlo-Stijl Opnames UI (`ClipsScreen.kt`):** Klikbare thumbnail met Play-icoon en duur-badge fungeert als afspeelknop. Behoudt Download-, Ster (vastzetten)- en Verwijder-knoppen. Technische tags zijn vervangen door een strakke `🔔 Aangebeld` badge in de app.
    - **Hardware-Feiten EZVIZ DB1 Pro (192.168.2.31):** Poort 80 (HTTP / ISAPI / ONVIF) is **NIET BESCHIKBAAR**! Verbind **NOOIT** met poort 80 of `/ISAPI/...`. De enige open poorten zijn **Poort 554 (RTSP)** en **Poort 8000 (Hikvision C-SDK `libhcnetsdk.so`)**.
    - **Hardware Drukknop-Detectie, Shazam Chime & Host-Level Cloud Packet Sniffer (`backend/app/network_sniffer.py`, `ring_detector.py`, `sdk_alarm_listener.py`):** EZVIZ blokkeert hardware intercom event `0x1132` op Poort 8000. Drukknop-detectie is daarom dubbel gewaarborgd: (1) **Real-Time 3-Layer Shazam Deurbel-Chime Detector** (`ring_detector.py`, 728 Hz / 570 Hz dual-tone akoestische correlatie NCC $\ge 0.72$, 12s cooldown); (2) **Host-Level Actieve ARP/EZVIZ Cloud Sniffer** (`network_sniffer.py`): stuurt gerichte ARP-reply elke 2.0s naar `192.168.2.31` via host `192.168.2.1` (`eno1`) met fail-safe atexit/signal gateway restore (3x ARP reply naar router MAC `00:f8:cc:d0:9e:00`), aggregeert uitgaande WAN-pakketten in 1000ms vensters en triggert `trigger_source = "NETWORK_SNIFF"` (of `"SHAZAM + SNIFF"` binnen 2.5s van chime). C-SDK Poort 8000 vangt hardware beweging `0x4000 dwAlarmType == 3` op en verzorgt tweeweg-audio.
    - **AI-Detectie 10/10 EZVIZ-Niveau & Smart Motion Fallback (`backend/app/ai_detector.py`):** Bij camera hardware beweging (`0x4000`) wordt de YOLOv8 detectie-drempel verlaagd naar `0.22` voor 10 seconden en 4 FPS scan-burst geactiveerd. Indien YOLO geen objecten detecteert, activeert een slimme contour motion-fallback (`area >= 1.5%`, verplaatsing $\ge 2\%$ over 3 frames) buiten stilstaande geparkeerde voertuigen (`stationary_vehicles`) en boomkruinen (`y < 0.22*h` en `x > 0.60*w, y < 0.35*h`).

@@ -6,6 +6,12 @@ import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import android.widget.Toast
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -155,12 +161,16 @@ fun ClipsScreen(
         else -> "all"
     }
 
-    // Load clips from backend with server-side filtering & pagination (v3.5.0)
+    var cacheBuster by remember { mutableStateOf(System.currentTimeMillis()) }
+
+    // Load clips from backend with server-side filtering, pagination & cache-busting (v3.5.1)
     val loadClips: (Boolean) -> Unit = { isRefresh ->
         coroutineScope.launch {
             if (isRefresh) {
                 isLoading = true
                 currentOffset = 0
+                cacheBuster = System.currentTimeMillis()
+                clips = emptyList()
             } else {
                 if (isFetchingMore || !hasMore) return@launch
                 isFetchingMore = true
@@ -175,7 +185,8 @@ fun ClipsScreen(
                     date = selectedDateYmd,
                     limit = 40,
                     offset = targetOffset,
-                    paged = true
+                    paged = true,
+                    timestamp = cacheBuster
                 )
                 if (resp.isSuccessful && resp.body() != null) {
                     val body = resp.body()!!
@@ -202,6 +213,36 @@ fun ClipsScreen(
 
     LaunchedEffect(selectedCategory, selectedDateYmd) {
         loadClips(true)
+    }
+
+    // Auto-polling (4s) as long as any visible clip has status RECORDING
+    val hasRecordingClips by remember(clips) {
+        derivedStateOf { clips.any { it.isRecording || it.status == "RECORDING" } }
+    }
+
+    LaunchedEffect(hasRecordingClips) {
+        while (hasRecordingClips) {
+            delay(4000)
+            try {
+                val currentBase = connectionManager.getEffectiveBaseUrl()
+                val api = ApiClientFactory.createApi(currentBase)
+                val countToFetch = maxOf(40, clips.size)
+                val resp = api.getClips(
+                    category = toBackendCategory(selectedCategory),
+                    date = selectedDateYmd,
+                    limit = countToFetch,
+                    offset = 0,
+                    paged = true,
+                    timestamp = System.currentTimeMillis()
+                )
+                if (resp.isSuccessful && resp.body() != null) {
+                    val updatedItems = resp.body()!!.clips
+                    cacheBuster = System.currentTimeMillis()
+                    val updateMap = updatedItems.associateBy { it.id }
+                    clips = clips.map { old -> updateMap[old.id] ?: old }.sortedByDescending { it.timestamp }
+                }
+            } catch (_: Exception) {}
+        }
     }
 
     val deleteClip: (String) -> Unit = { clipId ->
@@ -290,7 +331,15 @@ fun ClipsScreen(
                         )
                     }
                     IconButton(onClick = { loadClips(true) }) {
-                        Icon(imageVector = Icons.Default.Refresh, contentDescription = "Vernieuwen", tint = TextPrimary)
+                        if (isLoading) {
+                            CircularProgressIndicator(
+                                color = EmeraldPrimary,
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(imageVector = Icons.Default.Refresh, contentDescription = "Vernieuwen", tint = TextPrimary)
+                        }
                     }
                 }
             )
@@ -384,7 +433,7 @@ fun ClipsScreen(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(bottom = 24.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         groupedClips.forEach { (dateHeader, clipList) ->
                             item(key = "header_$dateHeader") {
@@ -424,6 +473,7 @@ fun ClipsScreen(
                                     ClipCard(
                                         clip = clip,
                                         baseUrl = baseUrl,
+                                        cacheBuster = cacheBuster,
                                         onPlay = { selectedClip = clip },
                                         onDelete = { deleteClip(clip.id) },
                                         onToggleStar = { toggleStar(clip.id, clip.starred) }
@@ -599,6 +649,7 @@ private fun formatFileSize(sizeBytes: Long): String {
 private fun ClipCard(
     clip: ClipItem,
     baseUrl: String,
+    cacheBuster: Long = 0L,
     onPlay: () -> Unit,
     onDelete: () -> Unit,
     onToggleStar: () -> Unit
@@ -607,53 +658,105 @@ private fun ClipCard(
     val fullSnapshotUrl = if (clip.snapshotUrl.isNotBlank()) {
         if (clip.snapshotUrl.startsWith("http")) clip.snapshotUrl else "$baseUrl${clip.snapshotUrl}"
     } else ""
-    val videoStreamUrl = if (clip.videoUrl.startsWith("http")) clip.videoUrl else "$baseUrl${clip.videoUrl}"
 
-    Card(
-        colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-        shape = RoundedCornerShape(16.dp),
+    val (categoryTitle, categoryColor) = when {
+        !clip.answeredBy.isNullOrBlank() && (clip.answeredBy.contains("SHAZAM") || clip.answeredBy.contains("SNIFF") || clip.answeredBy.contains("Aanbel") || clip.answeredBy.contains("ring")) || clip.category == "ring" -> {
+            "🔔 Aangebeld" to Color(0xFFF59E0B)
+        }
+        clip.category == "person" || (!clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("Persoon")) -> {
+            "🚶 Persoon" to Color(0xFF3B82F6)
+        }
+        clip.category == "vehicle" || (!clip.answeredBy.isNullOrBlank() && (clip.answeredBy.contains("Voertuig") || clip.answeredBy.contains("Auto"))) -> {
+            "🚗 Voertuig" to Color(0xFF10B981)
+        }
+        clip.category == "animal" || (!clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("Dier")) -> {
+            "🐾 Dier" to Color(0xFF8B5CF6)
+        }
+        else -> {
+            "🔔 Aangebeld" to Color(0xFFF59E0B)
+        }
+    }
+
+    val isClipRecording = clip.isRecording || clip.status == "RECORDING"
+
+    val infiniteTransition = rememberInfiniteTransition(label = "recording_pulse")
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.45f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse_alpha"
+    )
+
+    Surface(
+        color = Color(0xFF141923),
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF232B3A)),
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, DividerDark, RoundedCornerShape(16.dp))
+            .height(96.dp)
+            .clickable { onPlay() }
     ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            // Links (136.dp breed x 96.dp hoog)
+            Box(
+                modifier = Modifier
+                    .width(136.dp)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp))
+                    .background(Color(0xFF0F172A))
+                    .clickable { onPlay() },
+                contentAlignment = Alignment.Center
             ) {
-                // Snapshot Thumbnail with Play Icon & Duration Badge
+                if (fullSnapshotUrl.isNotBlank()) {
+                    val modelUrl = if (cacheBuster > 0L) {
+                        if (fullSnapshotUrl.contains("?")) "$fullSnapshotUrl&t=$cacheBuster" else "$fullSnapshotUrl?t=$cacheBuster"
+                    } else fullSnapshotUrl
+                    AsyncImage(
+                        model = modelUrl,
+                        contentDescription = "Clip thumbnail",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                // Play-icoon midden
                 Box(
                     modifier = Modifier
-                        .size(width = 104.dp, height = 78.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(SurfaceVariantDark)
-                        .clickable { onPlay() }
+                        .size(32.dp)
+                        .background(Color.Black.copy(alpha = 0.60f), CircleShape),
+                    contentAlignment = Alignment.Center
                 ) {
-                    if (fullSnapshotUrl.isNotBlank()) {
-                        AsyncImage(
-                            model = fullSnapshotUrl,
-                            contentDescription = "Clip thumbnail",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Afspelen",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                // Duur-badge pill
+                if (isClipRecording) {
                     Box(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.25f)),
-                        contentAlignment = Alignment.Center
+                            .align(Alignment.BottomEnd)
+                            .padding(4.dp)
+                            .background(Color(0xFFEF4444).copy(alpha = pulseAlpha), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 5.dp, vertical = 2.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.PlayCircle,
-                            contentDescription = "Afspelen",
-                            tint = Color.White.copy(alpha = 0.9f),
-                            modifier = Modifier.size(32.dp)
+                        Text(
+                            text = "● OPNEMEN",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
                         )
                     }
+                } else {
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
@@ -662,129 +765,108 @@ private fun ClipCard(
                             .padding(horizontal = 4.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = if (clip.isRecording) "🔴 Nu aan het opnemen..." else formatDuration(clip.duration),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (clip.isRecording) Color(0xFFEF4444) else TextPrimary
-                        )
-                    }
-                }
-
-                // Info column
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
-                    // Exact time & file size row
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = formatExactTime(clip.timestamp),
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                            color = TextPrimary
-                        )
-                        val sizeText = formatFileSize(clip.sizeBytes)
-                        if (sizeText.isNotBlank()) {
-                            Text(
-                                text = sizeText,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextSecondary
-                            )
-                        }
-                    }
-
-                    // Detection category badge (Clean Arlo-style labels)
-                    val (badgeIcon, statusText, badgeColor) = when {
-                        !clip.answeredBy.isNullOrBlank() && (clip.answeredBy.contains("SHAZAM") || clip.answeredBy.contains("SNIFF") || clip.answeredBy.contains("Aanbel") || clip.answeredBy.contains("ring")) -> {
-                            Triple("🔔", "Aangebeld", AmberWarning)
-                        }
-                        !clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("Handmatige") -> {
-                            Triple("🎥", clip.answeredBy, CoralDecline)
-                        }
-                        !clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("Persoon") -> {
-                            Triple("🚶", "Persoon gedetecteerd", EmeraldPrimary)
-                        }
-                        !clip.answeredBy.isNullOrBlank() && (clip.answeredBy.contains("Voertuig") || clip.answeredBy.contains("Auto")) -> {
-                            Triple("🚗", "Voertuig gedetecteerd", CyanAccent)
-                        }
-                        !clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("Dier") -> {
-                            Triple("🐾", "Dier gedetecteerd", AmberWarning)
-                        }
-                        !clip.answeredBy.isNullOrBlank() && clip.answeredBy.startsWith("AI:") -> {
-                            Triple("🤖", clip.answeredBy.replace("AI:", "").trim(), CyanAccent)
-                        }
-                        !clip.answeredBy.isNullOrBlank() && (clip.answeredBy.contains("pakketje") || clip.answeredBy.contains("quick") || clip.answeredBy.contains("antwoord")) -> {
-                            Triple("💬", "Snel antwoord gestuurd", CyanAccent)
-                        }
-                        !clip.answeredBy.isNullOrBlank() -> {
-                            Triple("🔔", "Beantwoord door ${clip.answeredBy}", LanGreen)
-                        }
-                        else -> {
-                            Triple("🔔", "Aangebeld", AmberWarning)
-                        }
-                    }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text(
-                            text = "$badgeIcon $statusText",
-                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
-                            color = badgeColor
+                            text = formatDuration(clip.duration),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color.White
                         )
                     }
                 }
             }
 
-            HorizontalDivider(color = DividerDark.copy(alpha = 0.5f))
-
-            // Action Buttons: Downloaden, Star (Lock), Verwijderen (Arlo-style)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            // Rechts (flexibel / weight 1)
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.SpaceBetween
             ) {
-                // 1. Downloaden
-                TextButton(
-                    onClick = {
-                        val filename = "foxway_${clip.id}.mp4"
-                        val fileDownloadUrl = "$baseUrl/api/v1/clips/${clip.id}/file"
-                        downloadClip(context, fileDownloadUrl, filename)
-                    },
-                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
+                // Bovenste rij: Categorie pill + Tijd
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(imageVector = Icons.Default.Download, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Downloaden", color = CyanAccent, style = MaterialTheme.typography.labelMedium)
+                    Surface(
+                        color = categoryColor.copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, categoryColor.copy(alpha = 0.35f))
+                    ) {
+                        Text(
+                            text = categoryTitle,
+                            color = categoryColor,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                    }
+
+                    Text(
+                        text = formatExactTime(clip.timestamp),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
                 }
 
+                // Middelste rij: Resolutie / formaat
+                val sizeText = formatFileSize(clip.sizeBytes)
+                val infoText = if (sizeText.isNotBlank()) "HD • $sizeText" else "HD"
+                Text(
+                    text = infoText,
+                    fontSize = 12.sp,
+                    color = Color(0xFF94A3B8)
+                )
+
+                // Onderste rij: 3 compacte 34.dp knoppen (rechts uitgelijnd)
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 2. Star / Lock Toggle (⭐)
+                    // Downloaden (34.dp)
+                    IconButton(
+                        onClick = {
+                            val filename = "foxway_${clip.id}.mp4"
+                            val fileDownloadUrl = "$baseUrl/api/v1/clips/${clip.id}/file"
+                            downloadClip(context, fileDownloadUrl, filename)
+                        },
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = "Downloaden",
+                            tint = Color(0xFF38BDF8),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    // Ster / Lock (34.dp)
                     IconButton(
                         onClick = onToggleStar,
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(34.dp)
                     ) {
                         Icon(
                             imageVector = if (clip.starred) Icons.Default.Star else Icons.Default.StarBorder,
                             contentDescription = if (clip.starred) "Vastgezet" else "Vastzetten",
-                            tint = if (clip.starred) Color(0xFFF59E0B) else TextSecondary,
-                            modifier = Modifier.size(20.dp)
+                            tint = if (clip.starred) Color(0xFFF59E0B) else Color(0xFF94A3B8),
+                            modifier = Modifier.size(18.dp)
                         )
                     }
 
-                    // 3. Verwijderen
+                    // Verwijderen (34.dp)
                     var showDeleteConfirm by remember { mutableStateOf(false) }
                     IconButton(
                         onClick = { showDeleteConfirm = true },
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(34.dp)
                     ) {
-                        Icon(imageVector = Icons.Default.DeleteOutline, contentDescription = "Verwijderen", tint = CoralDecline, modifier = Modifier.size(20.dp))
+                        Icon(
+                            imageVector = Icons.Default.DeleteOutline,
+                            contentDescription = "Verwijderen",
+                            tint = Color(0xFFEF4444),
+                            modifier = Modifier.size(18.dp)
+                        )
                     }
 
                     if (showDeleteConfirm) {
@@ -797,7 +879,7 @@ private fun ClipCard(
                                     showDeleteConfirm = false
                                     onDelete()
                                 }) {
-                                    Text("Verwijderen", color = CoralDecline, fontWeight = FontWeight.Bold)
+                                    Text("Verwijderen", color = Color(0xFFEF4444), fontWeight = FontWeight.Bold)
                                 }
                             },
                             dismissButton = {

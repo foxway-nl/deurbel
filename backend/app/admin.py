@@ -322,6 +322,7 @@ async def get_admin_system_status(request: Request):
         "gateway_ip": network_sniffer.gateway_ip,
         "recent_bursts_count": len(network_sniffer.recent_bursts),
         "signature": network_sniffer.known_signature,
+        "learner": network_sniffer.get_learner_status(),
     }
 
     from app.ring_coordinator import ring_coordinator
@@ -624,5 +625,17 @@ async def update_network_signature(request: Request):
         "message": "Cloud netwerk handtekening succesvol bijgewerkt",
         "signature": network_sniffer.known_signature,
     }
+
+
+@router.get("/api/v1/admin/sniffer-learner")
+async def get_sniffer_learner(request: Request):
+    """Returns the differential byte learner metrics and recent candidate hex payloads (v3.5.1)."""
+    require_admin(request)
+    from app.network_sniffer import network_sniffer
+    return {
+        "status": "ok",
+        "learner": network_sniffer.get_learner_status(),
+    }
+
 
 

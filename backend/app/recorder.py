@@ -397,7 +397,32 @@ async def record_smart_clip(
 
         if not raw_collected_segments:
             logger.warning("No segments collected for smart clip %s, falling back to direct record", clip_id)
-            await _record(clip_id, clip_path)
+            direct_cmd = [
+                "nice", "-n", "15",
+                "ffmpeg", "-y",
+                "-rtsp_transport", "tcp",
+                "-i", "rtsp://127.0.0.1:8554/deurbel",
+                "-t", "20",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "26",
+                "-vf", "scale=1280:960,setsar=1:1",
+                "-r", "15",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "64k",
+                "-movflags", "+faststart",
+                clip_path,
+            ]
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *direct_cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(proc.communicate(), timeout=30.0)
+            except Exception as e:
+                logger.error("Direct record fallback failed for %s: %s", clip_id, e)
             dur = await _probe_duration(clip_path)
             return dur if dur > 0 else 15.0
 
@@ -433,7 +458,7 @@ async def record_smart_clip(
             logger.warning("No valid continuous segments copied for %s", clip_id)
             return 0.0
 
-        # 5. Concatenate and transcode to standard H.264 yuv420p 4:3 (768x576) + faststart
+        # 5. Concatenate and transcode to standard H.264 yuv420p 4:3 (1280x960 15fps) + faststart
         concat_list = work_dir / "concat_list.txt"
         with open(concat_list, "w") as f:
             for seg in copied_files:
@@ -448,9 +473,10 @@ async def record_smart_clip(
             "-safe", "0",
             "-i", str(concat_list),
             "-c:v", "libx264",
-            "-preset", "veryfast",
+            "-preset", "ultrafast",
             "-crf", "26",
-            "-vf", "scale=768:576,setsar=1:1",
+            "-vf", "scale=1280:960,setsar=1:1",
+            "-r", "15",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-b:a", "64k",
@@ -459,12 +485,15 @@ async def record_smart_clip(
             clip_path,
         ]
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.communicate()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=30.0)
+        except Exception as e:
+            logger.warning("Concat FFmpeg error or timeout for %s: %s", clip_id, e)
 
         dur = await _probe_duration(clip_path)
         return dur if dur > 0 else (len(copied_files) * 2.0)
@@ -657,6 +686,10 @@ async def ensure_thumbnail(clip_id: str, video_path: Optional[str] = None, prero
     resolved_snap = resolve_clip_path(f"{clip_id}.jpg", ext=".jpg")
     if resolved_snap and resolved_snap.stat().st_size > 1000:
         return str(resolved_snap)
+
+    resolved_debug = resolve_clip_path(f"{clip_id}_debug.jpg", ext=".jpg")
+    if resolved_debug and resolved_debug.stat().st_size > 1000:
+        return str(resolved_debug)
 
     # 2. Try live_hub frame if available
     day_dir = get_day_clip_dir()
@@ -1303,4 +1336,69 @@ async def cleanup_expired_clips() -> int:
     """Legacy helper for periodic retention cleanup."""
     stats = await cleanup_storage_and_retention(settings.CLIP_RETENTION_DAYS, 50.0)
     return stats.get("removed_count", 0)
+
+
+async def sweep_stuck_recordings(max_age_seconds: float = 40.0) -> int:
+    """
+    Sweeper that finalizes or cleans up recordings stuck in 'RECORDING' state older than max_age_seconds (v3.5.1).
+    - If .mp4 file exists and size > 10 KB: updates status to READY, probes duration, ensures thumbnail.
+    - If .mp4 file is missing, empty, or <= 10 KB: deletes the row from database.
+    Returns the number of clips repaired or purged.
+    """
+    fixed_count = 0
+    try:
+        from app.database import get_db
+        async with get_db(write=False) as db:
+            cursor = await db.execute(
+                "SELECT clip_id, video_path, created_at, snapshot_path, category, answered_by "
+                "FROM clips WHERE status = 'RECORDING'"
+            )
+            rows = await cursor.fetchall()
+
+        if not rows:
+            return 0
+
+        now_t = time.time()
+        for row in rows:
+            clip_id = row["clip_id"]
+            created_at_str = row["created_at"]
+            age_sec = 0.0
+            try:
+                dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                age_sec = (datetime.now(timezone.utc) - dt).total_seconds()
+            except Exception:
+                age_sec = max_age_seconds + 1.0
+
+            if age_sec < max_age_seconds:
+                continue
+
+            # Found a stuck recording older than max_age_seconds
+            vpath = row["video_path"]
+            resolved_v = resolve_clip_path(vpath or clip_id, ext=".mp4")
+
+            if resolved_v and resolved_v.exists() and resolved_v.stat().st_size > 10000:
+                size_bytes = resolved_v.stat().st_size
+                dur = await _probe_duration(str(resolved_v))
+                if dur <= 0:
+                    dur = 15.0
+                thumb = await ensure_thumbnail(clip_id, str(resolved_v))
+                await update_clip(
+                    clip_id=clip_id,
+                    status="READY",
+                    duration=dur,
+                    file_size=size_bytes,
+                    video_path=str(resolved_v),
+                    snapshot_path=thumb or row["snapshot_path"],
+                )
+                logger.info("🧹 [Sweeper] Repaired stuck recording %s -> READY (age=%.1fs, dur=%.1fs, size=%d)",
+                            clip_id, age_sec, dur, size_bytes)
+                fixed_count += 1
+            else:
+                await db_delete_clip(clip_id)
+                logger.info("🧹 [Sweeper] Purged incomplete/empty stuck recording %s (age=%.1fs)", clip_id, age_sec)
+                fixed_count += 1
+    except Exception as e:
+        logger.debug("Error running sweep_stuck_recordings: %s", e)
+    return fixed_count
+
 

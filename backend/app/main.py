@@ -124,6 +124,7 @@ call_sm = CallStateMachine()
 
 _cleanup_task: Optional[asyncio.Task] = None
 _health_task: Optional[asyncio.Task] = None
+_sweeper_task: Optional[asyncio.Task] = None
 _doorbell_online = True
 _doorbell_last_seen = time.time()
 
@@ -138,6 +139,18 @@ async def _periodic_cleanup() -> None:
         except Exception:
             logger.exception("Storage cleanup error")
         await asyncio.sleep(4 * 3600)
+
+
+async def _stuck_recording_sweeper_loop() -> None:
+    """Run stuck recording sweeper every 15 seconds to ensure clips finalize to READY or get purged (v3.5.1)."""
+    while True:
+        try:
+            from app.recorder import sweep_stuck_recordings
+            await sweep_stuck_recordings(max_age_seconds=40.0)
+        except Exception:
+            logger.debug("Error in stuck recording sweeper loop")
+        await asyncio.sleep(15.0)
+
 
 
 def _check_tcp_port(ip: str, port: int, timeout: float = 1.5) -> bool:
@@ -289,7 +302,7 @@ async def _on_stop_recording(task: asyncio.Task) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle hooks."""
-    global _cleanup_task, _health_task
+    global _cleanup_task, _health_task, _sweeper_task
 
     # Startup
     logger.info("🚀 Foxway Doorbell Backend starting on port %d", settings.HOST_PORT)
@@ -311,9 +324,10 @@ async def lifespan(app: FastAPI):
     call_sm.on_start_recording = _on_start_recording
     call_sm.on_stop_recording = _on_stop_recording
 
-    # Start periodic storage cleanup & camera health monitor
+    # Start periodic storage cleanup, camera health monitor & stuck recording sweeper
     _cleanup_task = asyncio.create_task(_periodic_cleanup())
     _health_task = asyncio.create_task(_doorbell_health_monitor())
+    _sweeper_task = asyncio.create_task(_stuck_recording_sweeper_loop())
 
     # Start low-CPU Smart AI detector
     try:
@@ -363,6 +377,8 @@ async def lifespan(app: FastAPI):
         _cleanup_task.cancel()
     if _health_task:
         _health_task.cancel()
+    if _sweeper_task:
+        _sweeper_task.cancel()
     try:
         await live_hub.stop()
     except Exception:
@@ -788,13 +804,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "3.5.0",
-        "version_code": 32,
-        "build_time": "2026-11-01T00:00:00Z",
+        "version": "3.5.1",
+        "version_code": 34,
+        "build_time": "2026-11-01T18:50:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.5.0: Dual Aanbel-Coördinator (Shazam Audio-Chime + EZVIZ Cloud Sniffer TCP 8820 met cross-verificatie), dag-mappen (/clips/YYYY-MM-DD/), 50 GB opslaglimiet, server-side filtering & paginering, Arlo-stijl UI en admin inspecteur fixes.",
+        "changelog": "v3.5.1: Passieve Hex-Learner Sniffer (Shadow Mode), Arlo-Feed UI, Stuck-Recording Auto-Sweeper, Fallback Thumbnail Generator, Live Audio Herstel en Module Guard beveiliging.",
     }
 
 
@@ -1048,21 +1064,31 @@ async def serve_snapshot(filename: str):
 @app.get("/api/v1/clips/{clip_id}/thumbnail")
 @app.get("/api/clips/{clip_id}/thumbnail")
 async def get_clip_thumbnail_endpoint(clip_id: str):
-    """Serve thumbnail for clip. Resolves from day folders, clips dir, or snapshots (v3.5.0)."""
+    """Serve thumbnail for clip. Resolves from day folders, clips dir, snapshots, or generates on-the-fly (v3.5.1)."""
     clean_id = clip_id.replace(".jpg", "").replace("thumb_", "")
     from app.recorder import resolve_clip_path, ensure_thumbnail
-    found = resolve_clip_path(f"thumb_{clean_id}.jpg", ext=".jpg")
-    if found and found.exists() and found.stat().st_size > 0:
-        return FileResponse(str(found), media_type="image/jpeg")
 
-    found_snap = resolve_clip_path(f"{clean_id}.jpg", ext=".jpg")
-    if found_snap and found_snap.exists() and found_snap.stat().st_size > 0:
-        return FileResponse(str(found_snap), media_type="image/jpeg")
+    for cand_name in [f"thumb_{clean_id}.jpg", f"{clean_id}.jpg", f"{clean_id}_debug.jpg"]:
+        found = resolve_clip_path(cand_name, ext=".jpg")
+        if found and found.exists() and found.stat().st_size > 0:
+            return FileResponse(str(found), media_type="image/jpeg")
 
     ensured = await ensure_thumbnail(clean_id)
-    if ensured and os.path.exists(ensured):
+    if ensured and os.path.exists(ensured) and os.path.getsize(ensured) > 0:
         return FileResponse(str(ensured), media_type="image/jpeg")
-    raise HTTPException(404, "Thumbnail not found")
+
+    # Fallback 1x1 black JPEG bytes so it ALWAYS returns HTTP 200 image/jpeg
+    one_pixel_jpeg = (
+        b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00'
+        b'\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t'
+        b'\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a'
+        b'\x1f\x1e\x1d\x1a\x1c\x1c $.\' ",#\x1c\x1c(7),01444\x1f\'9=82<.342'
+        b'\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00\xff\xc4\x00'
+        b'\x1f\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00\x00\x00\x00\x00'
+        b'\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\xff\xda\x00'
+        b'\x08\x01\x01\x00\x00?\x00\xbf\x00\xff\xd9'
+    )
+    return Response(content=one_pixel_jpeg, media_type="image/jpeg")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1077,10 +1103,12 @@ async def get_clips(
     limit: int = Query(40, ge=1, le=100),
     offset: int = Query(0, ge=0),
     paged: Optional[bool] = Query(None),
+    t: Optional[int] = Query(None),
     response: Response = None,
 ):
-    """List all clips sorted newest first with duration, size, server-side filtering & pagination (v3.5.0)."""
-    from app.recorder import resolve_clip_path, ensure_thumbnail
+    """List all clips sorted newest first with duration, size, server-side filtering & pagination (v3.5.1)."""
+    from app.recorder import resolve_clip_path, ensure_thumbnail, sweep_stuck_recordings
+    await sweep_stuck_recordings(max_age_seconds=40.0)
     clips, total_count = await list_clips(category=category, date=date, limit=limit, offset=offset)
     result = []
     for c in clips:
@@ -1557,7 +1585,7 @@ async def get_live_player(src: str = Query("deurbel"), muted: bool = Query(False
 </head>
 <body>
   <img id="instant-poster" src="/api/v1/live/instant.jpg?t={ts}" alt="" />
-  <zero-player id="player" src="" mode="webrtc,mse,mp4" playsinline autoplay {is_muted_attr} disablepictureinpicture></zero-player>
+  <zero-player id="player" src="" mode="mse,webrtc,mp4" playsinline autoplay {is_muted_attr} disablepictureinpicture></zero-player>
   <script type="module">
     import {{ VideoRTC }} from '/api/go2rtc/video-rtc.js';
 

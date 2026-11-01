@@ -56,7 +56,8 @@ interface FoxwayApi {
         @Query("date") date: String? = null,
         @Query("limit") limit: Int = 40,
         @Query("offset") offset: Int = 0,
-        @Query("paged") paged: Boolean = true
+        @Query("paged") paged: Boolean = true,
+        @Query("t") timestamp: Long? = null
     ): Response<ClipsResponseDto>
 
     @GET("/api/v1/clips/{clipId}")

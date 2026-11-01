@@ -42,6 +42,7 @@ IFACE = "eno1"
 
 SIGNATURE_FILE = "/mnt/opslag/deurbel/backend/app/assets/network_ring_signature.json"
 SNIFF_LOG_FILE = "/mnt/opslag/deurbel/logs/network_sniff.jsonl"
+LEARN_LOG_FILE = "/mnt/opslag/deurbel/logs/sniffer_learning.jsonl"
 
 
 def _build_arp_packet(hwsrc: str, psrc: str, hwdst: str, pdst: str, op: int = 2) -> bytes:
@@ -91,6 +92,11 @@ class NetworkSniffer:
         self._current_window_packets: List[dict] = []
         self._current_window_start: float = time.time()
         self._window_lock = threading.Lock()
+
+        # Passive Differential Byte Learner (v3.5.1)
+        self._payload_buffer: Deque[dict] = collections.deque(maxlen=2000)
+        self.background_noise_hashes: set[str] = set()
+        self.learned_chime_candidates: List[dict] = []
 
         self._last_shazam_ring_time: float = 0.0
         self._last_sniff_trigger_time: float = 0.0
@@ -246,6 +252,7 @@ class NetworkSniffer:
             sport, dport = 0, 0
             proto_name = "OTHER"
             is_syn = False
+            raw_payload = b""
 
             transport_offset = 14 + ihl
             if proto_num == 6 and len(raw_data) >= (transport_offset + 20):  # TCP
@@ -255,15 +262,21 @@ class NetworkSniffer:
                 flags = tcp_hdr[13]
                 is_syn = bool(flags & 0x02)
                 tcp_hl = ((tcp_hdr[12] >> 4) & 0x0F) * 4
-                payload_len = max(0, payload_len - tcp_hl)
+                raw_payload = raw_data[transport_offset + tcp_hl:]
+                payload_len = len(raw_payload)
             elif proto_num == 17 and len(raw_data) >= (transport_offset + 8):  # UDP
                 proto_name = "UDP"
                 udp_hdr = raw_data[transport_offset:transport_offset + 8]
                 sport, dport = struct.unpack("!HH", udp_hdr[:4])
-                payload_len = max(0, payload_len - 8)
+                raw_payload = raw_data[transport_offset + 8:]
+                payload_len = len(raw_payload)
+
+            payload_hex = raw_payload[:64].hex() if raw_payload else ""
+            pkt_now_t = time.time()
 
             pkt_record = {
                 "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                "ts_float": pkt_now_t,
                 "src_ip": src_ip,
                 "src_port": sport,
                 "dst_ip": dst_ip,
@@ -272,11 +285,16 @@ class NetworkSniffer:
                 "payload_len": payload_len,
                 "total_len": total_ip_len,
                 "is_syn": is_syn,
+                "payload_hex": payload_hex,
             }
 
             with self._window_lock:
                 self._current_window_packets.append(pkt_record)
                 self.recent_packets.append(pkt_record)
+                self._payload_buffer.append(pkt_record)
+                # If no chime occurred in last 5 seconds, register hex into background baseline noise
+                if (pkt_now_t - self._last_shazam_ring_time) > 5.0 and payload_hex:
+                    self.background_noise_hashes.add(payload_hex)
 
         try:
             sock.close()
@@ -318,11 +336,11 @@ class NetworkSniffer:
                 "signature_matched": False,
             }
 
-            # Check if this matches known doorbell ring signature
+            # Check if this matches known doorbell ring signature (Shadow Evaluation only)
             is_ring = self._check_ring_signature(burst_dict)
             if is_ring:
                 burst_dict["signature_matched"] = True
-                self._dispatch_network_ring(burst_dict)
+                logger.debug("🧪 [Sniffer Shadow Mode] Signature matched but doorbell ring is suppressed (shadow mode).")
 
             self.recent_bursts.append(burst_dict)
             self._append_burst_log(burst_dict)
@@ -396,12 +414,51 @@ class NetworkSniffer:
     def on_shazam_chime_triggered(self, chime_timestamp: float) -> None:
         """
         Called when SHAZAM_CHIME detects the physical chime.
-        Auto-calibrates the network signature by finding the corresponding cloud packet burst!
+        Differential Byte Learner (v3.5.1):
+        1. Compares all packets in [-2.0s, +2.0s] against background_noise_hashes baseline.
+        2. Isolates unique hex sequences that NEVER appeared in normal background traffic.
+        3. Persists candidates to /mnt/opslag/deurbel/logs/sniffer_learning.jsonl.
+        4. Auto-calibrates burst signature for diagnostic telemetry (Shadow Mode - NO ring).
         """
         self._last_shazam_ring_time = chime_timestamp
-        logger.info("🔔 [Sniffer Auto-Calibrate] Shazam chime detected at %.3f — scanning for cloud packet burst...", chime_timestamp)
+        logger.info("🔔 [Sniffer Differential Learner] Shazam chime detected at %.3f — isolating candidate ring packets...", chime_timestamp)
 
-        # Look at bursts in recent history within +-2.0s of chime
+        # 1. Differential Byte Learning
+        with self._window_lock:
+            buf_packets = list(self._payload_buffer)
+
+        candidates_found = 0
+        for p in buf_packets:
+            p_ts = p.get("ts_float", 0.0)
+            if abs(p_ts - chime_timestamp) <= 2.0:
+                hex_p = p.get("payload_hex", "")
+                if hex_p and (hex_p not in self.background_noise_hashes):
+                    cand = {
+                        "timestamp": p["timestamp"],
+                        "chime_timestamp": chime_timestamp,
+                        "dst_ip": p["dst_ip"],
+                        "dst_port": p["dst_port"],
+                        "protocol": p["protocol"],
+                        "payload_len": p["payload_len"],
+                        "hex_payload": hex_p,
+                        "reason": "DIFFERENTIAL_CHIME_MATCH",
+                    }
+                    with self._window_lock:
+                        self.learned_chime_candidates.append(cand)
+                    candidates_found += 1
+                    try:
+                        os.makedirs(os.path.dirname(LEARN_LOG_FILE), exist_ok=True)
+                        with open(LEARN_LOG_FILE, "a", encoding="utf-8") as f:
+                            f.write(json.dumps(cand, ensure_ascii=False) + "\n")
+                    except Exception as le:
+                        logger.debug("Failed saving sniffer learn log: %s", le)
+                    logger.info("🧪 [Sniffer Learner] Candidate differential payload isolated: dst=%s:%s, len=%d, hex=%s",
+                                cand["dst_ip"], cand["dst_port"], cand["payload_len"], cand["hex_payload"][:32])
+
+        if candidates_found == 0:
+            logger.info("ℹ️ [Sniffer Learner] No unique differential packets in +/-2.0s window beyond baseline noise.")
+
+        # 2. Look at bursts in recent history within +-2.0s of chime for shadow diagnostics
         candidates = []
         for b in list(self.recent_bursts):
             try:
@@ -428,25 +485,53 @@ class NetworkSniffer:
             self._save_signature(new_sig)
             logger.info("🎯 [Sniffer Auto-Calibrated] Correlated with cloud burst to %s:%d (%s) -> Signature Updated!",
                         best_burst["dst_ip"], best_burst["dst_port"], best_burst["protocol"])
+
+            # Notify ring coordinator of sniffer confirmation (for VERIFIED dual-source logging)
+            try:
+                from app.ring_coordinator import ring_coordinator
+                # Mark coordinator window as verified (shadow mode: no ring, just confirmation)
+                with ring_coordinator._lock:
+                    w = ring_coordinator._active_window
+                    if w is not None and not w.get("verified", False):
+                        elapsed = chime_timestamp - w["start_time"]
+                        if 0 <= elapsed <= ring_coordinator.verification_window_sec:
+                            delta_ms = round(elapsed * 1000, 1)
+                            w["verified"] = True
+                            w["second_source"] = "NETWORK_SNIFF"
+                            ring_coordinator.recent_verifications.append({
+                                "timestamp": datetime.datetime.now().isoformat(),
+                                "status": "VERIFIED",
+                                "first_source": w["first_source"],
+                                "second_source": "NETWORK_SNIFF",
+                                "delta_ms": delta_ms,
+                                "details": f"Dubbele aanbel-bevestiging: {w['first_source']} + NETWORK_SNIFF (shadow learner)",
+                            })
+                            logger.info(
+                                "🎉 [RING VERIFIED] Shazam + Sniffer cloud-burst correlatie bevestigd! "
+                                "delta=%.1fms, dst=%s:%d",
+                                delta_ms, best_burst["dst_ip"], best_burst["dst_port"],
+                            )
+            except Exception as ve:
+                logger.debug("[Sniffer] Could not notify ring_coordinator of verified burst: %s", ve)
         else:
             logger.info("ℹ️ [Sniffer Auto-Calibrate] No external cloud burst in +/-2.5s window to correlate.")
 
     def _dispatch_network_ring(self, burst: dict) -> None:
-        """Fires doorbell ring via the Central Ring Coordinator with trigger_source = NETWORK_SNIFF."""
-        now_t = time.time()
-        self._last_sniff_trigger_time = now_t
+        """Deprecated in v3.5.1: Sniffer runs exclusively in passive shadow mode and NEVER triggers ringing."""
+        logger.debug("[Network Sniffer] Shadow mode active — ring trigger suppressed for burst %s:%s", burst.get("dst_ip"), burst.get("dst_port"))
 
-        logger.info("🚨 [Network Sniffer] MATCHED CLOUD BURST! Registering ring signal (source=NETWORK_SNIFF, dst=%s:%d %s, bytes=%d)",
-                    burst["dst_ip"], burst["dst_port"], burst["protocol"], burst["total_bytes"])
-
-        try:
-            from app.ring_coordinator import register_ring_signal
-            register_ring_signal(source="NETWORK_SNIFF", details=burst)
-        except Exception as e:
-            logger.error("Failed dispatching network ring to coordinator: %s", e)
-            if self._loop and self._loop.is_running():
-                from app.state_machine import call_sm
-                asyncio.run_coroutine_threadsafe(call_sm.ring(trigger_source="NETWORK_SNIFF"), self._loop)
+    def get_learner_status(self) -> dict:
+        """Returns the current status of the Differential Byte Learner."""
+        with self._window_lock:
+            return {
+                "enabled": True,
+                "mode": "Shadow Mode (Triggert GEEN bel)",
+                "background_noise_count": len(self.background_noise_hashes),
+                "buffered_packets_count": len(self._payload_buffer),
+                "learned_candidates_count": len(self.learned_chime_candidates),
+                "recent_candidates": list(self.learned_chime_candidates[-10:]),
+                "last_chime_ts": self._last_shazam_ring_time,
+            }
 
     async def start(self) -> None:
         """Starts ARP redirect and raw packet sniffer."""

@@ -1,16 +1,16 @@
 """
-Foxway Smart Doorbell — Central Ring Coordinator & Dual Cross-Verification (v3.5.0).
+Foxway Smart Doorbell — Central Ring Coordinator & Dual Cross-Verification (v3.5.1).
 
 Architecture:
-1. Zero-Latency Immediate Trigger:
-   When the FIRST ring signal arrives (SHAZAM_CHIME or NETWORK_SNIFF), the coordinator
-   immediately invokes call_sm.ring(...) at millisecond 0 (zero latency).
-2. Background 3.5s Cross-Verification Window:
-   A concurrent verification timer watches for the second signal within 3.5 seconds:
-   - If BOTH fire within 3.5s:
-     Log INFO: [RING VERIFIED] Dubbele aanbel-bevestiging geslaagd: SHAZAM_CHIME + NETWORK_SNIFF vuren allebei synchroon af!
-   - If only ONE fires within 3.5s:
-     Log ERROR: [RING MISMATCH ERROR] Eén van de aanbel-detectoren vuurde niet binnen 3.5s! Actief: <source>, Ontbrekend: <missing_source>. Controleer audio microfoon stream of EZVIZ netwerkverbinding.
+1. Zero-Latency Immediate Trigger (SHAZAM_CHIME only):
+   When SHAZAM_CHIME arrives the coordinator immediately invokes call_sm.ring(...) at
+   millisecond 0 (zero latency). NETWORK_SNIFF is in full shadow / passive-learner mode
+   and NEVER triggers a ring.
+2. Background 3.5s Mismatch WARNING:
+   After a SHAZAM_CHIME fires, a background timer checks whether the sniffer also
+   registered a candidate burst within [-2.0s, +3.5s]:
+   - If sniffer confirmed:   Log INFO  [RING VERIFIED]  (dual confirmation)
+   - If sniffer was silent:  Log WARNING [RING MISMATCH WARNING] (not ERROR)
 3. Thread-Safe & Asyncio Native:
    Can be called from background sniffer/audio threads via register_ring_signal(...).
 """
@@ -69,6 +69,11 @@ class RingCoordinator:
         """
         now = time.time()
         details = details or {}
+
+        # 100% Decoupling: Sniffer is in passive shadow mode and NEVER triggers ringing (v3.5.1)
+        if source == "NETWORK_SNIFF":
+            logger.debug("[RingCoordinator] NETWORK_SNIFF ignored as ring trigger (sniffer in shadow learner mode)")
+            return
 
         with self._lock:
             # 1. Check if there is an active verification window waiting for the second signal
@@ -161,32 +166,38 @@ class RingCoordinator:
                 pass
 
     def _schedule_verification_check(self, window: Dict[str, Any]) -> None:
-        """Schedules checking if the complementary signal arrived within 3.5s."""
+        """Schedules checking whether the sniffer also saw a burst within 3.5s.
+        In v3.5.1 shadow mode:
+        - VERIFIED  → Shazam fired AND sniffer confirmed a burst (dual confirmation).
+        - COMPLETED → Shazam fired but sniffer saw nothing (log WARNING, not ERROR).
+        """
         async def _verify_job():
             await asyncio.sleep(self.verification_window_sec)
             with self._lock:
-                # If window was verified by the other detector
-                if window.get("verified", False):
+                first_src = window["first_source"]
+                sniffer_confirmed = window.get("verified", False)
+
+                if sniffer_confirmed:
+                    # Already logged VERIFIED when sniffer reported to us
                     return
 
-                first_src = window["first_source"]
-                missing_src = "NETWORK_SNIFF" if first_src == "SHAZAM_CHIME" else "SHAZAM_CHIME"
-
-                logger.error(
-                    "⚠️ [RING MISMATCH ERROR] Eén van de aanbel-detectoren vuurde niet binnen 3.5s! "
-                    "Actief: %s, Ontbrekend: %s. Controleer audio microfoon stream of EZVIZ netwerkverbinding.",
+                # Shazam fired, sniffer was silent → WARNING (not ERROR)
+                logger.warning(
+                    "⚠️ [RING MISMATCH WARNING] Shazam detecteerde aanbellen (%s), maar Sniffer zag "
+                    "geen uniek patroon binnen %.1fs. Mogelijke oorzaken: wifi-pakket gemist, "
+                    "deurbel buiten bereik, of keepalive-traffic. Sniffer blijft in shadow-mode.",
                     first_src,
-                    missing_src,
+                    self.verification_window_sec,
                 )
 
                 self.recent_verifications.append({
                     "timestamp": datetime.datetime.now().isoformat(),
-                    "status": "MISMATCH",
+                    "status": "COMPLETED",
                     "first_source": first_src,
                     "second_source": None,
-                    "missing_source": missing_src,
+                    "missing_source": "NETWORK_SNIFF",
                     "delta_ms": round(self.verification_window_sec * 1000, 1),
-                    "details": f"Mismatch: {first_src} vuurde wel, maar {missing_src} ontbrak binnen 3.5s!",
+                    "details": f"Ring window gesloten voor {first_src} (sniffer zag niets)",
                 })
 
         if self._loop and self._loop.is_running():

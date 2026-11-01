@@ -1210,12 +1210,19 @@ class SmartDetector:
         clip_path = str(day_dir / f"{clip_id}.mp4")
         t0_iso = datetime.now(timezone.utc).isoformat()
 
-        # 1. Stap 1 — Sla EERST de Snapshot op schijf op (VÓÓR het event wordt verstuurd!) (TAAK 1.1)
+        # 1. Stap 1 — Sla EERST de Snapshot op schijf op (VÓÓR het event wordt verstuurd!) (TAAK 1.1 / v3.5.1)
         settings.SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        settings.CLIPS_DIR.mkdir(parents=True, exist_ok=True)
         thumb_clip_path = str(day_dir / f"thumb_{clip_id}.jpg")
+        day_snap_path = str(day_dir / f"{clip_id}.jpg")
+        root_thumb_path = str(settings.CLIPS_DIR / f"thumb_{clip_id}.jpg")
+        root_clip_snap = str(settings.CLIPS_DIR / f"{clip_id}.jpg")
         clean_snapshot_path = str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg")
 
         cv2.imwrite(thumb_clip_path, keyframe)
+        cv2.imwrite(day_snap_path, keyframe)
+        cv2.imwrite(root_thumb_path, keyframe)
+        cv2.imwrite(root_clip_snap, keyframe)
         cv2.imwrite(clean_snapshot_path, keyframe)
 
         if not os.path.exists(thumb_clip_path) or os.path.getsize(thumb_clip_path) < 5000:
@@ -1361,14 +1368,23 @@ class SmartDetector:
                 return
 
             async with recording_lock:
-                duration = await record_smart_clip(
-                    clip_id=clip_id,
-                    clip_path=clip_path,
-                    preroll_seconds=preroll,
-                    postroll_seconds=postroll,
-                    motion_active_func=self.is_motion_active,
-                    max_duration=max_duration,
-                )
+                duration = 0.0
+                try:
+                    duration = await asyncio.wait_for(
+                        record_smart_clip(
+                            clip_id=clip_id,
+                            clip_path=clip_path,
+                            preroll_seconds=preroll,
+                            postroll_seconds=postroll,
+                            motion_active_func=self.is_motion_active,
+                            max_duration=max_duration,
+                        ),
+                        timeout=32.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Recording timeout (32s) for clip %s", clip_id)
+                except Exception as re:
+                    logger.error("Error during record_smart_clip for %s: %s", clip_id, re)
 
                 if not clean_snapshot_path:
                     clean_snapshot_path = str(settings.CLIPS_DIR / f"thumb_{clip_id}.jpg")
@@ -1376,9 +1392,15 @@ class SmartDetector:
 
                 file_size = os.path.getsize(clip_path) if os.path.exists(clip_path) else 0
 
-                # Database Update to READY (TAAK 1.3):
-                # Must be > 100 KB and duration >= 5 seconds!
-                if os.path.exists(clip_path) and file_size > 100000 and duration >= 5.0:
+                # Database Update to READY (v3.5.1):
+                # If file exists and > 10 KB, guarantee READY state transition
+                if os.path.exists(clip_path) and file_size > 10000:
+                    if duration <= 0:
+                        from app.recorder import _probe_duration
+                        duration = await _probe_duration(clip_path)
+                        if duration <= 0:
+                            duration = 15.0
+
                     category_dutch = {
                         "person": "Persoon gedetecteerd",
                         "vehicle": "Voertuig gedetecteerd",
@@ -1398,8 +1420,8 @@ class SmartDetector:
                     asyncio.create_task(compress_clip_background(clip_path))
                 else:
                     logger.warning(
-                        "Discarded invalid/incomplete clip %s (size=%d bytes, duration=%.1fs < 5s) — removing row from DB",
-                        clip_id, file_size, duration,
+                        "Discarded invalid/empty clip %s (size=%d bytes) — removing row from DB",
+                        clip_id, file_size,
                     )
                     await db_delete_clip(clip_id)
                     if os.path.exists(clip_path):

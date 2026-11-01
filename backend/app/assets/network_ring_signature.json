@@ -5,7 +5,7 @@
   "min_packet_count": 4,
   "min_bytes": 154,
   "max_bytes": 550,
-  "last_calibrated": "2026-11-01T00:18:28.535545",
+  "last_calibrated": "2026-11-01T17:49:18.692976",
   "sample_payload_sizes": [
     44,
     44,

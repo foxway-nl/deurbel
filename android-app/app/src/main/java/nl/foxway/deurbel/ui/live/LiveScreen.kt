@@ -491,8 +491,8 @@ fun LiveScreen() {
                         isSpeakerMuted = next
                         try {
                             val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-                            audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
-                            audioManager?.isSpeakerphoneOn = !next
+                            audioManager?.mode = AudioManager.MODE_NORMAL
+                            audioManager?.isSpeakerphoneOn = true
                         } catch (_: Exception) {}
                         liveStream.setAudioMuted(next)
                         webViewRef?.evaluateJavascript("window.setAudioMuted && window.setAudioMuted($next);", null)

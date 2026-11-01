@@ -552,15 +552,20 @@
                 </div>
             </div>
 
-            <!-- Host-Level EZVIZ Cloud Packet Sniffer (v3.4.1) -->
+            <!-- Host-Level EZVIZ Cloud Packet Sniffer (v3.5.1 Passive Shadow Learner) -->
             <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4">
                 <div class="flex items-center justify-between pb-3 border-b border-dark-800">
                     <div>
                         <div class="flex items-center gap-2">
-                            <h3 class="font-bold text-white text-sm">🌐 Live EZVIZ Cloud-Sniffer (192.168.2.31 -&gt; Internet)</h3>
+                            <h3 class="font-bold text-white text-sm">🧪 Passieve Sniffer Byte-Learner (Shadow Mode - Triggert GEEN bel)</h3>
                             <span id="sniffer-status-badge" class="px-2 py-0.5 rounded text-[10px] font-bold bg-dark-800 text-gray-400">Controleren...</span>
                         </div>
-                        <p class="text-xs text-gray-400">Actieve ARP-Redirect via 192.168.2.1 met automatische fail-safe gateway restore en 1000ms burst-aggregatie</p>
+                        <p class="text-xs text-gray-400">Isoleert unieke hex-payloads tijdens Shazam chime via differential byte-matching. Triggert GEEN oproep.</p>
+                        <div id="sniffer-learner-metrics" class="mt-2 flex flex-wrap gap-3 text-xs text-gray-300">
+                            <span class="bg-dark-800 px-2.5 py-1 rounded-md border border-dark-700">Achtergrond Baseline: <b id="learner-bg-count" class="text-emerald-400 font-mono">0</b> hashes</span>
+                            <span class="bg-dark-800 px-2.5 py-1 rounded-md border border-dark-700">Buffer: <b id="learner-buf-count" class="text-cyan-400 font-mono">0</b> pkts</span>
+                            <span class="bg-dark-800 px-2.5 py-1 rounded-md border border-dark-700">Geleerde Bel-Kandidaten: <b id="learner-cand-count" class="text-purple-400 font-mono">0</b></span>
+                        </div>
                     </div>
                     <div class="flex items-center gap-2">
                         <button onclick="loadNetworkSnifferBursts()" class="px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs text-gray-300">
@@ -1113,13 +1118,25 @@
             const tbody = document.getElementById('sniffer-table-body');
             const statusEl = document.getElementById('sniffer-status-badge');
             try {
+                // Fetch learner metrics
+                fetch('/api/v1/admin/sniffer-learner').then(r => r.json()).then(ld => {
+                    if (ld && ld.learner) {
+                        const bgEl = document.getElementById('learner-bg-count');
+                        const bufEl = document.getElementById('learner-buf-count');
+                        const candEl = document.getElementById('learner-cand-count');
+                        if (bgEl) bgEl.innerText = ld.learner.background_noise_count || 0;
+                        if (bufEl) bufEl.innerText = ld.learner.buffered_packets_count || 0;
+                        if (candEl) candEl.innerText = ld.learner.learned_candidates_count || 0;
+                    }
+                }).catch(() => {});
+
                 const res = await fetch('/api/v1/admin/network-sniff-bursts');
                 if (!res.ok) return;
                 const d = await res.json();
                 if (statusEl) {
                     if (d.running) {
-                        statusEl.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
-                        statusEl.innerText = '🟢 Sniffer & ARP Redirect Actief';
+                        statusEl.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30';
+                        statusEl.innerText = '🧪 Shadow Mode (Geen Bel)';
                     } else {
                         statusEl.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30';
                         statusEl.innerText = '🟡 Gestopt';
@@ -1131,7 +1148,7 @@
                     d.bursts.slice().reverse().forEach(b => {
                         const tr = document.createElement('tr');
                         const isMatch = b.signature_matched;
-                        const statClass = isMatch ? 'text-emerald-400 font-bold bg-emerald-500/10' : 'text-gray-400';
+                        const statClass = isMatch ? 'text-purple-400 font-bold bg-purple-500/10' : 'text-gray-400';
                         const sizesStr = b.payload_sizes ? b.payload_sizes.slice(0, 5).join(', ') + (b.payload_sizes.length > 5 ? '...' : '') : '-';
                         tr.innerHTML = `
                             <td class="p-3 text-gray-400 font-mono text-[11px]">${b.timestamp}</td>
@@ -1140,7 +1157,7 @@
                             <td class="p-3 text-gray-300 font-mono">${b.packet_count} pkt</td>
                             <td class="p-3 text-gray-300 font-mono font-bold">${b.total_bytes} B</td>
                             <td class="p-3 text-gray-400 font-mono text-[11px]">${sizesStr}</td>
-                            <td class="p-3 ${statClass}">${isMatch ? '🚨 MATCHED DEURBEL' : (b.is_p2p_burst ? '☁️ P2P Cloud' : 'WAN')}</td>
+                            <td class="p-3 ${statClass}">${isMatch ? '🧪 Shadow Match' : (b.is_p2p_burst ? '☁️ P2P Cloud' : 'WAN')}</td>
                         `;
                         tbody.appendChild(tr);
                     });
