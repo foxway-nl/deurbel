@@ -734,7 +734,7 @@ class SmartDetector:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("AI detection loop error: %s", e)
+                logger.exception("AI detection loop error: %s", e)
                 await asyncio.sleep(2)
 
     async def _process_frame_gatekeeper(
@@ -1054,15 +1054,18 @@ class SmartDetector:
                         if dx_pct >= 0.12:
                             consistent = True
                             for f_i in range(len(track.frames) - 1):
-                                f_x1 = (track.frames[f_i][1][0] + track.frames[f_i][1][2]) / 2.0
-                                f_x2 = (track.frames[f_i+1][1][0] + track.frames[f_i+1][1][2]) / 2.0
-                                step_dx = f_x2 - f_x1
-                                if dx_total > 0 and step_dx < -0.02 * float(w):
-                                    consistent = False
-                                    break
-                                elif dx_total < 0 and step_dx > 0.02 * float(w):
-                                    consistent = False
-                                    break
+                                fb1 = track.frames[f_i][1]
+                                fb2 = track.frames[f_i+1][1]
+                                if len(fb1) >= 4 and len(fb2) >= 4:
+                                    f_x1 = (fb1[0] + fb1[2]) / 2.0
+                                    f_x2 = (fb2[0] + fb2[2]) / 2.0
+                                    step_dx = f_x2 - f_x1
+                                    if dx_total > 0 and step_dx < -0.02 * float(w):
+                                        consistent = False
+                                        break
+                                    elif dx_total < 0 and step_dx > 0.02 * float(w):
+                                        consistent = False
+                                        break
 
                             if consistent:
                                 is_valid_object = True
@@ -1099,9 +1102,12 @@ class SmartDetector:
                         if len(track.frames) >= 3:
                             total_path = 0.0
                             for f_i in range(len(track.frames) - 1):
-                                f_c1 = ((track.frames[f_i][1][0] + track.frames[f_i][1][2]) / 2.0, (track.frames[f_i][1][1] + track.frames[f_i][1][3]) / 2.0)
-                                f_c2 = ((track.frames[f_i+1][1][0] + track.frames[f_i+1][1][2]) / 2.0, (track.frames[f_i+1][1][1] + track.frames[f_i+1][3]) / 2.0)
-                                total_path += math.hypot(f_c2[0] - f_c1[0], f_c2[1] - f_c1[1])
+                                fb1 = track.frames[f_i][1]
+                                fb2 = track.frames[f_i+1][1]
+                                if len(fb1) >= 4 and len(fb2) >= 4:
+                                    f_c1 = ((fb1[0] + fb1[2]) / 2.0, (fb1[1] + fb1[3]) / 2.0)
+                                    f_c2 = ((fb2[0] + fb2[2]) / 2.0, (fb2[1] + fb2[3]) / 2.0)
+                                    total_path += math.hypot(f_c2[0] - f_c1[0], f_c2[1] - f_c1[1])
 
                             net_disp = math.hypot(cx2 - cx1, cy2 - cy1)
                             oscillation_ratio = (net_disp / max(1.0, total_path)) if total_path > 0 else 0.0

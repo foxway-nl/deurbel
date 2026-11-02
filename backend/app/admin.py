@@ -17,6 +17,10 @@ import os
 import shutil
 import time
 from datetime import datetime, timezone
+
+os.environ["TZ"] = "Europe/Amsterdam"
+if hasattr(time, "tzset"):
+    time.tzset()
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 

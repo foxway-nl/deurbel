@@ -65,3 +65,35 @@ def test_v355_anti_wind_oscillation_ratio():
     net_disp = 45.0
     osc_ratio = net_disp / total_path
     assert osc_ratio >= 0.60  # Approved (>= 0.60)
+
+
+@pytest.mark.asyncio
+async def test_v355_person_and_vehicle_track_multi_frame_evaluation():
+    """Verify that multi-frame tracks for pedestrians and vehicles do not cause IndexError."""
+    import time
+    import numpy as np
+    from app.ai_detector import SmartDetector, CandidateDetection, DetectionSettings
+
+    detector = SmartDetector()
+    detector.init_model()
+    cfg = await DetectionSettings.load()
+
+    # Person track with 3 frames
+    now = time.time()
+    p_tid = "track_test_person_regression"
+    p_cand = CandidateDetection(p_tid, "person", "Persoon", (100.0, 100.0, 200.0, 300.0), 0.65, now - 1.0, 0.1)
+    p_cand.frames.append((now - 0.5, (102.0, 102.0, 202.0, 302.0), 0.66))
+    p_cand.frames.append((now, (105.0, 105.0, 205.0, 305.0), 0.67))
+    detector._candidate_tracks[p_tid] = p_cand
+
+    # Vehicle track with 3 frames
+    v_tid = "track_test_vehicle_regression"
+    v_cand = CandidateDetection(v_tid, "vehicle", "Auto", (100.0, 100.0, 250.0, 200.0), 0.75, now - 1.0, 0.2)
+    v_cand.frames.append((now - 0.5, (180.0, 100.0, 330.0, 200.0), 0.76))
+    v_cand.frames.append((now, (260.0, 100.0, 410.0, 200.0), 0.77))
+    detector._candidate_tracks[v_tid] = v_cand
+
+    dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    # Must process without throwing IndexError: tuple index out of range
+    await detector._process_frame_gatekeeper(dummy_frame, now, cfg)
+

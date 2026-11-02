@@ -9,6 +9,7 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
+      - TZ=Europe/Amsterdam
       # go2rtc media engine (already running on the host)
       - FOXWAY_GO2RTC_API_URL=http://192.168.2.1:1984
       - FOXWAY_GO2RTC_RTSP_URL=rtsp://192.168.2.1:8554/deurbel

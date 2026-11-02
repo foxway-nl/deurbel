@@ -745,6 +745,23 @@
 
     <!-- Client-Side Javascript Logic -->
     <script>
+        function formatLocalTime(ts) {
+            if (!ts) return '-';
+            try {
+                let d;
+                if (ts.endsWith('Z') || ts.includes('+')) {
+                    d = new Date(ts);
+                } else {
+                    d = new Date(ts.replace(' ', 'T') + 'Z');
+                }
+                if (!isNaN(d.getTime())) {
+                    const pad = (n) => String(n).padStart(2, '0');
+                    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+                }
+            } catch (e) {}
+            return ts.split('.')[0].replace('T', ' ');
+        }
+
         let currentTab = 'tab-live';
         let exclusionZones = [];
         let isDrawing = false;
@@ -1028,7 +1045,7 @@
 
                     tr.innerHTML = `
                         <td class="p-3"><span class="px-2 py-0.5 rounded-full font-bold ${badgeClass}">${item.status}</span></td>
-                        <td class="p-3 text-gray-400 font-mono text-[11px]">${item.timestamp.split('.')[0].replace('T', ' ')}</td>
+                        <td class="p-3 text-gray-400 font-mono text-[11px]">${formatLocalTime(item.timestamp)}</td>
                         <td class="p-3 font-semibold text-white">${item.label || item.category}</td>
                         <td class="p-3 text-cyan-400 font-mono">${Math.round(item.confidence * 100)}%</td>
                         <td class="p-3 font-mono font-bold ${item.displacement_pct >= 6 ? 'text-emerald-400' : 'text-red-400'}">${item.displacement_pct}%</td>
@@ -1067,7 +1084,7 @@
                             badgeText = '⚪ STANDALONE TRIGGER';
                         }
                         tr.innerHTML = `
-                            <td class="p-3 text-gray-400 font-mono text-[11px]">${v.timestamp ? v.timestamp.split('.')[0].replace('T', ' ') : '-'}</td>
+                            <td class="p-3 text-gray-400 font-mono text-[11px]">${formatLocalTime(v.timestamp)}</td>
                             <td class="p-3"><span class="px-2 py-0.5 rounded-full font-bold text-[10px] ${badgeClass}">${badgeText}</span></td>
                             <td class="p-3 font-semibold text-white">${v.first_source || '-'}</td>
                             <td class="p-3 text-cyan-400 font-semibold">${v.second_source || (v.missing_source ? `<span class="text-red-400">Ontbreekt: ${v.missing_source}</span>` : '-')}</td>
@@ -1141,7 +1158,7 @@
                         card.innerHTML = `
                             <div class="flex items-center justify-between text-red-400 font-bold">
                                 <span>📱 ${c.device_name || 'Android Toestel'} (${c.app_version || 'v2.x'})</span>
-                                <span class="text-gray-500 font-mono text-[10px]">${c.timestamp.split('.')[0].replace('T', ' ')}</span>
+                                <span class="text-gray-500 font-mono text-[10px]">${formatLocalTime(c.timestamp)}</span>
                             </div>
                             <div class="text-white font-semibold">${c.error_message}</div>
                             ${c.screen_state ? `<div class="text-[11px] text-gray-400">Schermstatus: ${c.screen_state}</div>` : ''}
@@ -1214,7 +1231,7 @@
                         const isMatch = det.matched;
                         const statClass = isMatch ? 'text-emerald-400 font-bold' : 'text-gray-400';
                         tr.innerHTML = `
-                            <td class="p-3 text-gray-400 font-mono text-[11px]">${det.timestamp}</td>
+                            <td class="p-3 text-gray-400 font-mono text-[11px]">${formatLocalTime(det.timestamp)}</td>
                             <td class="p-3 font-mono font-bold ${det.ncc >= 0.82 ? 'text-emerald-400' : 'text-cyan-400'}">${(det.ncc * 100).toFixed(1)}% (${det.ncc})</td>
                             <td class="p-3 ${statClass}">${isMatch ? '🚨 MATCHED DEURBEL' : 'Evaluatie'}</td>
                             <td class="p-3 text-gray-300 max-w-sm truncate" title="${det.details}">${det.details}</td>
@@ -1267,7 +1284,7 @@
                         const sizesStr = b.payload_sizes ? b.payload_sizes.slice(0, 5).join(', ') + (b.payload_sizes.length > 5 ? '...' : '') : '-';
                         const hexStr = b.payload_hex ? b.payload_hex.substring(0, 48) : '-';
                         tr.innerHTML = `
-                            <td class="p-3 text-gray-400 font-mono text-[11px]">${b.timestamp}</td>
+                            <td class="p-3 text-gray-400 font-mono text-[11px]">${formatLocalTime(b.timestamp)}</td>
                             <td class="p-3 font-semibold ${b.protocol === 'UDP' ? 'text-cyan-400' : 'text-amber-400'}">${b.protocol}</td>
                             <td class="p-3 font-mono text-white">${b.dst_ip}:${b.dst_port}</td>
                             <td class="p-3 text-gray-300 font-mono">${b.packet_count} pkt</td>

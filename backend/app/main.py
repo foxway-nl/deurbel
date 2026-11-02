@@ -17,6 +17,11 @@ import socket
 import struct
 import time
 import uuid
+
+# Force Europe/Amsterdam timezone across process and logging
+os.environ["TZ"] = "Europe/Amsterdam"
+if hasattr(time, "tzset"):
+    time.tzset()
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
