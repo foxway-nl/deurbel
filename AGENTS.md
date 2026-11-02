@@ -25,10 +25,10 @@ Welkom in het Foxway Smart Doorbell project. Lees deze regels zorgvuldig voordat
    - **FROZEN MODULES (VERGRENDELD IN `.locked_hashes.json`):** `ai_detector.py`, `ring_detector.py`, `audio_bridge.py`, `WebSocketForegroundService.kt`, `CallActivity.kt`. Wijzig deze NOOIT zonder expliciete reden en `--unlock-module`.
 
 5. **BESCHERMDE KERN-COMPONENTEN & HARDWARE-FEITEN (NIET AANRAKEN):**
-   - **Aanbel-Triggering & Passieve Sniffer Shadow-Mode (`backend/app/network_sniffer.py`, `ring_coordinator.py`, `ring_detector.py`):**
-     * De telefoon rinkelt **UITSLUITEND** bij `SHAZAM_CHIME` (728 Hz / 570 Hz audio-chime) of de handmatige testknop. De netwerk-sniffer triggert NOOIT zelfstandig `CALL_RINGING`.
-     * De netwerk-sniffer draait als **Differential Byte Learner (Shadow Mode)**: vergelijkt payloads met `background_noise_hashes` en logt kandidaten naar `sniffer_learning.jsonl`.
-     * Als Shazam afgaat en de sniffer ziet binnen 3.5s niets, wordt een `WARNING` gelogd (`[RING MISMATCH WARNING]`), GEEN error.
+   - **Aanbel-Triggering & Hybride Dual-Trigger (`backend/app/network_sniffer.py`, `ring_coordinator.py`, `ring_detector.py`):**
+     * **Hybride Dual-Trigger Architectuur:** De deurbel reageert op zowel de real-time netwerk-sniffer (`/2000/4675` intercom hex op TCP 8820, latency ~0.1s) als de akoestische Shazam Chime detector (728 Hz / 570 Hz audio-chime, latency ~2.8s).
+     * `RingCoordinator` voegt beide triggers samen met een 3.5s verificatievenster en 5.0s cooldown: de eerste trigger start direct de beloproep (`CALL_RINGING`), de tweede bevestigt de sessie als `VERIFIED` zonder dubbele oproep.
+     * Als slechts één van de twee triggers afgaat binnen 3.5s, wordt de sessie netjes afgesloten als single-trigger sessie zonder errors. Handmatige testknop en webhook blijven 100% functioneel.
    - **Stuck Recording Sweeper & Thumbnail Fallback (`recorder.py`, `main.py`):**
      * Achtergrond-sweeper controleert elke 15s (en bij elke `/api/v1/clips` call) op clips die >40s in `RECORDING` hangen en zet ze op `READY` (indien >10KB) of ruimt ze op.
      * Thumbnail endpoint `/api/v1/clips/{id}/thumbnail` retourneert ALTIJD HTTP 200 (genereert desnoods een 1x1 black fallback JPEG, nooit 404).

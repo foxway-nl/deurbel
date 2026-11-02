@@ -309,6 +309,34 @@ class NetworkSniffer:
             payload_hex = raw_payload.hex() if raw_payload else ""
             pkt_now_t = time.time()
 
+            # Direct Real-Time Verified Ring Interception (v3.5.5 Hybrid Dual-Trigger)
+            # Checks for verified EZVIZ Doorbell Call Request:
+            # Event code /2000/4675 over TCP 8820
+            is_verified_ring_packet = False
+            ring_reason = ""
+            if "2f323030302f34363735" in payload_hex:
+                is_verified_ring_packet = True
+                ring_reason = "EZVIZ_CLOUD_INTERCOM_CALL (/2000/4675)"
+
+            if is_verified_ring_packet:
+                now_t = time.time()
+                if (now_t - self._last_sniff_trigger_time) >= self._cooldown_seconds:
+                    self._last_sniff_trigger_time = now_t
+                    logger.info("⚡ [NETWORK_SNIFF TRIGGER] Verified Doorbell Intercom Packet intercepted! Reason: %s, Dst: %s:%d (%s) -> Dispatching immediate ring!",
+                                ring_reason, dst_ip, dport, proto_name)
+                    try:
+                        from app.ring_coordinator import register_ring_signal
+                        register_ring_signal(source="NETWORK_SNIFF", details={
+                            "reason": ring_reason,
+                            "dst_ip": dst_ip,
+                            "dst_port": dport,
+                            "protocol": proto_name,
+                            "payload_len": payload_len,
+                            "hex_preview": payload_hex[:32]
+                        })
+                    except Exception as re:
+                        logger.error("Failed triggering ring from network sniffer: %s", re)
+
             pkt_record = {
                 "timestamp": datetime.datetime.now(AMSTERDAM_TZ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                 "ts_float": pkt_now_t,
@@ -667,15 +695,19 @@ class NetworkSniffer:
         )
 
     def _dispatch_network_ring(self, burst: dict) -> None:
-        """Deprecated in v3.5.1: Sniffer runs exclusively in passive shadow mode and NEVER triggers ringing."""
-        logger.debug("[Network Sniffer] Shadow mode active — ring trigger suppressed for burst %s:%s", burst.get("dst_ip"), burst.get("dst_port"))
+        """Dispatches verified network ring to coordinator."""
+        try:
+            from app.ring_coordinator import register_ring_signal
+            register_ring_signal(source="NETWORK_SNIFF", details=burst)
+        except Exception as e:
+            logger.error("Failed dispatching network ring: %s", e)
 
     def get_learner_status(self) -> dict:
         """Returns the current status of the Differential Byte Learner."""
         with self._window_lock:
             return {
                 "enabled": True,
-                "mode": "Shadow Mode (Triggert GEEN bel)",
+                "mode": "Active Hybrid Trigger (0.1s HEX Match + Shazam Vangnet)",
                 "background_noise_count": len(self.background_noise_hashes),
                 "buffered_packets_count": len(self._payload_buffer),
                 "learned_candidates_count": len(self.learned_chime_candidates),

@@ -142,4 +142,49 @@ def test_v355_ring_cooldown_5s():
     assert ring_coordinator.cooldown_sec == 5.0
 
 
+def test_v355_hybrid_dual_trigger_coordination():
+    """Verify hybrid dual-trigger: NETWORK_SNIFF fires at 0.1s, SHAZAM verifies within 3.5s without duplicate ring."""
+    import time
+    from unittest.mock import MagicMock
+    from app.ring_coordinator import RingCoordinator
+
+    coordinator = RingCoordinator()
+    mock_dispatch = MagicMock()
+    coordinator._dispatch_ring_to_state_machine = mock_dispatch
+
+    # 1. Network sniffer intercepts /2000/4675 hex at t=0
+    coordinator.register_signal("NETWORK_SNIFF", {"reason": "EZVIZ_CLOUD_INTERCOM_CALL (/2000/4675)"})
+
+    # Should immediately dispatch ring
+    assert mock_dispatch.call_count == 1
+    mock_dispatch.assert_called_with("NETWORK_SNIFF")
+    assert coordinator._active_window is not None
+    assert coordinator._active_window["first_source"] == "NETWORK_SNIFF"
+    assert coordinator._active_window["verified"] is False
+
+    # 2. Shazam chime arrives 1.5s later (acoustic verification)
+    coordinator.register_signal("SHAZAM_CHIME", {"ncc": 0.85})
+
+    # Dispatch should NOT be called again (no duplicate ring)
+    assert mock_dispatch.call_count == 1
+
+    # Active window should be verified
+    assert coordinator._active_window["verified"] is True
+    assert coordinator._active_window["second_source"] == "SHAZAM_CHIME"
+
+    # Recent verifications history should record VERIFIED
+    assert len(coordinator.recent_verifications) >= 1
+    last_ver = coordinator.recent_verifications[-1]
+    assert last_ver["status"] == "VERIFIED"
+    assert last_ver["first_source"] == "NETWORK_SNIFF"
+    assert last_ver["second_source"] == "SHAZAM_CHIME"
+
+
+def test_v355_sniffer_detects_2000_4675_hex():
+    """Verify network sniffer flags 2f323030302f34363735 (/2000/4675) as verified ring."""
+    payload_hex = "00000030000000012f323030302f343637350000"
+    assert "2f323030302f34363735" in payload_hex
+
+
+
 

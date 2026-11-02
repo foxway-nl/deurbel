@@ -70,11 +70,6 @@ class RingCoordinator:
         now = time.time()
         details = details or {}
 
-        # 100% Decoupling: Sniffer is in passive shadow mode and NEVER triggers ringing (v3.5.1)
-        if source == "NETWORK_SNIFF":
-            logger.debug("[RingCoordinator] NETWORK_SNIFF ignored as ring trigger (sniffer in shadow learner mode)")
-            return
-
         with self._lock:
             # 1. Check if there is an active verification window waiting for the second signal
             if self._active_window is not None:
@@ -89,8 +84,10 @@ class RingCoordinator:
                         delta_ms = round(elapsed * 1000, 1)
 
                         logger.info(
-                            "🎉 [RING VERIFIED] Dubbele aanbel-bevestiging geslaagd: SHAZAM_CHIME + NETWORK_SNIFF "
-                            "vuren allebei synchroon af! (delta: %.1fms, 1st=%s, 2nd=%s)",
+                            "🎉 [RING VERIFIED] Dubbele aanbel-bevestiging geslaagd: %s + %s "
+                            "vuren allebei af! (delta: %.1fms, 1st=%s, 2nd=%s)",
+                            first_src,
+                            source,
                             delta_ms,
                             first_src,
                             source,
@@ -102,8 +99,15 @@ class RingCoordinator:
                             "first_source": first_src,
                             "second_source": source,
                             "delta_ms": delta_ms,
-                            "details": f"Dubbele aanbel-bevestiging geslaagd in {delta_ms}ms!",
+                            "details": f"Dubbele aanbel-bevestiging: {first_src} + {source} ({delta_ms}ms)",
                         })
+
+                        if source == "SHAZAM_CHIME":
+                            try:
+                                from app.network_sniffer import network_sniffer
+                                network_sniffer.on_shazam_chime_triggered(now)
+                            except Exception:
+                                pass
                         return
 
             # 2. Check cooldown for firing a brand new ring
@@ -178,15 +182,15 @@ class RingCoordinator:
                 sniffer_confirmed = window.get("verified", False)
 
                 if sniffer_confirmed:
-                    # Already logged VERIFIED when sniffer reported to us
+                    # Already logged VERIFIED when complementary trigger reported
                     return
 
-                # Shazam fired, sniffer was silent → WARNING (not ERROR)
-                logger.warning(
-                    "⚠️ [RING MISMATCH WARNING] Shazam detecteerde aanbellen (%s), maar Sniffer zag "
-                    "geen uniek patroon binnen %.1fs. Mogelijke oorzaken: wifi-pakket gemist, "
-                    "deurbel buiten bereik, of keepalive-traffic. Sniffer blijft in shadow-mode.",
+                missing = "SHAZAM_CHIME" if first_src == "NETWORK_SNIFF" else "NETWORK_SNIFF"
+                logger.info(
+                    "ℹ️ [RING WINDOW COMPLETED] %s activeerde de bel, maar %s werd niet "
+                    "binnen %.1fs geregistreerd (enkele trigger belsessie).",
                     first_src,
+                    missing,
                     self.verification_window_sec,
                 )
 
@@ -195,9 +199,9 @@ class RingCoordinator:
                     "status": "COMPLETED",
                     "first_source": first_src,
                     "second_source": None,
-                    "missing_source": "NETWORK_SNIFF",
+                    "missing_source": missing,
                     "delta_ms": round(self.verification_window_sec * 1000, 1),
-                    "details": f"Ring window gesloten voor {first_src} (sniffer zag niets)",
+                    "details": f"Ring window gesloten voor {first_src} ({missing} niet binnen {self.verification_window_sec}s)",
                 })
 
         if self._loop and self._loop.is_running():
