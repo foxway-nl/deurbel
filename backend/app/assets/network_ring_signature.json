@@ -1,17 +1,13 @@
 {
   "enabled": true,
-  "dst_port": 6404,
-  "protocol": "UDP",
-  "min_packet_count": 4,
-  "min_bytes": 154,
-  "max_bytes": 550,
-  "last_calibrated": "2026-11-01T17:49:18.692976",
+  "dst_port": 8820,
+  "protocol": "TCP",
+  "min_packet_count": 1,
+  "min_bytes": 172,
+  "max_bytes": 617,
+  "last_calibrated": "2026-11-02T11:14:38.088822",
   "sample_payload_sizes": [
-    44,
-    44,
-    44,
-    44,
-    44
+    207
   ],
   "signature_type": "CALIBRATED_SHAZAM_BURST"
 }

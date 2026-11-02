@@ -29,8 +29,10 @@ import struct
 import threading
 import time
 from typing import Any, Deque, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("foxway.network_sniffer")
+AMSTERDAM_TZ = ZoneInfo("Europe/Amsterdam")
 
 DOORBELL_IP = "192.168.2.31"
 DOORBELL_MAC = "d4:e8:53:18:78:9b"
@@ -271,11 +273,11 @@ class NetworkSniffer:
                 raw_payload = raw_data[transport_offset + 8:]
                 payload_len = len(raw_payload)
 
-            payload_hex = raw_payload[:64].hex() if raw_payload else ""
+            payload_hex = raw_payload.hex() if raw_payload else ""
             pkt_now_t = time.time()
 
             pkt_record = {
-                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                "timestamp": datetime.datetime.now(AMSTERDAM_TZ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                 "ts_float": pkt_now_t,
                 "src_ip": src_ip,
                 "src_port": sport,
@@ -326,11 +328,11 @@ class NetworkSniffer:
             first_payload_hex = ""
             for p in group_pkts:
                 if p.get("payload_hex"):
-                    first_payload_hex = p.get("payload_hex")[:48]
+                    first_payload_hex = p.get("payload_hex")
                     break
 
             burst_dict = {
-                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                "timestamp": datetime.datetime.now(AMSTERDAM_TZ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                 "dst_ip": dst_ip,
                 "dst_port": dst_port,
                 "protocol": proto,
@@ -443,6 +445,7 @@ class NetworkSniffer:
                     cand = {
                         "timestamp": p["timestamp"],
                         "chime_timestamp": chime_timestamp,
+                        "chime_time_local": datetime.datetime.fromtimestamp(chime_timestamp, tz=AMSTERDAM_TZ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                         "dst_ip": p["dst_ip"],
                         "dst_port": p["dst_port"],
                         "protocol": p["protocol"],

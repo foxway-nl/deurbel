@@ -856,7 +856,20 @@ class SmartDetector:
             category = None
             if cid in PERSON_CLASSES:
                 category = "person"
-                req_conf = person_conf_thresh
+                # Layer 1 Shape & Aspect Ratio Filter (v3.5.5):
+                # A standing/walking human has box_height / box_width >= 1.25.
+                # Horizontal flat shadow patches and horizontal waving tree branches are rejected.
+                box_w = max(1.0, bx2 - bx1)
+                box_h = max(1.0, by2 - by1)
+                aspect_ratio = box_h / box_w
+                if aspect_ratio < 1.25:
+                    logger.debug("Rejected person candidate with invalid aspect ratio %.2f < 1.25", aspect_ratio)
+                    continue
+
+                # Foliage/Tree zone check: x < 0.16 (left bushes/trees) or x > 0.68 (right foliage/trees)
+                cx_norm = ((bx1 + bx2) / 2.0) / float(w)
+                is_foliage_zone = (cx_norm < 0.16) or (cx_norm > 0.68)
+                req_conf = 0.62 if is_foliage_zone else max(person_conf_thresh, 0.48)
             elif cid in VEHICLE_CLASSES:
                 category = "vehicle"
                 req_conf = vehicle_conf_thresh
@@ -1064,17 +1077,53 @@ class SmartDetector:
                         continue
 
                 elif track.category == "person":
-                    # Pedestrian across street or nearby:
-                    # Over >= 2 frames: small displacement >= 1.5% screen width/height OR confidence >= 0.50
-                    dx = abs(cx2 - cx1) / float(w)
-                    dy = abs(cy2 - cy1) / float(h)
-                    if (dx >= 0.015 or dy >= 0.015) or track.best_conf >= 0.50:
+                    box_w = max(1.0, last_box[2] - last_box[0])
+                    box_h = max(1.0, last_box[3] - last_box[1])
+                    aspect_ratio = box_h / box_w
+                    if aspect_ratio < 1.25:
+                        if duration_tracked >= 1.0:
+                            to_remove.append(tid)
+                        continue
+
+                    cx_norm = cx2 / float(w)
+                    is_foliage_zone = (cx_norm < 0.16) or (cx_norm > 0.68)
+
+                    # Layer 2 (Anti-Oscillation / Heen-en-Weer Wapper Filter v3.5.5):
+                    # High confidence pedestrians outside foliage approved directly
+                    if track.best_conf >= 0.68 and not is_foliage_zone:
                         is_valid_object = True
                         verified_disp_pct = delta_d_pct
-                        logger.info("Person APPROVED: %s conf=%.2f disp=%.1f%% (dx=%.3f, dy=%.3f)", track.label, track.best_conf, delta_d_pct, dx, dy)
-                    elif duration_tracked >= 1.5:
-                        to_remove.append(tid)
-                        continue
+                        logger.info("Person APPROVED (High Conf): %s conf=%.2f disp=%.1f%%", track.label, track.best_conf, delta_d_pct)
+                    else:
+                        # For person with conf < 0.68 or in foliage zones: require track across >= 3 frames
+                        if len(track.frames) >= 3:
+                            total_path = 0.0
+                            for f_i in range(len(track.frames) - 1):
+                                f_c1 = ((track.frames[f_i][1][0] + track.frames[f_i][1][2]) / 2.0, (track.frames[f_i][1][1] + track.frames[f_i][1][3]) / 2.0)
+                                f_c2 = ((track.frames[f_i+1][1][0] + track.frames[f_i+1][1][2]) / 2.0, (track.frames[f_i+1][1][1] + track.frames[f_i+1][3]) / 2.0)
+                                total_path += math.hypot(f_c2[0] - f_c1[0], f_c2[1] - f_c1[1])
+
+                            net_disp = math.hypot(cx2 - cx1, cy2 - cy1)
+                            oscillation_ratio = (net_disp / max(1.0, total_path)) if total_path > 0 else 0.0
+                            min_disp_req = 4.0 if not is_foliage_zone else 2.5
+
+                            if oscillation_ratio >= 0.60 and delta_d_pct >= min_disp_req:
+                                is_valid_object = True
+                                verified_disp_pct = delta_d_pct
+                                logger.info(
+                                    "Person APPROVED (Anti-Oscillation): %s conf=%.2f frames=%d osc_ratio=%.2f disp=%.1f%% (min=%.1f%%)",
+                                    track.label, track.best_conf, len(track.frames), oscillation_ratio, delta_d_pct, min_disp_req
+                                )
+                            elif duration_tracked >= 1.5:
+                                logger.debug(
+                                    "Person REJECTED (wind/oscillation): %s osc_ratio=%.2f disp=%.1f%%",
+                                    track.label, oscillation_ratio, delta_d_pct
+                                )
+                                to_remove.append(tid)
+                                continue
+                        elif duration_tracked >= 1.8:
+                            to_remove.append(tid)
+                            continue
 
                 elif track.category == "animal":
                     # Animal: Cat, dog, bird, horse, sheep, cow
@@ -1394,10 +1443,25 @@ class SmartDetector:
             postroll = float(sys_settings.get("post_roll_seconds", "20"))
             max_duration = float(sys_settings.get("max_active_motion_seconds", sys_settings.get("max_clip_seconds", "180")))
 
-            # Single recording lock check (TAAK 2.2):
+            # Single recording lock check (TAAK 2.2 / v3.5.5):
             if is_recording_active():
+                from app.recorder import _active_recording_info
+                active_clip_id = _active_recording_info.get("clip_id")
                 extend_active_recording(category, label, duration_sec=max_duration)
-                logger.info("Smart clip already recording; extended current clip deadline and updated priority for %s", label)
+                if active_clip_id and active_clip_id != clip_id:
+                    active_cats = _active_recording_info.setdefault("categories", set())
+                    active_cats.add(category)
+                    cats = sorted(list(active_cats), key=lambda c: 0 if c == "ring" else 1 if c == "person" else 2)
+                    combined_category = ",".join(cats)
+                    async def _sync_active_cat():
+                        try:
+                            from app.database import get_db
+                            async with get_db(write=True) as db:
+                                await db.execute("UPDATE clips SET category = ? WHERE clip_id = ?", (combined_category, active_clip_id))
+                        except Exception:
+                            pass
+                    asyncio.create_task(_sync_active_cat())
+                logger.info("Smart clip already recording; merged category into active clip %s for %s", active_clip_id, label)
                 await db_delete_clip(clip_id)
                 return
 
@@ -1413,6 +1477,7 @@ class SmartDetector:
                             postroll_seconds=postroll,
                             motion_active_func=self.is_motion_active,
                             max_duration=max_duration,
+                            category=category,
                         ),
                         timeout=safety_timeout,
                     )
@@ -1439,6 +1504,13 @@ class SmartDetector:
                         if duration <= 0:
                             duration = 15.0
 
+                    from app.recorder import _active_recording_info
+                    active_cats = _active_recording_info.get("categories", set())
+                    if category not in active_cats:
+                        active_cats.add(category)
+                    cats = sorted(list(active_cats), key=lambda c: 0 if c == "ring" else 1 if c == "person" else 2)
+                    combined_cat = ",".join(cats) if cats else category
+
                     category_dutch = {
                         "person": "Persoon gedetecteerd",
                         "vehicle": "Voertuig gedetecteerd",
@@ -1446,15 +1518,20 @@ class SmartDetector:
                         "motion": "Beweging gedetecteerd",
                     }.get(category, "Beweging")
 
+                    ans = f"AI: {category_dutch} ({label})"
+                    if "ring" in active_cats:
+                        ans = _active_recording_info.get("answered_by") or "Aanbellen [SHAZAM_CHIME]"
+
                     await update_clip(
                         clip_id=clip_id,
                         status="READY",
                         duration=duration,
                         file_size=file_size,
-                        answered_by=f"AI: {category_dutch} ({label})",
+                        answered_by=ans,
+                        category=combined_cat,
                         snapshot_path=snapshot_path or clean_snapshot_path,
                     )
-                    logger.info("Updated verified clip %s to READY: duration=%.1fs, size=%d bytes", clip_id, duration, file_size)
+                    logger.info("Updated verified clip %s to READY: duration=%.1fs, size=%d bytes, category=%s", clip_id, duration, file_size, combined_cat)
                     asyncio.create_task(compress_clip_background(clip_path))
                 else:
                     logger.warning(

@@ -660,22 +660,32 @@ private fun ClipCard(
         if (clip.snapshotUrl.startsWith("http")) clip.snapshotUrl else "$baseUrl${clip.snapshotUrl}"
     } else ""
 
-    val (categoryTitle, categoryColor) = when {
-        !clip.answeredBy.isNullOrBlank() && (clip.answeredBy.contains("SHAZAM") || clip.answeredBy.contains("SNIFF") || clip.answeredBy.contains("Aanbel") || clip.answeredBy.contains("ring")) || clip.category == "ring" -> {
-            "🔔 Aangebeld" to Color(0xFFF59E0B)
+    val badges = remember(clip.category, clip.answeredBy) {
+        val list = mutableListOf<Pair<String, Color>>()
+        val catRaw = clip.category.lowercase()
+        val ansRaw = (clip.answeredBy ?: "").lowercase()
+
+        val isRing = catRaw.contains("ring") || ansRaw.contains("shazam") || ansRaw.contains("sniff") || ansRaw.contains("aanbel")
+        val isPerson = catRaw.contains("person") || ansRaw.contains("persoon")
+        val isVehicle = catRaw.contains("vehicle") || ansRaw.contains("voertuig") || ansRaw.contains("auto")
+        val isAnimal = catRaw.contains("animal") || ansRaw.contains("dier")
+
+        if (isRing) {
+            list.add("🔔 Aangebeld" to Color(0xFFF59E0B))
         }
-        clip.category == "person" || (!clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("Persoon")) -> {
-            "🚶 Persoon" to Color(0xFF3B82F6)
+        if (isPerson) {
+            list.add("🚶 Persoon" to Color(0xFF3B82F6))
         }
-        clip.category == "vehicle" || (!clip.answeredBy.isNullOrBlank() && (clip.answeredBy.contains("Voertuig") || clip.answeredBy.contains("Auto"))) -> {
-            "🚗 Voertuig" to Color(0xFF10B981)
+        if (isVehicle) {
+            list.add("🚗 Voertuig" to Color(0xFF10B981))
         }
-        clip.category == "animal" || (!clip.answeredBy.isNullOrBlank() && clip.answeredBy.contains("Dier")) -> {
-            "🐾 Dier" to Color(0xFF8B5CF6)
+        if (isAnimal) {
+            list.add("🐾 Dier" to Color(0xFF8B5CF6))
         }
-        else -> {
-            "🔔 Aangebeld" to Color(0xFFF59E0B)
+        if (list.isEmpty()) {
+            list.add("🔔 Aangebeld" to Color(0xFFF59E0B))
         }
+        list
     }
 
     val isClipRecording = clip.isRecording || clip.status == "RECORDING"
@@ -783,24 +793,31 @@ private fun ClipCard(
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
-                // Bovenste rij: Categorie pill + Tijd
+                // Bovenste rij: Categorie pills (multi-tag) + Tijd
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Surface(
-                        color = categoryColor.copy(alpha = 0.15f),
-                        shape = RoundedCornerShape(12.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, categoryColor.copy(alpha = 0.35f))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = categoryTitle,
-                            color = categoryColor,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                        )
+                        badges.forEach { (catTitle, catColor) ->
+                            Surface(
+                                color = catColor.copy(alpha = 0.15f),
+                                shape = RoundedCornerShape(12.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, catColor.copy(alpha = 0.35f))
+                            ) {
+                                Text(
+                                    text = catTitle,
+                                    color = catColor,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
                     }
 
                     Text(

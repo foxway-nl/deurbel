@@ -1,0 +1,22 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- House outline (gable roof + walls + base) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M3,10.5 L12,3 L21,10.5 M5,9.5 V21 H19 V9.5" />
+    <!-- Centered Bell inside house -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,8.5 c-2.2,0 -4,1.8 -4,4 v3.5 l-1.5,1.5 v1 h11 v-1 l-1.5,-1.5 v-3.5 c0,-2.2 -1.8,-4 -4,-4 z" />
+    <!-- Bell clapper -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,19.8 c0.9,0 1.6,-0.7 1.6,-1.6 h-3.2 c0,0.9 0.7,1.6 1.6,1.6 z" />
+</vector>

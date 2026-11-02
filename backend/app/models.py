@@ -687,19 +687,19 @@ async def list_clips(
     if cat_lower and cat_lower != "all" and cat_lower != "alles":
         if cat_lower == "ring" or "aangebel" in cat_lower or "aanbel" in cat_lower:
             where_clauses.append(
-                "(category = 'ring' OR answered_by LIKE '%Aanbel%' OR answered_by LIKE '%SHAZAM%' OR answered_by LIKE '%SNIFF%' OR clip_id LIKE 'ring_%' OR clip_id LIKE 'call_%')"
+                "(category LIKE '%ring%' OR answered_by LIKE '%Aanbel%' OR answered_by LIKE '%SHAZAM%' OR answered_by LIKE '%SNIFF%' OR clip_id LIKE 'ring_%' OR clip_id LIKE 'call_%')"
             )
         elif cat_lower == "person" or "mensen" in cat_lower or "persoon" in cat_lower:
             where_clauses.append(
-                "(category = 'person' OR answered_by LIKE '%Persoon%' OR answered_by LIKE '%Person%' OR clip_id LIKE 'person_%')"
+                "(category LIKE '%person%' OR answered_by LIKE '%Persoon%' OR answered_by LIKE '%Person%' OR clip_id LIKE 'person_%')"
             )
         elif cat_lower == "vehicle" or "voertuig" in cat_lower or "auto" in cat_lower:
             where_clauses.append(
-                "(category = 'vehicle' OR answered_by LIKE '%Voertuig%' OR answered_by LIKE '%Auto%' OR answered_by LIKE '%Vehicle%' OR clip_id LIKE 'vehicle_%')"
+                "(category LIKE '%vehicle%' OR answered_by LIKE '%Voertuig%' OR answered_by LIKE '%Auto%' OR answered_by LIKE '%Vehicle%' OR clip_id LIKE 'vehicle_%')"
             )
         elif cat_lower == "animal" or "dier" in cat_lower:
             where_clauses.append(
-                "(category = 'animal' OR answered_by LIKE '%Dier%' OR answered_by LIKE '%Animal%' OR answered_by LIKE '%Hond%' OR answered_by LIKE '%Kat%' OR clip_id LIKE 'animal_%')"
+                "(category LIKE '%animal%' OR answered_by LIKE '%Dier%' OR answered_by LIKE '%Animal%' OR answered_by LIKE '%Hond%' OR answered_by LIKE '%Kat%' OR clip_id LIKE 'animal_%')"
             )
         elif cat_lower == "starred" or "favoriet" in cat_lower:
             where_clauses.append("starred = 1")
@@ -1028,6 +1028,31 @@ async def get_events_since(since_id: int = 0, limit: int = 50, order: str = "asc
                 ORDER BY e.id ASC LIMIT ?
                 """,
                 (since_id, max(1, min(limit, 200))),
+            )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def get_unnotified_events(since: Optional[str] = None, limit: int = 20) -> list[dict]:
+    """Retrieve unnotified non-silent events since timestamp for client sync (v3.5.5)."""
+    async with get_db(write=False) as db:
+        if since:
+            cursor = await db.execute(
+                """
+                SELECT * FROM events
+                WHERE (created_at >= ? OR id > CAST(? AS INTEGER)) AND silent = 0
+                ORDER BY id DESC LIMIT ?
+                """,
+                (since, since if str(since).isdigit() else 0, max(1, min(limit, 100))),
+            )
+        else:
+            cursor = await db.execute(
+                """
+                SELECT * FROM events
+                WHERE (julianday('now') - julianday(created_at)) * 86400 <= 60.0 AND silent = 0
+                ORDER BY id DESC LIMIT ?
+                """,
+                (max(1, min(limit, 100)),),
             )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]

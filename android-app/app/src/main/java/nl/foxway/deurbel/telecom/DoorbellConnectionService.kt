@@ -130,7 +130,7 @@ class DoorbellConnectionService : ConnectionService() {
                 )
 
                 val notifBuilder = NotificationCompat.Builder(context, FoxwayApp.CHANNEL_RING)
-                    .setSmallIcon(R.drawable.ic_launcher)
+                    .setSmallIcon(R.drawable.ic_stat_foxway_house_bell)
                     .setContentTitle("Inkomende deurbel oproep")
                     .setContentText("Er staat iemand bij de voordeur")
                     .setCategory(NotificationCompat.CATEGORY_CALL)

@@ -167,10 +167,13 @@
             </intent-filter>
         </receiver>
 
-        <!-- FCM default notification channel -->
+        <!-- FCM default notification channel & icon -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="foxway_doorbell_ring" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_stat_foxway_house_bell" />
 
     </application>
 

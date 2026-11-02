@@ -101,7 +101,7 @@ class WebSocketForegroundService : Service() {
                     )
 
                     val notifBuilder = NotificationCompat.Builder(context, FoxwayApp.CHANNEL_MOTION)
-                        .setSmallIcon(android.R.drawable.ic_menu_camera)
+                        .setSmallIcon(nl.foxway.deurbel.R.drawable.ic_stat_foxway_house_bell)
                         .setContentTitle(event.title.ifBlank { "Beweging gedetecteerd" })
                         .setContentText("Beweging waargenomen bij de voordeur")
                         .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -319,8 +319,8 @@ class WebSocketForegroundService : Service() {
                     return
                 }
                 shownIds.add(idStr)
-                if (shownIds.size > 500) {
-                    val pruned = shownIds.toList().takeLast(300).toSet()
+                if (shownIds.size > 80) {
+                    val pruned = shownIds.toList().takeLast(50).toSet()
                     eventPrefs.edit().putStringSet("shown_event_ids", pruned).apply()
                 } else {
                     eventPrefs.edit().putStringSet("shown_event_ids", shownIds).apply()
@@ -403,7 +403,12 @@ class WebSocketForegroundService : Service() {
             return
         }
         shownIds.add(idStr)
-        eventPrefs.edit().putStringSet("shown_event_ids", shownIds).apply()
+        if (shownIds.size > 80) {
+            val pruned = shownIds.toList().takeLast(50).toSet()
+            eventPrefs.edit().putStringSet("shown_event_ids", pruned).apply()
+        } else {
+            eventPrefs.edit().putStringSet("shown_event_ids", shownIds).apply()
+        }
 
         val clipId = event.data["clip_id"] as? String ?: ""
         val title = event.data["title"] as? String ?: "Beweging gedetecteerd"
@@ -474,7 +479,7 @@ class WebSocketForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val notif = NotificationCompat.Builder(this, FoxwayApp.CHANNEL_INFO)
-            .setSmallIcon(android.R.drawable.ic_menu_call)
+            .setSmallIcon(nl.foxway.deurbel.R.drawable.ic_stat_foxway_house_bell)
             .setContentTitle("Gemiste deurbel oproep")
             .setContentText("Er is aangebeld bij de voordeur. Tik om de opname te bekijken.")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -504,7 +509,7 @@ class WebSocketForegroundService : Service() {
     private fun showUserJoinedNotification(userName: String) {
         val notificationManager = getSystemService(NotificationManager::class.java)
         val notification = NotificationCompat.Builder(this, FoxwayApp.CHANNEL_INFO)
-            .setSmallIcon(android.R.drawable.ic_menu_myplaces)
+            .setSmallIcon(nl.foxway.deurbel.R.drawable.ic_stat_foxway_house_bell)
             .setContentTitle("Foxway Deurbel")
             .setContentText("👤 $userName is verbonden met de Foxway Deurbel")
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
@@ -527,7 +532,7 @@ class WebSocketForegroundService : Service() {
         return NotificationCompat.Builder(this, FoxwayApp.CHANNEL_SERVICE)
             .setContentTitle("Foxway Deurbel")
             .setContentText("Achtergrondverbinding actief")
-            .setSmallIcon(android.R.drawable.ic_menu_call)
+            .setSmallIcon(nl.foxway.deurbel.R.drawable.ic_stat_foxway_house_bell)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setSilent(true)

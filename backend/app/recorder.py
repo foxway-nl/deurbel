@@ -276,14 +276,20 @@ recording_lock = asyncio.Lock()
 _active_recording_info: dict = {
     "clip_id": None,
     "category": "motion",
+    "categories": set(),
     "label": "Beweging",
     "extend_until": 0.0,
     "last_motion_timestamp": 0.0,
+    "start_time": 0.0,
+    "video_path": None,
+    "snapshot_path": None,
+    "call_id": None,
+    "answered_by": None,
 }
 
 def is_recording_active() -> bool:
     """Return True if a smart clip recording is currently underway."""
-    return recording_lock.locked()
+    return bool(_active_recording_info.get("clip_id")) or recording_lock.locked()
 
 def notify_ongoing_motion(category: Optional[str] = None, label: Optional[str] = None) -> bool:
     """
@@ -291,12 +297,14 @@ def notify_ongoing_motion(category: Optional[str] = None, label: Optional[str] =
     Updates last_motion_timestamp so the active recording keeps rolling until post_roll_seconds
     after motion completely stops.
     """
-    if not _active_recording_info.get("clip_id") and not recording_lock.locked():
+    if not is_recording_active():
         return False
     now = time.time()
     _active_recording_info["last_motion_timestamp"] = now
-    if category == "person":
-        _active_recording_info["category"] = "person"
+    if category:
+        _active_recording_info.setdefault("categories", set()).add(category)
+        if category == "ring" or _active_recording_info.get("category") != "ring":
+            _active_recording_info["category"] = category
         if label:
             _active_recording_info["label"] = label
     return True
@@ -304,9 +312,9 @@ def notify_ongoing_motion(category: Optional[str] = None, label: Optional[str] =
 def extend_active_recording(category: str, label: str, duration_sec: float = 30.0) -> bool:
     """
     If a recording is in progress, extends the active deadline and upgrades
-    the recording category to 'person' if a person is detected.
+    the recording categories and priority (v3.5.5).
     """
-    if not recording_lock.locked():
+    if not is_recording_active():
         return False
     now = time.time()
     _active_recording_info["last_motion_timestamp"] = now
@@ -314,7 +322,13 @@ def extend_active_recording(category: str, label: str, duration_sec: float = 30.
         _active_recording_info.get("extend_until", 0.0),
         now + duration_sec
     )
-    if category == "person":
+    _active_recording_info.setdefault("categories", set()).add(category)
+    if category == "ring":
+        _active_recording_info["category"] = "ring"
+        _active_recording_info["label"] = label
+        _active_recording_info["answered_by"] = label
+        logger.info("Upgraded active clip %s priority to ring (%s)", _active_recording_info.get("clip_id"), label)
+    elif category == "person" and _active_recording_info.get("category") != "ring":
         _active_recording_info["category"] = "person"
         _active_recording_info["label"] = label
         logger.info("Upgraded active clip %s priority to person (%s)", _active_recording_info.get("clip_id"), label)
@@ -331,10 +345,11 @@ async def record_smart_clip(
     motion_active_func: Optional[Callable[[], bool]] = None,
     max_duration: float = 180.0,
     t0: Optional[float] = None,
+    category: str = "motion",
 ) -> float:
     """
-    Dynamic Keep-Recording-While-Motion Clip-Opbouw (v3.5.2):
-      1. Grabs exact 1s segments prior to T0 within [T0 - preroll_seconds, T0] (e.g. 20s pre-roll).
+    Dynamic Keep-Recording-While-Motion Clip-Opbouw (v3.5.5):
+      1. Grabs exact segments prior to T0 within [T0 - preroll_seconds, T0] (e.g. 20s pre-roll).
       2. Appends incoming segments continuously as long as motion continues (via notify_ongoing_motion or motion_active_func).
       3. Continues recording until postroll_seconds after motion has completely stopped (safety cap: max_duration, default 180s).
       4. Stitches segments via fast stream-copy (-c copy), with automatic fallback to ultrafast transcode if needed.
@@ -342,8 +357,13 @@ async def record_smart_clip(
     if t0 is None:
         t0 = time.time()
 
+    now_start = time.time()
     _active_recording_info["clip_id"] = clip_id
-    _active_recording_info["last_motion_timestamp"] = time.time()
+    _active_recording_info["category"] = category
+    _active_recording_info.setdefault("categories", set()).add(category)
+    _active_recording_info["video_path"] = clip_path
+    _active_recording_info["start_time"] = now_start
+    _active_recording_info["last_motion_timestamp"] = now_start
 
     # Save immediate clean snapshot from live_hub frame if not already present
     try:
@@ -399,12 +419,14 @@ async def record_smart_clip(
 
             last_motion = _active_recording_info.get("last_motion_timestamp", motion_start)
             time_since_motion = now - last_motion
+            elapsed = now - motion_start
 
-            # Stop when motion has ceased for at least postroll_seconds
-            if time_since_motion >= postroll_seconds and now >= _active_recording_info.get("extend_until", 0.0):
+            # Stop when motion has ceased for at least postroll_seconds AND elapsed >= postroll_seconds (v3.5.5)
+            if (time_since_motion >= postroll_seconds and elapsed >= postroll_seconds and
+                now >= _active_recording_info.get("extend_until", 0.0)):
                 logger.info(
-                    "Smart clip %s motion ended (silent for %.1fs >= postroll %.1fs). Finalizing recording.",
-                    clip_id, time_since_motion, postroll_seconds,
+                    "Smart clip %s motion ended (silent for %.1fs >= postroll %.1fs, elapsed=%.1fs). Finalizing recording.",
+                    clip_id, time_since_motion, postroll_seconds, elapsed,
                 )
                 break
 
@@ -458,23 +480,9 @@ async def record_smart_clip(
             dur = await _probe_duration(clip_path)
             return dur if dur > 0 else 15.0
 
-        # 3. Strict Chronological Sorting & Gap-Sanitization
+        # 3. Strict Chronological Sorting & Segment Preservation (v3.5.5)
         raw_collected_segments.sort(key=lambda s: s[0])
-        continuous_segments: list[tuple[float, Path]] = []
-
-        for s_epoch, s_path in raw_collected_segments:
-            if continuous_segments:
-                gap = s_epoch - continuous_segments[-1][0]
-                if gap > 4.0:
-                    logger.warning(
-                        "Time gap of %.1fs > 4.0s detected between segments for %s. Discarding %d prior segments to eliminate time jumps!",
-                        gap, clip_id, len(continuous_segments),
-                    )
-                    continuous_segments = [(s_epoch, s_path)]
-                else:
-                    continuous_segments.append((s_epoch, s_path))
-            else:
-                continuous_segments.append((s_epoch, s_path))
+        continuous_segments = list(raw_collected_segments)
 
         copied_files: list[Path] = []
         for idx, (_, seg_path) in enumerate(continuous_segments):
@@ -561,6 +569,8 @@ async def record_smart_clip(
             _active_recording_info["clip_id"] = None
             _active_recording_info["extend_until"] = 0.0
             _active_recording_info["last_motion_timestamp"] = 0.0
+            _active_recording_info["categories"] = set()
+            _active_recording_info["start_time"] = 0.0
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
@@ -573,16 +583,52 @@ _active_recorders: dict[str, asyncio.subprocess.Process] = {}
 
 async def start_recording(call_id: str, clip_path: str, trigger_source: str = "SHAZAM_CHIME") -> asyncio.Task:
     """
-    Spawns autonomous dynamic recording for doorbell calls (v3.5.4):
+    Spawns autonomous dynamic recording for doorbell calls (v3.5.5):
     20s pre-roll + dynamic recording as long as motion continues + post-roll.
-    Hanging up, declining, or missing the call will NEVER cancel or stop this task!
+    If an active recording session is already running (e.g. started by AI detection < 8s ago),
+    merges the ring event into the active recording session (category='ring,person')
+    and extends its duration without starting a duplicate ffmpeg/smart clip!
     """
+    now = time.time()
+    active_clip_id = _active_recording_info.get("clip_id")
+    is_active = (active_clip_id is not None) or ((now - _active_recording_info.get("start_time", 0.0)) < 8.0)
+
+    if is_active and active_clip_id:
+        logger.info(
+            "🔔 Doorbell call (%s, %s) while recording session %s active -> Consolidating into single session!",
+            call_id, trigger_source, active_clip_id,
+        )
+        _active_recording_info.setdefault("categories", set()).add("ring")
+        cats = sorted(list(_active_recording_info["categories"]), key=lambda c: 0 if c == "ring" else 1 if c == "person" else 2)
+        combined_category = ",".join(cats)
+        ans = f"Aanbellen [{trigger_source}]"
+        _active_recording_info["category"] = "ring"
+        _active_recording_info["label"] = ans
+        _active_recording_info["answered_by"] = ans
+        _active_recording_info["call_id"] = call_id
+        extend_active_recording(category="ring", label=ans, duration_sec=30.0)
+
+        async def _sync_active_clip_db():
+            try:
+                from app.database import get_db
+                async with get_db(write=True) as db:
+                    await db.execute(
+                        "UPDATE clips SET category = ?, answered_by = ?, call_id = ? WHERE clip_id = ?",
+                        (combined_category, ans, call_id, active_clip_id),
+                    )
+                logger.info("Updated active clip %s in DB: category=%s, answered_by=%s", active_clip_id, combined_category, ans)
+            except Exception as dbe:
+                logger.warning("Failed updating active clip DB row: %s", dbe)
+
+        asyncio.create_task(_sync_active_clip_db())
+        return asyncio.create_task(asyncio.sleep(0.0))
+
     task = asyncio.create_task(_record_call_smart(call_id, clip_path, trigger_source))
     return task
 
 
 async def _record_call_smart(call_id: str, clip_path: str, trigger_source: str = "SHAZAM_CHIME") -> None:
-    """Dynamic Keep-Recording-While-Motion for Doorbell Calls (v3.5.4)."""
+    """Dynamic Keep-Recording-While-Motion for Doorbell Calls (v3.5.5)."""
     try:
         from app.models import get_system_settings
         sys_settings = await get_system_settings()
@@ -600,6 +646,7 @@ async def _record_call_smart(call_id: str, clip_path: str, trigger_source: str =
             postroll_seconds=postroll,
             motion_active_func=motion_func,
             max_duration=max_duration,
+            category="ring",
         )
 
         actual_dur = await _probe_duration(clip_path)
@@ -624,6 +671,12 @@ async def _record_call_smart(call_id: str, clip_path: str, trigger_source: str =
         except Exception:
             pass
 
+        active_cats = _active_recording_info.get("categories", set())
+        if "ring" not in active_cats:
+            active_cats.add("ring")
+        cats = sorted(list(active_cats), key=lambda c: 0 if c == "ring" else 1 if c == "person" else 2)
+        combined_cat = ",".join(cats) if cats else "ring"
+
         await save_clip(
             clip_id=call_id,
             call_id=call_id,
@@ -632,10 +685,10 @@ async def _record_call_smart(call_id: str, clip_path: str, trigger_source: str =
             duration=actual_dur,
             answered_by=ans,
             status="READY",
-            category="ring",
+            category=combined_cat,
             file_size=file_size,
         )
-        logger.info("✅ Finalized call recording for %s (%.1fs, %d bytes)", call_id, actual_dur, file_size)
+        logger.info("✅ Finalized call recording for %s (%.1fs, %d bytes, category=%s)", call_id, actual_dur, file_size, combined_cat)
     except Exception as e:
         logger.error("Error in _record_call_smart for %s: %s", call_id, e)
 

@@ -437,7 +437,7 @@ openapi_tags = [
 
 app = FastAPI(
     title="Foxway Smart Doorbell API",
-    version="3.5.4",
+    version="3.5.5",
     description="Signaling, state management, media proxy, and clip API for the Foxway Doorbell system.",
     openapi_tags=openapi_tags,
     lifespan=lifespan,
@@ -816,7 +816,7 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "3.5.4",
+        "version": "3.5.5",
         "version_code": 37,
         "build_time": "2026-11-01T21:10:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
@@ -900,6 +900,17 @@ async def get_events_endpoint(
     """Retrieve event queue items since since_id for reliable push fallback."""
     from app.models import get_events_since
     events = await get_events_since(since_id=since_id, limit=limit, order=order)
+    return {"status": "ok", "events": events, "count": len(events)}
+
+
+@app.get("/api/v1/events/unnotified")
+async def get_unnotified_events_endpoint(
+    since: Optional[str] = Query(None, description="ISO timestamp or epoch seconds"),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Retrieve recent non-silent events for client reconnect synchronization (v3.5.5)."""
+    from app.models import get_unnotified_events
+    events = await get_unnotified_events(since=since, limit=limit)
     return {"status": "ok", "events": events, "count": len(events)}
 
 
