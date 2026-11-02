@@ -243,15 +243,15 @@ class LiveHub:
                 audio_task = asyncio.create_task(self._read_audio_loop(loop))
 
                 while self._running:
-                    # If clients are connected or cache is cold (>2s), fetch snapshot
-                    need_fetch = bool(self._clients) or not self.is_fresh(max_age=2.0)
+                    # Keep latest frame fresh for continuous AI detection (at 4 FPS / 250ms)
+                    need_fetch = bool(self._clients) or not self.is_fresh(max_age=0.25)
                     if need_fetch:
                         frame = await self.fetch_snapshot_async(timeout=1.0)
                         if frame and self._clients:
                             self._broadcast(b"\x01" + frame)
 
-                    # Sleep 200ms when clients active (5 FPS), or 1.0s when idle (0% CPU)
-                    sleep_time = 0.20 if self._clients else 1.0
+                    # 200ms when clients active (5 FPS), 250ms for background AI detector (4 FPS)
+                    sleep_time = 0.20 if self._clients else 0.25
                     await asyncio.sleep(sleep_time)
 
                 audio_task.cancel()

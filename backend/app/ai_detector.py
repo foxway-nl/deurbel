@@ -231,6 +231,7 @@ class SmartDetector:
         self._cooldown_seconds: float = 5.0
         self._last_verified_object_seen: float = 0.0
         self._last_person_seen: float = 0.0
+        self._last_rejected_log_time: dict[str, float] = {}
 
     def notify_hardware_motion(self) -> None:
         """Signaled by Port 8000 SDK Alarm (0x4000 dwAlarmType == 3) to trigger 4 FPS High-Speed Scan Burst."""
@@ -864,35 +865,55 @@ class SmartDetector:
                 aspect_ratio = box_h / box_w
                 if aspect_ratio < 1.25:
                     logger.debug("Rejected person candidate with invalid aspect ratio %.2f < 1.25", aspect_ratio)
+                    asyncio.create_task(self._log_rejected_candidate(
+                        "person", "Persoon", conf, 0.0,
+                        f"AFGEWEZEN: Aspect-ratio ongeldig ({aspect_ratio:.2f} < 1.25)",
+                        box, frame
+                    ))
                     continue
 
                 # Foliage/Tree zone check: x < 0.16 (left bushes/trees) or x > 0.68 (right foliage/trees)
                 cx_norm = ((bx1 + bx2) / 2.0) / float(w)
                 is_foliage_zone = (cx_norm < 0.16) or (cx_norm > 0.68)
-                req_conf = 0.62 if is_foliage_zone else max(person_conf_thresh, 0.48)
+                req_conf = 0.58 if is_foliage_zone else max(min(person_conf_thresh, 0.42), 0.35)
             elif cid in VEHICLE_CLASSES:
                 category = "vehicle"
-                req_conf = vehicle_conf_thresh
+                req_conf = min(vehicle_conf_thresh, 0.40)
             elif cid in ANIMAL_CLASSES:
                 category = "animal"
-                req_conf = animal_conf_thresh
+                req_conf = min(animal_conf_thresh, 0.35)
             else:
                 continue
 
             label = COCO_NAMES.get(cid, category)
 
             # Stap A: Loopvlak Ground-Plane Filter
-            # The bottom of the box (by2) must be >= 0.22 * frame height.
-            if by2 < (0.22 * h):
+            # The bottom of the box (by2) must be >= 0.18 * frame height.
+            if by2 < (0.18 * h):
+                asyncio.create_task(self._log_rejected_candidate(
+                    category, label, conf, 0.0,
+                    f"AFGEWEZEN: Buiten loopvlak (bovenin beeld y={by2:.0f})",
+                    box, frame
+                ))
                 continue
 
             # Stap B: Exclusion Zones
             in_zone, zone_name = self.is_in_exclusion_zone(box, (h, w), exclusion_zones)
             if in_zone:
+                asyncio.create_task(self._log_rejected_candidate(
+                    category, label, conf, 0.0,
+                    f"AFGEWEZEN: In uitsluitzone '{zone_name}'",
+                    box, frame
+                ))
                 continue
 
             # Confidence check
             if conf < req_conf:
+                asyncio.create_task(self._log_rejected_candidate(
+                    category, label, conf, 0.0,
+                    f"AFGEWEZEN: Zekerheid {round(conf*100)}% te laag (<{round(req_conf*100)}%)",
+                    box, frame
+                ))
                 continue
 
             # Stap C: Pixel-level motion inside bounding box
@@ -909,14 +930,19 @@ class SmartDetector:
             if category == "vehicle":
                 if self.is_stationary_parked(box, float(w), now):
                     logger.debug("STATIONARY_PARKED_CAR rejected at %s", box)
+                    asyncio.create_task(self._log_rejected_candidate(
+                        "vehicle", label, conf, 0.0,
+                        "AFGEWEZEN: Stilstaande geparkeerde auto",
+                        box, frame
+                    ))
                     continue
 
             detected_candidates.append((category, label, conf, box, changed_pixel_ratio))
 
         if detected_candidates:
             self._last_candidate_seen_time = now
-        elif False and is_hardware_motion_active:
-            # Smart motion fallback disabled in v3.5.4 (eliminates shadow/tree triggers without verified YOLO objects)
+        elif is_hardware_motion_active:
+            # Smart motion fallback on motion_mask outside parked cars & trees (v3.4.1)
             fallback_mask = motion_mask.copy()
             # Mask out upper canopy / roofline (y < 0.22 * h) and top right tree canopy (x > 0.60 * w, y < 0.35 * h)
             fallback_mask[:int(0.22 * h), :] = 0
@@ -1028,7 +1054,7 @@ class SmartDetector:
                 verified_disp_pct = delta_d_pct
 
                 if track.category == "vehicle":
-                    # Check IoU overlap with stationary vehicles and parked boxes (v3.5.4)
+                    # Check IoU overlap with stationary vehicles and parked boxes
                     max_stat_iou = 0.0
                     for s in self.stationary_vehicles:
                         iou = compute_iou(last_box, s["box"])
@@ -1039,43 +1065,33 @@ class SmartDetector:
                         if iou > max_stat_iou:
                             max_stat_iou = iou
 
-                    if max_stat_iou >= 0.50:
+                    # Only reject as parked if stationary overlap is high and it hasn't moved
+                    if max_stat_iou >= 0.70 and delta_d < 0.035:
                         if duration_tracked >= 1.5:
+                            asyncio.create_task(self._log_rejected_candidate(
+                                "vehicle", track.label, track.best_conf, delta_d_pct,
+                                f"AFGEWEZEN: Geparkeerd/stilstaand voertuig (IoU={max_stat_iou:.2f}, d={delta_d_pct:.1f}%)",
+                                last_box, frame
+                            ))
                             to_remove.append(tid)
                         continue
 
-                    # Require at least 3 scans, horizontal displacement >= 12% width, consistent direction
-                    if len(track.frames) >= 3:
-                        x_start = (track.frames[0][1][0] + track.frames[0][1][2]) / 2.0
-                        x_now = (last_box[0] + last_box[2]) / 2.0
-                        dx_total = x_now - x_start
-                        dx_pct = abs(dx_total) / float(w)
-
-                        if dx_pct >= 0.12:
-                            consistent = True
-                            for f_i in range(len(track.frames) - 1):
-                                fb1 = track.frames[f_i][1]
-                                fb2 = track.frames[f_i+1][1]
-                                if len(fb1) >= 4 and len(fb2) >= 4:
-                                    f_x1 = (fb1[0] + fb1[2]) / 2.0
-                                    f_x2 = (fb2[0] + fb2[2]) / 2.0
-                                    step_dx = f_x2 - f_x1
-                                    if dx_total > 0 and step_dx < -0.02 * float(w):
-                                        consistent = False
-                                        break
-                                    elif dx_total < 0 and step_dx > 0.02 * float(w):
-                                        consistent = False
-                                        break
-
-                            if consistent:
-                                is_valid_object = True
-                                verified_disp_pct = round(dx_pct * 100.0, 1)
-                                logger.info(
-                                    "Vehicle Passing APPROVED (v3.5.4): %s frames=%d disp=%.1f%% dx=%.1f%% dir=%s",
-                                    track.label, len(track.frames), delta_d_pct, verified_disp_pct,
-                                    "RIGHT" if dx_total > 0 else "LEFT"
-                                )
+                    # Moving vehicle verification (passing cars, driveway driving):
+                    # Over >= 2 frames: Euclidean displacement >= 3.5% screen width
+                    if len(track.frames) >= 2:
+                        if delta_d >= 0.035:
+                            is_valid_object = True
+                            verified_disp_pct = delta_d_pct
+                            logger.info(
+                                "Vehicle Motion APPROVED: %s frames=%d disp=%.1f%%",
+                                track.label, len(track.frames), delta_d_pct
+                            )
                     elif duration_tracked >= 2.0:
+                        asyncio.create_task(self._log_rejected_candidate(
+                            "vehicle", track.label, track.best_conf, delta_d_pct,
+                            f"AFGEWEZEN: Te weinig verplaatsing ({delta_d_pct:.1f}% < 3.5%)",
+                            last_box, frame
+                        ))
                         to_remove.append(tid)
                         continue
 
@@ -1085,21 +1101,21 @@ class SmartDetector:
                     aspect_ratio = box_h / box_w
                     if aspect_ratio < 1.25:
                         if duration_tracked >= 1.0:
+                            asyncio.create_task(self._log_rejected_candidate(
+                                "person", track.label, track.best_conf, delta_d_pct,
+                                f"AFGEWEZEN: Aspect-ratio ongeldig ({aspect_ratio:.2f} < 1.25)",
+                                last_box, frame
+                            ))
                             to_remove.append(tid)
                         continue
 
                     cx_norm = cx2 / float(w)
                     is_foliage_zone = (cx_norm < 0.16) or (cx_norm > 0.68)
 
-                    # Layer 2 (Anti-Oscillation / Heen-en-Weer Wapper Filter v3.5.5):
-                    # High confidence pedestrians outside foliage approved directly
-                    if track.best_conf >= 0.68 and not is_foliage_zone:
-                        is_valid_object = True
-                        verified_disp_pct = delta_d_pct
-                        logger.info("Person APPROVED (High Conf): %s conf=%.2f disp=%.1f%%", track.label, track.best_conf, delta_d_pct)
-                    else:
-                        # For person with conf < 0.68 or in foliage zones: require track across >= 3 frames
-                        if len(track.frames) >= 3:
+                    # Pedestrian verification over >= 2 frames:
+                    if len(track.frames) >= 2:
+                        # In foliage zones with 4+ frames: check oscillation to filter swaying tree branches
+                        if len(track.frames) >= 4 and is_foliage_zone:
                             total_path = 0.0
                             for f_i in range(len(track.frames) - 1):
                                 fb1 = track.frames[f_i][1]
@@ -1108,37 +1124,46 @@ class SmartDetector:
                                     f_c1 = ((fb1[0] + fb1[2]) / 2.0, (fb1[1] + fb1[3]) / 2.0)
                                     f_c2 = ((fb2[0] + fb2[2]) / 2.0, (fb2[1] + fb2[3]) / 2.0)
                                     total_path += math.hypot(f_c2[0] - f_c1[0], f_c2[1] - f_c1[1])
-
                             net_disp = math.hypot(cx2 - cx1, cy2 - cy1)
                             oscillation_ratio = (net_disp / max(1.0, total_path)) if total_path > 0 else 0.0
-                            min_disp_req = 4.0 if not is_foliage_zone else 2.5
-
-                            if oscillation_ratio >= 0.60 and delta_d_pct >= min_disp_req:
-                                is_valid_object = True
-                                verified_disp_pct = delta_d_pct
-                                logger.info(
-                                    "Person APPROVED (Anti-Oscillation): %s conf=%.2f frames=%d osc_ratio=%.2f disp=%.1f%% (min=%.1f%%)",
-                                    track.label, track.best_conf, len(track.frames), oscillation_ratio, delta_d_pct, min_disp_req
-                                )
-                            elif duration_tracked >= 1.5:
-                                logger.debug(
-                                    "Person REJECTED (wind/oscillation): %s osc_ratio=%.2f disp=%.1f%%",
-                                    track.label, oscillation_ratio, delta_d_pct
-                                )
-                                to_remove.append(tid)
+                            if oscillation_ratio < 0.50:
+                                if duration_tracked >= 1.5:
+                                    asyncio.create_task(self._log_rejected_candidate(
+                                        "person", track.label, track.best_conf, delta_d_pct,
+                                        f"AFGEWEZEN: Wapperende takken/wind (osc_ratio={oscillation_ratio:.2f})",
+                                        last_box, frame
+                                    ))
+                                    to_remove.append(tid)
                                 continue
-                        elif duration_tracked >= 1.8:
-                            to_remove.append(tid)
-                            continue
+
+                        # Approve walking pedestrian
+                        min_disp = 1.5 if not is_foliage_zone else 2.5
+                        if delta_d_pct >= min_disp or track.best_conf >= 0.58:
+                            is_valid_object = True
+                            verified_disp_pct = delta_d_pct
+                            logger.info("Person APPROVED: %s conf=%.2f disp=%.1f%% frames=%d", track.label, track.best_conf, delta_d_pct, len(track.frames))
+                    elif duration_tracked >= 1.8:
+                        asyncio.create_task(self._log_rejected_candidate(
+                            "person", track.label, track.best_conf, delta_d_pct,
+                            f"AFGEWEZEN: Te weinig verplaatsing ({delta_d_pct:.1f}% < 1.5%)",
+                            last_box, frame
+                        ))
+                        to_remove.append(tid)
+                        continue
 
                 elif track.category == "animal":
                     # Animal: Cat, dog, bird, horse, sheep, cow
-                    # Verified immediately on detection (>= 1 frame) with conf >= animal_conf_thresh
-                    if track.best_conf >= animal_conf_thresh:
+                    # Verified immediately on detection (>= 1 frame) with conf >= animal_conf_thresh (min 0.35)
+                    if track.best_conf >= min(animal_conf_thresh, 0.35):
                         is_valid_object = True
                         verified_disp_pct = delta_d_pct
                         logger.info("Animal APPROVED: %s conf=%.2f", track.label, track.best_conf)
                     elif duration_tracked >= 1.0:
+                        asyncio.create_task(self._log_rejected_candidate(
+                            "animal", track.label, track.best_conf, delta_d_pct,
+                            f"AFGEWEZEN: Dier zekerheid te laag ({round(track.best_conf*100)}% < 35%)",
+                            last_box, frame
+                        ))
                         to_remove.append(tid)
                         continue
 
@@ -1150,6 +1175,11 @@ class SmartDetector:
                         verified_disp_pct = delta_d_pct
                         logger.info("Motion Fallback APPROVED: %s frames=%d disp=%.1f%%", track.label, len(track.frames), delta_d_pct)
                     elif duration_tracked >= 1.5:
+                        asyncio.create_task(self._log_rejected_candidate(
+                            "motion", track.label, track.best_conf, delta_d_pct,
+                            f"AFGEWEZEN: Beweging te klein ({delta_d_pct:.1f}% < 2.0%)",
+                            last_box, frame
+                        ))
                         to_remove.append(tid)
                         continue
 
@@ -1207,9 +1237,16 @@ class SmartDetector:
         box: tuple[float, float, float, float],
         frame: np.ndarray,
     ) -> None:
-        """Save rejected AI evaluation snapshot and audit log to SQLite."""
+        """Save rejected AI evaluation snapshot and audit log to SQLite (debounced per category/reason)."""
         try:
-            audit_id = f"audit_rej_{int(time.time() * 1000)}"
+            now_t = time.time()
+            # Debounce per category + reason (max 1 rejected log per 8 seconds for the same condition)
+            key = f"{category}_{reason[:20]}"
+            if (now_t - self._last_rejected_log_time.get(key, 0.0)) < 8.0:
+                return
+            self._last_rejected_log_time[key] = now_t
+
+            audit_id = f"audit_rej_{int(now_t * 1000)}"
             snap_path = str(settings.SNAPSHOTS_DIR / f"{audit_id}.jpg")
 
             # Draw red bounding box and rejection tag on snapshot

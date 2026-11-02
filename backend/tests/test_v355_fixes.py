@@ -186,5 +186,67 @@ def test_v355_sniffer_detects_2000_4675_hex():
     assert "2f323030302f34363735" in payload_hex
 
 
+@pytest.mark.asyncio
+async def test_v355_ai_rejection_audit_logging():
+    """Verify that rejected AI candidates are saved to ai_audit_logs with REJECTED status."""
+    import numpy as np
+    from app.ai_detector import SmartDetector
+    from app.models import get_recent_ai_audit_logs
+
+    detector = SmartDetector()
+    dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    await detector._log_rejected_candidate(
+        category="vehicle",
+        label="Auto",
+        confidence=0.65,
+        disp_pct=1.2,
+        reason="AFGEWEZEN: Stilstaande geparkeerde auto",
+        box=(100.0, 100.0, 200.0, 200.0),
+        frame=dummy_frame,
+    )
+
+    logs = await get_recent_ai_audit_logs(limit=5)
+    assert len(logs) > 0
+    recent = logs[0]
+    assert recent["status"] == "REJECTED"
+    assert recent["category"] == "vehicle"
+    assert "AFGEWEZEN" in recent["reason"]
+    assert recent["displacement_pct"] == 1.2
+
+
+@pytest.mark.asyncio
+async def test_v355_vehicle_and_person_2_frame_verification():
+    """Verify that moving vehicles and pedestrians are approved within 2 frames."""
+    import time
+    import numpy as np
+    from app.ai_detector import SmartDetector, CandidateDetection, DetectionSettings
+
+    detector = SmartDetector()
+    detector.init_model()
+    cfg = await DetectionSettings.load()
+
+    now = time.time()
+    # Vehicle moving diagonally/vertically across 2 frames: dx=20, dy=25 -> disp = 32 / 640 = 5.0% >= 3.5%
+    v_tid = "track_v_2frame_test"
+    v_cand = CandidateDetection(v_tid, "vehicle", "Auto", (100.0, 100.0, 250.0, 200.0), 0.70, now - 0.5, 0.2)
+    v_cand.frames.append((now, (120.0, 125.0, 270.0, 225.0), 0.72))
+    detector._candidate_tracks[v_tid] = v_cand
+
+    # Person walking across 2 frames: dx=15, dy=5 -> disp = 15.8 / 640 = 2.4% >= 1.5%
+    p_tid = "track_p_2frame_test"
+    p_cand = CandidateDetection(p_tid, "person", "Persoon", (300.0, 200.0, 360.0, 380.0), 0.65, now - 0.5, 0.2)
+    p_cand.frames.append((now, (315.0, 205.0, 375.0, 385.0), 0.66))
+    detector._candidate_tracks[p_tid] = p_cand
+
+    dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    await detector._process_frame_gatekeeper(dummy_frame, now, cfg)
+
+    # Both tracks should have been approved (verified=True and popped to _dispatch_verified_detection)
+    assert v_tid not in detector._candidate_tracks or detector._candidate_tracks[v_tid].verified is True
+    assert p_tid not in detector._candidate_tracks or detector._candidate_tracks[p_tid].verified is True
+
+
+
 
 
