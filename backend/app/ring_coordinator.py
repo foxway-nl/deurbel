@@ -147,7 +147,7 @@ class RingCoordinator:
             self._schedule_verification_check(window)
 
     def _dispatch_ring_to_state_machine(self, source: str) -> None:
-        """Invokes call_sm.ring(trigger_source=source) immediately."""
+        """Invokes call_sm.ring(force=True, trigger_source=source) immediately."""
         async def _async_trigger():
             try:
                 if self._on_ring_callback:
@@ -156,18 +156,29 @@ class RingCoordinator:
                         await res
                     return
                 from app.main import call_sm
-                await call_sm.ring(trigger_source=source)
+                await call_sm.ring(force=True, trigger_source=source)
             except Exception as e:
                 logger.error("[RingCoordinator] Failed to invoke call_sm.ring: %s", e)
 
-        if self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(_async_trigger(), self._loop)
-        else:
+        target_loop = self._loop
+        if target_loop is None or not target_loop.is_running():
             try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(_async_trigger())
+                target_loop = asyncio.get_running_loop()
             except RuntimeError:
                 pass
+
+        if target_loop and target_loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(_async_trigger(), target_loop)
+            except Exception as run_err:
+                logger.error("[RingCoordinator] run_coroutine_threadsafe error: %s", run_err)
+        else:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(_async_trigger())
+            except Exception as loop_err:
+                logger.error("[RingCoordinator] Could not dispatch ring: no running loop (%s)", loop_err)
 
     def _schedule_verification_check(self, window: Dict[str, Any]) -> None:
         """Schedules checking whether the sniffer also saw a burst within 3.5s.
@@ -204,12 +215,23 @@ class RingCoordinator:
                     "details": f"Ring window gesloten voor {first_src} ({missing} niet binnen {self.verification_window_sec}s)",
                 })
 
-        if self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(_verify_job(), self._loop)
+        target_loop = self._loop
+        if target_loop is None or not target_loop.is_running():
+            try:
+                target_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+
+        if target_loop and target_loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(_verify_job(), target_loop)
+            except Exception:
+                pass
         else:
             try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(_verify_job())
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(_verify_job())
             except RuntimeError:
                 pass
 

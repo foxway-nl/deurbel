@@ -248,7 +248,10 @@ class NetworkSniffer:
             # Flush 1000ms window periodically
             now_t = time.time()
             if (now_t - self._current_window_start) >= 1.0:
-                self._flush_window(now_t)
+                try:
+                    self._flush_window(now_t)
+                except Exception as fe:
+                    logger.debug("Window flush error: %s", fe)
 
             try:
                 raw_data, _ = sock.recvfrom(65535)

@@ -813,7 +813,7 @@ class SmartDetector:
             animal_conf_thresh = min(animal_conf_thresh, 0.22)
             yolo_conf = 0.20
         else:
-            yolo_conf = 0.30
+            yolo_conf = 0.20
 
         try:
             results = self.model(
@@ -872,10 +872,18 @@ class SmartDetector:
                     ))
                     continue
 
-                # Foliage/Tree zone check: x < 0.16 (left bushes/trees) or x > 0.68 (right foliage/trees)
+                # Foliage/Tree zone check vs Doorstep Visitor (v3.5.5)
+                # Doorstep visitor stands close to the camera lens (mounted on right frame):
+                # box_h >= 28% frame height OR bottom edge reaches doorstep ground level (y2 >= 65%).
                 cx_norm = ((bx1 + bx2) / 2.0) / float(w)
-                is_foliage_zone = (cx_norm < 0.16) or (cx_norm > 0.68)
-                req_conf = 0.58 if is_foliage_zone else max(min(person_conf_thresh, 0.42), 0.35)
+                is_doorstep_visitor = (box_h >= (0.28 * float(h))) or (by2 >= (0.65 * float(h)))
+                is_foliage_zone = (not is_doorstep_visitor) and ((cx_norm < 0.16) or (cx_norm > 0.68))
+                if is_doorstep_visitor:
+                    req_conf = 0.20
+                elif is_foliage_zone:
+                    req_conf = 0.58
+                else:
+                    req_conf = max(min(person_conf_thresh, 0.42), 0.35)
             elif cid in VEHICLE_CLASSES:
                 category = "vehicle"
                 req_conf = min(vehicle_conf_thresh, 0.40)
@@ -1110,7 +1118,9 @@ class SmartDetector:
                         continue
 
                     cx_norm = cx2 / float(w)
-                    is_foliage_zone = (cx_norm < 0.16) or (cx_norm > 0.68)
+                    last_h = max(1.0, last_box[3] - last_box[1])
+                    is_doorstep_visitor = (last_h >= (0.28 * float(h))) or (last_box[3] >= (0.65 * float(h)))
+                    is_foliage_zone = (not is_doorstep_visitor) and ((cx_norm < 0.16) or (cx_norm > 0.68))
 
                     # Pedestrian verification over >= 2 frames:
                     if len(track.frames) >= 2:
@@ -1136,12 +1146,18 @@ class SmartDetector:
                                     to_remove.append(tid)
                                 continue
 
-                        # Approve walking pedestrian
-                        min_disp = 1.5 if not is_foliage_zone else 2.5
-                        if delta_d_pct >= min_disp or track.best_conf >= 0.58:
+                        # Approve walking pedestrian or doorstep visitor
+                        if is_doorstep_visitor:
+                            min_disp = 0.5
+                        elif is_foliage_zone:
+                            min_disp = 2.5
+                        else:
+                            min_disp = 1.5
+
+                        if delta_d_pct >= min_disp or track.best_conf >= 0.58 or (is_doorstep_visitor and len(track.frames) >= 2):
                             is_valid_object = True
                             verified_disp_pct = delta_d_pct
-                            logger.info("Person APPROVED: %s conf=%.2f disp=%.1f%% frames=%d", track.label, track.best_conf, delta_d_pct, len(track.frames))
+                            logger.info("Person APPROVED: %s conf=%.2f disp=%.1f%% frames=%d (doorstep=%s)", track.label, track.best_conf, delta_d_pct, len(track.frames), is_doorstep_visitor)
                     elif duration_tracked >= 1.8:
                         asyncio.create_task(self._log_rejected_candidate(
                             "person", track.label, track.best_conf, delta_d_pct,
@@ -1240,9 +1256,10 @@ class SmartDetector:
         """Save rejected AI evaluation snapshot and audit log to SQLite (debounced per category/reason)."""
         try:
             now_t = time.time()
-            # Debounce per category + reason (max 1 rejected log per 8 seconds for the same condition)
+            # Debounce per category + reason (max 1 rejected log per 8 seconds for the same condition, or 120s for stationary cars to prevent disk bloat)
+            debounce_limit = 120.0 if "Stilstaande" in reason else 8.0
             key = f"{category}_{reason[:20]}"
-            if (now_t - self._last_rejected_log_time.get(key, 0.0)) < 8.0:
+            if (now_t - self._last_rejected_log_time.get(key, 0.0)) < debounce_limit:
                 return
             self._last_rejected_log_time[key] = now_t
 

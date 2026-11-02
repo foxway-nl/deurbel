@@ -280,9 +280,9 @@ class WebSocketForegroundService : Service() {
         Log.i(TAG, "Processing event: id=${item.id}, type=${item.type}, age=${diffSec}s")
         when (item.type.lowercase()) {
             "ring" -> {
-                // Hard Rule: A ring event MUST ONLY open the call screen if it is fresh (< 30s)
-                if (eventSec > 0 && diffSec > 30L) {
-                    Log.w(TAG, "Suppressed stale ring event id=${item.id}, age=${diffSec}s (>30s limit)")
+                // Hard Rule: A ring event MUST ONLY open the call screen if it is fresh (< 60s)
+                if (eventSec > 0 && diffSec > 60L) {
+                    Log.w(TAG, "Suppressed stale ring event id=${item.id}, age=${diffSec}s (>60s limit)")
                     return
                 }
                 handleRinging(
@@ -361,8 +361,8 @@ class WebSocketForegroundService : Service() {
                     val eventSec = parseIsoEpochSeconds(ts)
                     val nowSec = System.currentTimeMillis() / 1000L
                     val diffSec = nowSec - eventSec
-                    if (eventSec > 0 && diffSec > 30L) {
-                        Log.w(TAG, "Suppressed stale WS CALL_RINGING, age=${diffSec}s (>30s limit)")
+                    if (eventSec > 0 && diffSec > 90L) {
+                        Log.w(TAG, "Suppressed stale WS CALL_RINGING, age=${diffSec}s (>90s limit)")
                         return
                     }
                 }

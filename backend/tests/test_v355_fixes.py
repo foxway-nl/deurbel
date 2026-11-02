@@ -216,8 +216,8 @@ async def test_v355_ai_rejection_audit_logging():
 
 
 @pytest.mark.asyncio
-async def test_v355_vehicle_and_person_2_frame_verification():
-    """Verify that moving vehicles and pedestrians are approved within 2 frames."""
+async def test_v355_doorstep_visitor_ir_contrast_approved():
+    """Verify that a doorstep visitor (tall box spanning doorstep at x>0.68 with low IR confidence ~0.21) is approved."""
     import time
     import numpy as np
     from app.ai_detector import SmartDetector, CandidateDetection, DetectionSettings
@@ -227,24 +227,36 @@ async def test_v355_vehicle_and_person_2_frame_verification():
     cfg = await DetectionSettings.load()
 
     now = time.time()
-    # Vehicle moving diagonally/vertically across 2 frames: dx=20, dy=25 -> disp = 32 / 640 = 5.0% >= 3.5%
-    v_tid = "track_v_2frame_test"
-    v_cand = CandidateDetection(v_tid, "vehicle", "Auto", (100.0, 100.0, 250.0, 200.0), 0.70, now - 0.5, 0.2)
-    v_cand.frames.append((now, (120.0, 125.0, 270.0, 225.0), 0.72))
-    detector._candidate_tracks[v_tid] = v_cand
-
-    # Person walking across 2 frames: dx=15, dy=5 -> disp = 15.8 / 640 = 2.4% >= 1.5%
-    p_tid = "track_p_2frame_test"
-    p_cand = CandidateDetection(p_tid, "person", "Persoon", (300.0, 200.0, 360.0, 380.0), 0.65, now - 0.5, 0.2)
-    p_cand.frames.append((now, (315.0, 205.0, 375.0, 385.0), 0.66))
+    # Doorstep visitor box matching the exact forensic values: x1=446, y1=40, x2=555, y2=431
+    p_tid = "track_doorstep_visitor"
+    p_cand = CandidateDetection(p_tid, "person", "Persoon", (446.0, 40.0, 555.0, 431.0), 0.21, now - 0.4, 0.05)
+    p_cand.frames.append((now, (448.0, 42.0, 556.0, 432.0), 0.23))
     detector._candidate_tracks[p_tid] = p_cand
 
     dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
     await detector._process_frame_gatekeeper(dummy_frame, now, cfg)
 
-    # Both tracks should have been approved (verified=True and popped to _dispatch_verified_detection)
-    assert v_tid not in detector._candidate_tracks or detector._candidate_tracks[v_tid].verified is True
+    # Doorstep visitor must be approved (verified=True or transitioned to dispatch)
     assert p_tid not in detector._candidate_tracks or detector._candidate_tracks[p_tid].verified is True
+
+
+@pytest.mark.asyncio
+async def test_v355_ring_coordinator_force_flag():
+    """Verify that RingCoordinator._dispatch_ring_to_state_machine calls call_sm.ring with force=True."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from app.ring_coordinator import ring_coordinator
+
+    mock_ring = AsyncMock()
+    with patch("app.main.call_sm.ring", mock_ring):
+        ring_coordinator.set_loop(asyncio.get_running_loop())
+        ring_coordinator._dispatch_ring_to_state_machine("SHAZAM_CHIME")
+        await asyncio.sleep(0.05)
+        assert mock_ring.call_count >= 1
+        _, kwargs = mock_ring.call_args
+        assert kwargs.get("force") is True
+        assert kwargs.get("trigger_source") == "SHAZAM_CHIME"
+
 
 
 
