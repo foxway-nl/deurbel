@@ -594,120 +594,6 @@
                 </div>
             </div>
 
-            <!-- Dual Doorbell Detection: Shazam Chime + EZVIZ Cloud Packet-Sniffer (TCP 8820) -->
-            <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4">
-                <div class="flex items-center justify-between pb-3 border-b border-dark-800">
-                    <div>
-                        <div class="flex items-center gap-2">
-                            <h3 class="font-bold text-white text-sm">🔔 Dual Aanbel-Detectie: Shazam Audio-Chime + EZVIZ Cloud Packet-Sniffer (TCP 8820)</h3>
-                            <span id="dual-ring-status" class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">🟢 Dual Guard Actief</span>
-                        </div>
-                        <p class="text-xs text-gray-400">Realtime kruis-verificatie (&le;3.5s): Shazam Chime (728/570Hz) + EZVIZ Cloud Burst (TCP 8820 op eno1) met 0ms reactietijd</p>
-                    </div>
-                    <div class="flex items-center gap-2">
-                        <button onclick="loadDualRingVerifications()" class="px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs text-gray-300">
-                            Verversen
-                        </button>
-                    </div>
-                </div>
-                <div class="overflow-x-auto">
-                    <table class="w-full text-left text-xs">
-                        <thead class="bg-dark-800/60 text-gray-400 uppercase text-[10px] tracking-wider">
-                            <tr>
-                                <th class="p-3">Tijdstip</th>
-                                <th class="p-3">Status</th>
-                                <th class="p-3">Eerste Signaal (ms 0)</th>
-                                <th class="p-3">Tweede Signaal (&le;3.5s)</th>
-                                <th class="p-3">Delta</th>
-                                <th class="p-3">Kruis-Verificatie Details</th>
-                            </tr>
-                        </thead>
-                        <tbody id="dual-ring-table-body" class="divide-y divide-dark-800 text-gray-300">
-                            <tr>
-                                <td colspan="6" class="p-4 text-center text-gray-500">Laden van kruis-verificaties...</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <!-- Shazam Chime Acoustic Detector Monitor -->
-            <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4">
-                <div class="flex items-center justify-between pb-3 border-b border-dark-800">
-                    <div>
-                        <div class="flex items-center gap-2">
-                            <h3 class="font-bold text-white text-sm">Real-Time 3-Layer Shazam Deurbel-Chime Detector</h3>
-                            <span id="shazam-status" class="px-2 py-0.5 rounded text-[10px] font-bold bg-dark-800 text-gray-400">Controleren...</span>
-                        </div>
-                        <p class="text-xs text-gray-400">728 Hz / 570 Hz dual-tone akoestische vingerafdruk (2D Normalized Cross-Correlation)</p>
-                    </div>
-                    <button onclick="loadShazamDetections()" class="px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs text-gray-300">
-                        Verversen
-                    </button>
-                </div>
-                <div class="overflow-x-auto">
-                    <table class="w-full text-left text-xs">
-                        <thead class="bg-dark-800/60 text-gray-400 uppercase text-[10px] tracking-wider">
-                            <tr>
-                                <th class="p-3">Tijdstip</th>
-                                <th class="p-3">NCC Score</th>
-                                <th class="p-3">Status</th>
-                                <th class="p-3">Details</th>
-                            </tr>
-                        </thead>
-                        <tbody id="shazam-table-body" class="divide-y divide-dark-800 text-gray-300">
-                            <tr>
-                                <td colspan="4" class="p-4 text-center text-gray-500">Nog geen akoestische chime evaluaties boven drempelwaarde.</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <!-- Host-Level EZVIZ Cloud Packet Sniffer (v3.5.1 Passive Shadow Learner) -->
-            <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4">
-                <div class="flex items-center justify-between pb-3 border-b border-dark-800">
-                    <div>
-                        <div class="flex items-center gap-2">
-                            <h3 class="font-bold text-white text-sm">⚡ Actieve Hybride Sniffer (0.1s Bel-Trigger via /2000/4675 HEX + Shazam Vangnet)</h3>
-                            <span id="sniffer-status-badge" class="px-2 py-0.5 rounded text-[10px] font-bold bg-dark-800 text-gray-400">Controleren...</span>
-                        </div>
-                        <p class="text-xs text-gray-400">Triggert de deurbel binnen 0.1s op geverifieerde HEX (/2000/4675); Shazam chime (728/570 Hz) fungeert als lokaal vangnet.</p>
-                        <div id="sniffer-learner-metrics" class="mt-2 flex flex-wrap gap-3 text-xs text-gray-300">
-                            <span class="bg-dark-800 px-2.5 py-1 rounded-md border border-dark-700">Achtergrond Baseline: <b id="learner-bg-count" class="text-emerald-400 font-mono">0</b> hashes</span>
-                            <span class="bg-dark-800 px-2.5 py-1 rounded-md border border-dark-700">Buffer: <b id="learner-buf-count" class="text-cyan-400 font-mono">0</b> pkts</span>
-                            <span class="bg-dark-800 px-2.5 py-1 rounded-md border border-dark-700">Geleerde Bel-Kandidaten: <b id="learner-cand-count" class="text-purple-400 font-mono">0</b></span>
-                        </div>
-                    </div>
-                    <div class="flex items-center gap-2">
-                        <button onclick="loadNetworkSnifferBursts()" class="px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs text-gray-300">
-                            Verversen
-                        </button>
-                    </div>
-                </div>
-                <div class="overflow-x-auto">
-                    <table class="w-full text-left text-xs">
-                        <thead class="bg-dark-800/60 text-gray-400 uppercase text-[10px] tracking-wider">
-                            <tr>
-                                <th class="p-3">Tijdstip</th>
-                                <th class="p-3">Protocol</th>
-                                <th class="p-3">Doel (IP:Poort)</th>
-                                <th class="p-3">Pakketten</th>
-                                <th class="p-3">Bytes</th>
-                                <th class="p-3">Payload Maten</th>
-                                <th class="p-3">Status / Match</th>
-                                <th class="p-3">Payload Hex (Eerste 24 Bytes)</th>
-                            </tr>
-                        </thead>
-                        <tbody id="sniffer-table-body" class="divide-y divide-dark-800 text-gray-300">
-                            <tr>
-                                <td colspan="8" class="p-4 text-center text-gray-500">Laden van cloud packet bursts...</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
             <!-- Dual-Trigger Precision Timing Monitor (v3.5.5) -->
             <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4">
                 <div class="flex items-center justify-between pb-3 border-b border-dark-800">
@@ -790,21 +676,26 @@
 
     <!-- Client-Side Javascript Logic -->
     <script>
-        function formatLocalTime(ts) {
+        function formatLocalTime(ts, showTimeOnly = false, showMs = false) {
             if (!ts) return '-';
             try {
-                let d;
-                if (ts.endsWith('Z') || ts.includes('+')) {
-                    d = new Date(ts);
-                } else {
-                    d = new Date(ts.replace(' ', 'T') + 'Z');
+                // If timestamp is already a formatted local CET string from backend like "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD HH:MM:SS.mmm"
+                if (typeof ts === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(ts)) {
+                    if (showTimeOnly) {
+                        const t = ts.split(' ')[1];
+                        return showMs ? t : t.split('.')[0];
+                    }
+                    return showMs ? ts : ts.split('.')[0];
                 }
+                const d = new Date(ts);
                 if (!isNaN(d.getTime())) {
                     const pad = (n) => String(n).padStart(2, '0');
-                    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+                    const timeStr = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}` + (showMs ? `.${String(d.getMilliseconds()).padStart(3, '0')}` : '');
+                    if (showTimeOnly) return timeStr;
+                    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${timeStr}`;
                 }
             } catch (e) {}
-            return ts.split('.')[0].replace('T', ' ');
+            return typeof ts === 'string' ? ts.split('.')[0].replace('T', ' ') : String(ts);
         }
 
         let currentTab = 'tab-live';
@@ -826,9 +717,6 @@
             if (tabId === 'tab-logs') { 
                 loadBackendLogs(); 
                 loadCrashLogs(); 
-                loadDualRingVerifications(); 
-                loadShazamDetections(); 
-                loadNetworkSnifferBursts(); 
                 loadDualTriggerTiming();
                 initLogsAutoRefresh();
             }
@@ -1107,45 +995,7 @@
             }
         }
 
-        async function loadDualRingVerifications() {
-            const tbody = document.getElementById('dual-ring-table-body');
-            try {
-                const res = await fetch('/api/v1/admin/ring-verifications');
-                if (!res.ok) return;
-                const d = await res.json();
-                tbody.innerHTML = '';
-                if (d.verifications && d.verifications.length > 0) {
-                    d.verifications.forEach(v => {
-                        const tr = document.createElement('tr');
-                        let badgeClass = 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30';
-                        let badgeText = v.status;
-                        if (v.status === 'VERIFIED') {
-                            badgeClass = 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
-                            badgeText = '🟢 SYNCHROON BEVESTIGD';
-                        } else if (v.status === 'MISMATCH') {
-                            badgeClass = 'bg-red-500/20 text-red-400 border border-red-500/30';
-                            badgeText = '🔴 MISMATCH (&gt;3.5s)';
-                        } else if (v.status === 'STANDALONE') {
-                            badgeClass = 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30';
-                            badgeText = '⚪ STANDALONE TRIGGER';
-                        }
-                        tr.innerHTML = `
-                            <td class="p-3 text-gray-400 font-mono text-[11px]">${formatLocalTime(v.timestamp)}</td>
-                            <td class="p-3"><span class="px-2 py-0.5 rounded-full font-bold text-[10px] ${badgeClass}">${badgeText}</span></td>
-                            <td class="p-3 font-semibold text-white">${v.first_source || '-'}</td>
-                            <td class="p-3 text-cyan-400 font-semibold">${v.second_source || (v.missing_source ? `<span class="text-red-400">Ontbreekt: ${v.missing_source}</span>` : '-')}</td>
-                            <td class="p-3 text-gray-300 font-mono">${v.delta_ms !== undefined ? v.delta_ms + 'ms' : '-'}</td>
-                            <td class="p-3 text-gray-300 max-w-sm truncate" title="${v.details}">${v.details || '-'}</td>
-                        `;
-                        tbody.appendChild(tr);
-                    });
-                } else {
-                    tbody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-gray-500">Nog geen aanbel kruis-verificaties geregistreerd.</td></tr>';
-                }
-            } catch (e) {
-                tbody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-red-400">Fout bij laden van verificatielogs.</td></tr>';
-            }
-        }
+        function loadDualRingVerifications() {}
 
         let logsTimer = null;
         function initLogsAutoRefresh() {
@@ -1155,7 +1005,7 @@
                 if (tabLogs && !tabLogs.classList.contains('hidden')) {
                     loadBackendLogs();
                     loadCrashLogs();
-                    loadDualRingVerifications();
+                    loadDualTriggerTiming();
                 }
             }, 5000);
         }
@@ -1253,101 +1103,8 @@
             if (modal) modal.classList.add('hidden');
         }
 
-        async function loadShazamDetections() {
-            const tbody = document.getElementById('shazam-table-body');
-            const statusEl = document.getElementById('shazam-status');
-            try {
-                const res = await fetch('/api/v1/admin/shazam-detections');
-                if (!res.ok) return;
-                const d = await res.json();
-                if (statusEl) {
-                    if (d.status === 'active') {
-                        statusEl.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
-                        statusEl.innerText = '🟢 Actief (3-Layer Shazam)';
-                    } else {
-                        statusEl.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30';
-                        statusEl.innerText = '🟡 Gestopt';
-                    }
-                }
-                if (!tbody) return;
-                tbody.innerHTML = '';
-                if (d.detections && d.detections.length > 0) {
-                    d.detections.forEach(det => {
-                        const tr = document.createElement('tr');
-                        const isMatch = det.matched;
-                        const statClass = isMatch ? 'text-emerald-400 font-bold' : 'text-gray-400';
-                        tr.innerHTML = `
-                            <td class="p-3 text-gray-400 font-mono text-[11px]">${formatLocalTime(det.timestamp)}</td>
-                            <td class="p-3 font-mono font-bold ${det.ncc >= 0.82 ? 'text-emerald-400' : 'text-cyan-400'}">${(det.ncc * 100).toFixed(1)}% (${det.ncc})</td>
-                            <td class="p-3 ${statClass}">${isMatch ? '🚨 MATCHED DEURBEL' : 'Evaluatie'}</td>
-                            <td class="p-3 text-gray-300 max-w-sm truncate" title="${det.details}">${det.details}</td>
-                        `;
-                        tbody.appendChild(tr);
-                    });
-                } else {
-                    tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center text-gray-500">Nog geen akoestische chime evaluaties boven drempelwaarde.</td></tr>';
-                }
-            } catch (e) {
-                if (tbody) tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center text-red-400">Fout bij laden van Shazam detecties.</td></tr>';
-            }
-        }
-
-        async function loadNetworkSnifferBursts() {
-            const tbody = document.getElementById('sniffer-table-body');
-            const statusEl = document.getElementById('sniffer-status-badge');
-            try {
-                // Fetch learner metrics
-                fetch('/api/v1/admin/sniffer-learner').then(r => r.json()).then(ld => {
-                    if (ld && ld.learner) {
-                        const bgEl = document.getElementById('learner-bg-count');
-                        const bufEl = document.getElementById('learner-buf-count');
-                        const candEl = document.getElementById('learner-cand-count');
-                        if (bgEl) bgEl.innerText = ld.learner.background_noise_count || 0;
-                        if (bufEl) bufEl.innerText = ld.learner.buffered_packets_count || 0;
-                        if (candEl) candEl.innerText = ld.learner.learned_candidates_count || 0;
-                    }
-                }).catch(() => {});
-
-                const res = await fetch('/api/v1/admin/network-sniff-bursts');
-                if (!res.ok) return;
-                const d = await res.json();
-                if (statusEl) {
-                    if (d.running) {
-                        statusEl.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30';
-                        statusEl.innerText = '⚡ Actief (0.1s HEX Trigger)';
-                    } else {
-                        statusEl.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30';
-                        statusEl.innerText = '🟡 Gestopt';
-                    }
-                }
-                if (!tbody) return;
-                tbody.innerHTML = '';
-                if (d.bursts && d.bursts.length > 0) {
-                    d.bursts.slice().reverse().forEach(b => {
-                        const tr = document.createElement('tr');
-                        const isMatch = b.signature_matched;
-                        const statClass = isMatch ? 'text-purple-400 font-bold bg-purple-500/10' : 'text-gray-400';
-                        const sizesStr = b.payload_sizes ? b.payload_sizes.slice(0, 5).join(', ') + (b.payload_sizes.length > 5 ? '...' : '') : '-';
-                        const hexStr = b.payload_hex ? b.payload_hex.substring(0, 48) : '-';
-                        tr.innerHTML = `
-                            <td class="p-3 text-gray-400 font-mono text-[11px]">${formatLocalTime(b.timestamp)}</td>
-                            <td class="p-3 font-semibold ${b.protocol === 'UDP' ? 'text-cyan-400' : 'text-amber-400'}">${b.protocol}</td>
-                            <td class="p-3 font-mono text-white">${b.dst_ip}:${b.dst_port}</td>
-                            <td class="p-3 text-gray-300 font-mono">${b.packet_count} pkt</td>
-                            <td class="p-3 text-gray-300 font-mono font-bold">${b.total_bytes} B</td>
-                            <td class="p-3 text-gray-400 font-mono text-[11px]">${sizesStr}</td>
-                            <td class="p-3 ${statClass}">${isMatch ? '🧪 Shadow Match' : (b.is_p2p_burst ? '☁️ P2P Cloud' : 'WAN')}</td>
-                            <td class="p-3 text-cyan-300 font-mono text-[10px] truncate max-w-[140px]" title="${b.payload_hex || ''}">${hexStr}</td>
-                        `;
-                        tbody.appendChild(tr);
-                    });
-                } else {
-                    tbody.innerHTML = '<tr><td colspan="8" class="p-4 text-center text-gray-500">Nog geen externe cloud-pakket bursts geregistreerd.</td></tr>';
-                }
-            } catch (e) {
-                if (tbody) tbody.innerHTML = '<tr><td colspan="8" class="p-4 text-center text-red-400">Fout bij laden van packet bursts.</td></tr>';
-            }
-        }
+        function loadShazamDetections() {}
+        function loadNetworkSnifferBursts() {}
 
         async function loadDualTriggerTiming() {
             const tbody = document.getElementById('timing-table-body');
@@ -1393,9 +1150,9 @@
                         const hexStr = ev.hex_preview ? ev.hex_preview.substring(0, 32) : '-';
 
                         tr.innerHTML = `
-                            <td class="p-3 text-white font-mono text-[11px] font-bold">${formatLocalTime(ev.timestamp_cet)}</td>
-                            <td class="p-3 text-cyan-300 font-mono text-[11px]">${ev.t_sniffer_cet ? formatLocalTime(ev.t_sniffer_cet) : '<span class="text-gray-500">Geen</span>'}</td>
-                            <td class="p-3 text-purple-300 font-mono text-[11px]">${formatLocalTime(ev.t_shazam_cet)}</td>
+                            <td class="p-3 text-white font-mono text-[11px] font-bold">${formatLocalTime(ev.timestamp_cet, false, false)}</td>
+                            <td class="p-3 text-cyan-300 font-mono text-[11px]">${ev.t_sniffer_cet ? formatLocalTime(ev.t_sniffer_cet, true, true) : '<span class="text-gray-500">Geen</span>'}</td>
+                            <td class="p-3 text-purple-300 font-mono text-[11px]">${formatLocalTime(ev.t_shazam_cet, true, true)}</td>
                             <td class="p-3">${deltaHtml}</td>
                             <td class="p-3 font-mono text-white">${targetStr}</td>
                             <td class="p-3 font-mono text-gray-300 text-[11px]">${protoStr}</td>
@@ -1414,7 +1171,6 @@
 
         setInterval(() => {
             if (currentTab === 'tab-logs') {
-                loadNetworkSnifferBursts();
                 loadDualTriggerTiming();
             }
         }, 2000);
