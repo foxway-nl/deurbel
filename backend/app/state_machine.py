@@ -173,6 +173,22 @@ class CallStateMachine:
                 except Exception:
                     logger.exception("Failed to start recorder for %s", call_id)
 
+            # Synchronously create the Clip row with status = "RECORDING" (v3.5.4 Taak 1)
+            try:
+                from app.models import save_clip
+                await save_clip(
+                    clip_id=call_id,
+                    call_id=call_id,
+                    video_path=clip_path,
+                    snapshot_path=call.snapshot_path or "",
+                    status="RECORDING",
+                    category="ring",
+                    answered_by=f"Aanbellen [{trigger_source}]",
+                    created_at=call.started_at,
+                )
+            except Exception:
+                logger.exception("Failed to create initial RECORDING clip for %s", call_id)
+
             await save_call_log(
                 call_id, CallState.RINGING.value,
                 snapshot_path=call.snapshot_path or "",
@@ -200,11 +216,8 @@ class CallStateMachine:
                 logger.info("Call %s timed out — MISSED", call.call_id)
                 await update_call_log(call.call_id, state=CallState.ENDED.value)
 
-        # Stop recorder after post-roll
-        if call.recorder_task and self.on_stop_recording:
-            await asyncio.sleep(settings.POST_HANGUP_RECORD_SECONDS)
-            await self.on_stop_recording(call.recorder_task)
-
+        # In v3.5.4, call recordings run autonomously to completion with dynamic motion tracking
+        # Recorder task is NOT stopped or cancelled on ring timeout
         if self.on_missed:
             await self.on_missed(call)
 
@@ -280,11 +293,8 @@ class CallStateMachine:
                 ended_at=datetime.now(timezone.utc).isoformat(),
             )
 
-        # Post-roll: keep recording a few seconds then stop
-        if call.recorder_task and self.on_stop_recording:
-            await asyncio.sleep(settings.POST_HANGUP_RECORD_SECONDS)
-            await self.on_stop_recording(call.recorder_task)
-
+        # In v3.5.4, call recordings run autonomously to completion with dynamic motion tracking
+        # Hanging up or rejecting the call on client NEVER stops or cancels the video recording
         if self.on_ended:
             await self.on_ended(call)
 

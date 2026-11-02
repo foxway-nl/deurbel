@@ -194,12 +194,12 @@ fun ClipsScreen(
                     hasMore = body.hasMore
                     totalCount = body.totalCount
                     if (isRefresh) {
-                        clips = newItems.sortedByDescending { it.timestamp }
+                        clips = newItems.sortedByDescending { it.timestamp.replace(' ', 'T') }
                         currentOffset = newItems.size
                     } else {
                         val existingIds = clips.map { it.id }.toSet()
                         val unique = newItems.filter { it.id !in existingIds }
-                        clips = (clips + unique).sortedByDescending { it.timestamp }
+                        clips = (clips + unique).sortedByDescending { it.timestamp.replace(' ', 'T') }
                         currentOffset += unique.size
                     }
                 }
@@ -239,7 +239,7 @@ fun ClipsScreen(
                     val updatedItems = resp.body()!!.clips
                     cacheBuster = System.currentTimeMillis()
                     val updateMap = updatedItems.associateBy { it.id }
-                    clips = clips.map { old -> updateMap[old.id] ?: old }.sortedByDescending { it.timestamp }
+                    clips = clips.map { old -> updateMap[old.id] ?: old }.sortedByDescending { it.timestamp.replace(' ', 'T') }
                 }
             } catch (_: Exception) {}
         }

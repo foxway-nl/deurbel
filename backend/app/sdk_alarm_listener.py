@@ -91,6 +91,18 @@ class NET_DVR_SETUPALARM_PARAM(ctypes.Structure):
 assert ctypes.sizeof(NET_DVR_SETUPALARM_PARAM) == 28, "Struct size MOET exact 28 bytes zijn!"
 
 
+class NET_DVR_TIME(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("dwYear", ctypes.c_uint32),
+        ("dwMonth", ctypes.c_uint32),
+        ("dwDay", ctypes.c_uint32),
+        ("dwHour", ctypes.c_uint32),
+        ("dwMinute", ctypes.c_uint32),
+        ("dwSecond", ctypes.c_uint32),
+    ]
+
+
 class SDKAlarmEvent:
     """Represents a logged hardware event from Port 8000 C-SDK."""
 
@@ -154,7 +166,7 @@ class SDKAlarmListener:
         self._running: bool = False
         self._supervisor_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._channel_lock = threading.Lock()
+        self._channel_lock = threading.RLock()
         self._events_lock = threading.Lock()
         self._recent_events: Deque[SDKAlarmEvent] = collections.deque(maxlen=100)
         self._last_trigger_ts: float = 0.0
@@ -660,6 +672,13 @@ class SDKAlarmListener:
                     details=f"Dual SDK Alarm Channels opened on Port 8000 (h0={self._alarm_handle_deploy0}, h1={self._alarm_handle_deploy1}, listen={self._listen_handle})",
                     action_taken="Connected",
                 )
+
+                # Synchronize camera hardware clock to host Europe/Amsterdam time (v3.5.4 Taak 3)
+                try:
+                    self._sync_camera_time_sync()
+                except Exception:
+                    pass
+
                 return True
 
             except Exception as e:
@@ -743,6 +762,63 @@ class SDKAlarmListener:
                     except Exception:
                         pass
                     self._user_id = -1
+
+    def _sync_camera_time_sync(self) -> bool:
+        """
+        Synchronizes the camera hardware clock to host Europe/Amsterdam local time
+        via Hikvision C-SDK command 119 (NET_DVR_SET_TIMECFG) (v3.5.4 Taak 3).
+        """
+        try:
+            with self._channel_lock:
+                uid = self._user_id
+                sdk = self._sdk
+                if uid < 0 or sdk is None:
+                    return False
+
+                from datetime import datetime
+                import zoneinfo
+                tz = zoneinfo.ZoneInfo("Europe/Amsterdam")
+                now = datetime.now(tz)
+                t_struct = NET_DVR_TIME(
+                    dwYear=now.year,
+                    dwMonth=now.month,
+                    dwDay=now.day,
+                    dwHour=now.hour,
+                    dwMinute=now.minute,
+                    dwSecond=now.second,
+                )
+                sdk.NET_DVR_SetDVRConfig.restype = ctypes.c_bool
+                sdk.NET_DVR_SetDVRConfig.argtypes = [
+                    ctypes.c_int32,
+                    ctypes.c_uint32,
+                    ctypes.c_int32,
+                    ctypes.c_void_p,
+                    ctypes.c_uint32,
+                ]
+                ok = sdk.NET_DVR_SetDVRConfig(
+                    uid,
+                    119,  # NET_DVR_SET_TIMECFG
+                    0,
+                    ctypes.byref(t_struct),
+                    ctypes.sizeof(t_struct),
+                )
+                if ok:
+                    logger.info(
+                        "🕒 Camera clock successfully synchronized to local time: %04d-%02d-%02d %02d:%02d:%02d",
+                        now.year, now.month, now.day, now.hour, now.minute, now.second,
+                    )
+                    return True
+                else:
+                    err = sdk.NET_DVR_GetLastError() if hasattr(sdk, "NET_DVR_GetLastError") else -1
+                    logger.warning("Camera clock sync failed (NET_DVR_SetDVRConfig error=%d)", err)
+                    return False
+        except Exception as e:
+            logger.warning("Exception during camera clock sync: %s", e)
+            return False
+
+    async def sync_camera_time(self) -> bool:
+        """Async wrapper for camera hardware clock synchronization."""
+        return await asyncio.to_thread(self._sync_camera_time_sync)
 
     async def log_passive_doorbell_status(self, trigger_source: str = "SHAZAM_CHIME") -> dict:
         """

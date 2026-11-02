@@ -498,6 +498,8 @@ async def record_smart_clip(
         cmd_copy = [
             "nice", "-n", "15",
             "ffmpeg", "-y",
+            "-fflags", "+genpts",
+            "-avoid_negative_ts", "make_zero",
             "-f", "concat",
             "-safe", "0",
             "-i", str(concat_list),
@@ -569,76 +571,73 @@ async def record_smart_clip(
 _active_recorders: dict[str, asyncio.subprocess.Process] = {}
 
 
-async def start_recording(call_id: str, clip_path: str) -> asyncio.Task:
+async def start_recording(call_id: str, clip_path: str, trigger_source: str = "SHAZAM_CHIME") -> asyncio.Task:
     """
-    Spawn a background FFmpeg process that records the RTSP stream to
-    an MP4 file.  Returns an ``asyncio.Task`` handle that the state
-    machine can cancel/stop later.
+    Spawns autonomous dynamic recording for doorbell calls (v3.5.4):
+    20s pre-roll + dynamic recording as long as motion continues + post-roll.
+    Hanging up, declining, or missing the call will NEVER cancel or stop this task!
     """
-    task = asyncio.create_task(_record(call_id, clip_path))
+    task = asyncio.create_task(_record_call_smart(call_id, clip_path, trigger_source))
     return task
 
 
-async def _record(call_id: str, clip_path: str) -> None:
-    """Run FFmpeg to record RTSP with >=6s pre-roll and transcode to 720p yuv420p faststart."""
-    call_work_dir = RING_BUFFER_DIR / f"work_call_{call_id}"
-    call_work_dir.mkdir(parents=True, exist_ok=True)
-    preroll_files: list[Path] = []
-
-    # 1. Grab 4 segments (8s) of pre-roll at trigger T0 to guarantee >=6s
+async def _record_call_smart(call_id: str, clip_path: str, trigger_source: str = "SHAZAM_CHIME") -> None:
+    """Dynamic Keep-Recording-While-Motion for Doorbell Calls (v3.5.4)."""
     try:
-        await asyncio.sleep(0.2)
-        available = ring_buffer.get_available_segments()
-        completed = available[:-1] if len(available) > 1 else available
-        preroll_segs = completed[-4:] if len(completed) >= 4 else completed
-        for idx, (_, seg_path) in enumerate(preroll_segs):
-            dest = call_work_dir / f"preroll_{idx:03d}.ts"
-            try:
-                shutil.copy2(seg_path, dest)
-                preroll_files.append(dest)
-            except Exception:
-                pass
-    except Exception as e:
-        logger.debug("Failed capturing pre-roll for call %s: %s", call_id, e)
+        from app.models import get_system_settings
+        sys_settings = await get_system_settings()
+        preroll = float(sys_settings.get("pre_roll_seconds", "20"))
+        postroll = float(sys_settings.get("post_roll_seconds", "20"))
+        max_duration = float(sys_settings.get("max_active_motion_seconds", "180"))
 
-    raw_ts = str(call_work_dir / "call_live.ts")
-    rtsp_url = "rtsp://127.0.0.1:8554/deurbel"
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-rtsp_transport", "tcp",
-        "-i", rtsp_url,
-        "-t", str(settings.RECORDING_DURATION_SECONDS),
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-f", "mpegts",
-        raw_ts,
-    ]
-    logger.info("Call recording started: %s (pre-roll segments: %d)", call_id, len(preroll_files))
+        from app.ai_detector import smart_detector
+        motion_func = smart_detector.is_motion_active
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+        dur = await record_smart_clip(
+            clip_id=call_id,
+            clip_path=clip_path,
+            preroll_seconds=preroll,
+            postroll_seconds=postroll,
+            motion_active_func=motion_func,
+            max_duration=max_duration,
         )
-        _active_recorders[call_id] = proc
-        _, stderr = await proc.communicate()
-        if proc.returncode not in (0, 255):
-            logger.warning("FFmpeg raw record exited %d for %s: %s", proc.returncode, call_id, stderr.decode()[-500:])
-    except asyncio.CancelledError:
-        logger.info("Recording cancelled for %s, terminating FFmpeg raw capture", call_id)
-        proc = _active_recorders.get(call_id)
-        if proc:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=3)
-            except asyncio.TimeoutError:
-                proc.kill()
-    finally:
-        _active_recorders.pop(call_id, None)
-        # Finalize and transcode the clip in a detached background task so cancellation does not abort saving
-        asyncio.create_task(_finalize_call_recording(call_id, clip_path, preroll_files, raw_ts, call_work_dir))
+
+        actual_dur = await _probe_duration(clip_path)
+        if actual_dur <= 0:
+            actual_dur = dur
+        thumb_path = await ensure_thumbnail(call_id, clip_path, preroll_seconds=preroll)
+        file_size = os.path.getsize(clip_path) if os.path.exists(clip_path) else 0
+
+        # Preserve answered_by or trigger source
+        ans = f"Aanbellen [{trigger_source}]"
+        try:
+            from app.state_machine import call_sm
+            if call_sm._current and call_sm._current.call_id == call_id and call_sm._current.claimed_by:
+                ans = call_sm._current.claimed_by
+            else:
+                from app.database import get_db
+                async with get_db(write=False) as db:
+                    c = await db.execute("SELECT answered_by FROM call_logs WHERE call_id = ?", (call_id,))
+                    row = await c.fetchone()
+                    if row and row["answered_by"]:
+                        ans = row["answered_by"]
+        except Exception:
+            pass
+
+        await save_clip(
+            clip_id=call_id,
+            call_id=call_id,
+            video_path=clip_path,
+            snapshot_path=thumb_path,
+            duration=actual_dur,
+            answered_by=ans,
+            status="READY",
+            category="ring",
+            file_size=file_size,
+        )
+        logger.info("✅ Finalized call recording for %s (%.1fs, %d bytes)", call_id, actual_dur, file_size)
+    except Exception as e:
+        logger.error("Error in _record_call_smart for %s: %s", call_id, e)
 
 
 async def _finalize_call_recording(

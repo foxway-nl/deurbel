@@ -331,22 +331,18 @@ class SmartDetector:
         bcx = (bx1 + bx2) / 2.0
         bcy = (by1 + by2) / 2.0
 
-        # Check static baseline boxes first
+        # Check static baseline boxes first (v3.5.4: IoU >= 0.50)
         for p_box in self.parked_vehicle_boxes:
             iou = compute_iou(box, p_box)
-            pcx = (p_box[0] + p_box[2]) / 2.0
-            pcy = (p_box[1] + p_box[3]) / 2.0
-            cdist = math.hypot(bcx - pcx, bcy - pcy) / max(1.0, w)
-            if iou >= 0.68 and cdist < 0.04:
+            if iou >= 0.50:
                 return True
 
-        # Check dynamic stationary vehicles memory
+        # Check dynamic stationary vehicles memory (v3.5.4: IoU >= 0.50)
         for s in self.stationary_vehicles:
             is_confirmed = (s.get("stationary_frames", 0) >= 4) or ((now - s.get("first_seen", now)) >= 10.0) or s.get("is_baseline", False)
             if is_confirmed:
                 iou = compute_iou(box, s["box"])
-                cdist = math.hypot(bcx - s["cx"], bcy - s["cy"]) / max(1.0, w)
-                if iou >= 0.68 and cdist < 0.04:
+                if iou >= 0.50:
                     return True
         return False
 
@@ -906,8 +902,8 @@ class SmartDetector:
 
         if detected_candidates:
             self._last_candidate_seen_time = now
-        elif is_hardware_motion_active:
-            # Smart motion fallback on motion_mask outside parked cars & trees (v3.4.1)
+        elif False and is_hardware_motion_active:
+            # Smart motion fallback disabled in v3.5.4 (eliminates shadow/tree triggers without verified YOLO objects)
             fallback_mask = motion_mask.copy()
             # Mask out upper canopy / roofline (y < 0.22 * h) and top right tree canopy (x > 0.60 * w, y < 0.35 * h)
             fallback_mask[:int(0.22 * h), :] = 0
@@ -1019,27 +1015,53 @@ class SmartDetector:
                 verified_disp_pct = delta_d_pct
 
                 if track.category == "vehicle":
-                    was_stationary = self.is_stationary_parked(first_box, float(w), track.first_time)
+                    # Check IoU overlap with stationary vehicles and parked boxes (v3.5.4)
+                    max_stat_iou = 0.0
+                    for s in self.stationary_vehicles:
+                        iou = compute_iou(last_box, s["box"])
+                        if iou > max_stat_iou:
+                            max_stat_iou = iou
+                    for pb in self.parked_vehicle_boxes:
+                        iou = compute_iou(last_box, pb)
+                        if iou > max_stat_iou:
+                            max_stat_iou = iou
 
-                    if was_stationary:
-                        # Departing parked car: must move >= 5.0% of screen width
-                        if delta_d >= 0.05:
-                            is_valid_object = True
-                            verified_disp_pct = delta_d_pct
-                            logger.info("Vehicle Departing Parked Spot APPROVED: %s disp=%.1f%%", track.label, delta_d_pct)
-                        elif duration_tracked >= 1.5:
+                    if max_stat_iou >= 0.50:
+                        if duration_tracked >= 1.5:
                             to_remove.append(tid)
-                            continue
-                    else:
-                        # New / Passing vehicle driving by:
-                        # Over >= 2 frames (0.5s), center shift >= 4.5% width OR 2 consecutive frames tracked
-                        if delta_d >= 0.045 or len(track.frames) >= 2:
-                            is_valid_object = True
-                            verified_disp_pct = delta_d_pct
-                            logger.info("Vehicle Passing APPROVED: %s frames=%d disp=%.1f%%", track.label, len(track.frames), delta_d_pct)
-                        elif duration_tracked >= 1.5:
-                            to_remove.append(tid)
-                            continue
+                        continue
+
+                    # Require at least 3 scans, horizontal displacement >= 12% width, consistent direction
+                    if len(track.frames) >= 3:
+                        x_start = (track.frames[0][1][0] + track.frames[0][1][2]) / 2.0
+                        x_now = (last_box[0] + last_box[2]) / 2.0
+                        dx_total = x_now - x_start
+                        dx_pct = abs(dx_total) / float(w)
+
+                        if dx_pct >= 0.12:
+                            consistent = True
+                            for f_i in range(len(track.frames) - 1):
+                                f_x1 = (track.frames[f_i][1][0] + track.frames[f_i][1][2]) / 2.0
+                                f_x2 = (track.frames[f_i+1][1][0] + track.frames[f_i+1][1][2]) / 2.0
+                                step_dx = f_x2 - f_x1
+                                if dx_total > 0 and step_dx < -0.02 * float(w):
+                                    consistent = False
+                                    break
+                                elif dx_total < 0 and step_dx > 0.02 * float(w):
+                                    consistent = False
+                                    break
+
+                            if consistent:
+                                is_valid_object = True
+                                verified_disp_pct = round(dx_pct * 100.0, 1)
+                                logger.info(
+                                    "Vehicle Passing APPROVED (v3.5.4): %s frames=%d disp=%.1f%% dx=%.1f%% dir=%s",
+                                    track.label, len(track.frames), delta_d_pct, verified_disp_pct,
+                                    "RIGHT" if dx_total > 0 else "LEFT"
+                                )
+                    elif duration_tracked >= 2.0:
+                        to_remove.append(tid)
+                        continue
 
                 elif track.category == "person":
                     # Pedestrian across street or nearby:

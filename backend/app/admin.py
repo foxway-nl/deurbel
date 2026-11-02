@@ -362,6 +362,14 @@ async def admin_resync_live(request: Request):
     return {"status": "ok", "message": "Live stream buffer gereset naar 0ms realtime"}
 
 
+@router.post("/api/v1/admin/sync-camera-time")
+async def admin_sync_camera_time(request: Request):
+    """Synchronizes camera hardware clock to host Europe/Amsterdam time (v3.5.4 Taak 3)."""
+    from app.sdk_alarm_listener import sdk_alarm_listener
+    ok = await sdk_alarm_listener.sync_camera_time()
+    return {"success": ok, "status": "ok" if ok else "failed"}
+
+
 @router.post("/api/v1/admin/cleanup-false-clips")
 async def admin_cleanup_false_clips(request: Request):
     """Purge today's false wind clips from disk and SQLite."""

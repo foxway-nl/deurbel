@@ -204,7 +204,7 @@ fun SettingsScreen(
                     "model" to android.os.Build.MODEL,
                     "manufacturer" to android.os.Build.MANUFACTURER,
                     "android_sdk" to android.os.Build.VERSION.SDK_INT,
-                    "app_version" to "v3.3.0 (28)",
+                    "app_version" to "v3.5.4 (37)",
                     "base_url" to activeBaseUrl,
                     "is_wan_mode" to isWanMode
                 )
@@ -1049,7 +1049,7 @@ fun SettingsScreen(
             val appVersionText = remember {
                 try {
                     val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-                    val vName = pInfo.versionName ?: "3.3.0"
+                    val vName = pInfo.versionName ?: "3.5.4"
                     val vCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
                         pInfo.longVersionCode
                     } else {
@@ -1058,7 +1058,7 @@ fun SettingsScreen(
                     }
                     "Foxway Deurbel v$vName (Build $vCode)"
                 } catch (_: Exception) {
-                    "Foxway Deurbel v3.3.0 (Build 28)"
+                    "Foxway Deurbel v3.5.4 (Build 37)"
                 }
             }
 

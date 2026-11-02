@@ -127,6 +127,7 @@ _health_task: Optional[asyncio.Task] = None
 _sweeper_task: Optional[asyncio.Task] = None
 _doorbell_online = True
 _doorbell_last_seen = time.time()
+_last_camera_time_sync = 0.0
 
 
 async def _periodic_cleanup() -> None:
@@ -189,6 +190,16 @@ async def _doorbell_health_monitor() -> None:
                     _doorbell_online = True
                     logger.info("Doorbell %s is back ONLINE", cam_ip)
                     await ws_manager.broadcast("DOORBELL_STATUS", {"online": True, "ip": cam_ip})
+
+                # Hourly camera hardware clock synchronization (v3.5.4 Taak 3)
+                global _last_camera_time_sync
+                if now - _last_camera_time_sync > 3600:
+                    _last_camera_time_sync = now
+                    try:
+                        from app.sdk_alarm_listener import sdk_alarm_listener
+                        await sdk_alarm_listener.sync_camera_time()
+                    except Exception:
+                        pass
             else:
                 # Trigger auto-heal subnet scan
                 logger.info("Doorbell %s unreachable. Triggering auto-heal subnet scan...", cam_ip)
@@ -294,7 +305,8 @@ async def _on_start_recording(call_id: str, clip_path: str) -> asyncio.Task:
 
 
 async def _on_stop_recording(task: asyncio.Task) -> None:
-    await stop_recording(task)
+    # In v3.5.4, call recordings run autonomously to completion with dynamic motion tracking
+    pass
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────
@@ -425,7 +437,7 @@ openapi_tags = [
 
 app = FastAPI(
     title="Foxway Smart Doorbell API",
-    version="3.5.0",
+    version="3.5.4",
     description="Signaling, state management, media proxy, and clip API for the Foxway Doorbell system.",
     openapi_tags=openapi_tags,
     lifespan=lifespan,
@@ -804,8 +816,8 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "3.5.3",
-        "version_code": 36,
+        "version": "3.5.4",
+        "version_code": 37,
         "build_time": "2026-11-01T21:10:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
