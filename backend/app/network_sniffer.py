@@ -45,6 +45,7 @@ IFACE = "eno1"
 SIGNATURE_FILE = "/mnt/opslag/deurbel/backend/app/assets/network_ring_signature.json"
 SNIFF_LOG_FILE = "/mnt/opslag/deurbel/logs/network_sniff.jsonl"
 LEARN_LOG_FILE = "/mnt/opslag/deurbel/logs/sniffer_learning.jsonl"
+TIMING_LOG_FILE = "/mnt/opslag/deurbel/logs/dual_trigger_timing.jsonl"
 
 
 def _build_arp_packet(hwsrc: str, psrc: str, hwdst: str, pdst: str, op: int = 2) -> bytes:
@@ -100,6 +101,10 @@ class NetworkSniffer:
         self.background_noise_hashes: set[str] = set()
         self.learned_chime_candidates: List[dict] = []
 
+        # Dual-Trigger Precision Timing Monitor (v3.5.5)
+        self.recent_timing_records: Deque[dict] = collections.deque(maxlen=50)
+        self._load_persisted_timing_and_learner()
+
         self._last_shazam_ring_time: float = 0.0
         self._last_sniff_trigger_time: float = 0.0
         self._cooldown_seconds: float = 5.0
@@ -117,6 +122,34 @@ class NetworkSniffer:
     def _signal_handler(self, signum, frame):
         logger.info("Signal %s received -> restoring doorbell ARP table immediately", signum)
         self._restore_arp_sync()
+
+    def _load_persisted_timing_and_learner(self) -> None:
+        """Load persisted timing and learner candidates on startup."""
+        try:
+            if os.path.exists(LEARN_LOG_FILE):
+                with open(LEARN_LOG_FILE, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                self.learned_chime_candidates.append(json.loads(line))
+                            except Exception:
+                                pass
+        except Exception as e:
+            logger.debug("Could not preload learner candidates: %s", e)
+
+        try:
+            if os.path.exists(TIMING_LOG_FILE):
+                with open(TIMING_LOG_FILE, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                self.recent_timing_records.append(json.loads(line))
+                            except Exception:
+                                pass
+        except Exception as e:
+            logger.debug("Could not preload timing records: %s", e)
 
     def _load_signature(self) -> dict:
         """Load network ring signature from file or return sensible defaults."""
@@ -549,6 +582,90 @@ class NetworkSniffer:
         else:
             logger.info("ℹ️ [Sniffer Auto-Calibrate] No external cloud burst in +/-2.5s window to correlate.")
 
+        # 3. Dual-Trigger Precision Timing Registration (v3.5.5)
+        chime_cet_str = datetime.datetime.fromtimestamp(chime_timestamp, tz=AMSTERDAM_TZ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+        session_candidates = [
+            c for c in list(self.learned_chime_candidates)
+            if abs(c.get("chime_timestamp", 0.0) - chime_timestamp) < 0.05
+        ]
+
+        timing_target = None
+        timing_proto = None
+        timing_len = None
+        timing_hex = ""
+        timing_reason = "GEEN_NETWERK_SIGNAAL"
+        sniffer_cet = None
+        delta_val = None
+        in_win = False
+        timing_status = "CHIME_ONLY"
+
+        if session_candidates:
+            # Pick earliest matching packet (closest to button press)
+            best_cand = min(session_candidates, key=lambda c: c.get("delta_seconds", 0.0))
+            sniffer_cet = best_cand.get("timestamp")
+            delta_val = best_cand.get("delta_seconds")
+            in_win = (-4.5 <= delta_val <= 1.5) if delta_val is not None else False
+            timing_target = f"{best_cand.get('dst_ip')}:{best_cand.get('dst_port')}"
+            timing_proto = best_cand.get("protocol")
+            timing_len = best_cand.get("payload_len")
+            timing_hex = best_cand.get("hex_payload", "")[:32]
+            timing_reason = best_cand.get("reason", "DIFFERENTIAL_MATCH")
+            timing_status = "PERFECT_MATCH" if in_win else "OUT_OF_WINDOW"
+        elif candidates:
+            best_burst = max(candidates, key=lambda x: (x["packet_count"], x["total_bytes"]))
+            sniffer_cet = best_burst.get("timestamp")
+            try:
+                b_ts = datetime.datetime.strptime(best_burst["timestamp"], "%Y-%m-%d %H:%M:%S.%f").timestamp()
+                delta_val = round(b_ts - chime_timestamp, 3)
+            except Exception:
+                delta_val = None
+            in_win = (-4.5 <= delta_val <= 1.5) if delta_val is not None else False
+            timing_target = f"{best_burst.get('dst_ip')}:{best_burst.get('dst_port')}"
+            timing_proto = best_burst.get("protocol")
+            timing_len = best_burst.get("total_bytes")
+            timing_hex = best_burst.get("payload_hex", "")[:32]
+            timing_reason = "BURST_CORRELATION"
+            timing_status = "PERFECT_MATCH" if in_win else "OUT_OF_WINDOW"
+
+        timing_record = {
+            "id": f"timing-{int(chime_timestamp * 1000)}",
+            "timestamp_cet": chime_cet_str,
+            "t_shazam_float": chime_timestamp,
+            "t_shazam_cet": chime_cet_str,
+            "t_sniffer_cet": sniffer_cet,
+            "delta_seconds": delta_val,
+            "in_window": in_win,
+            "window_min": -4.5,
+            "window_max": 1.5,
+            "target": timing_target,
+            "protocol": timing_proto,
+            "payload_len": timing_len,
+            "hex_preview": timing_hex,
+            "reason": timing_reason,
+            "status": timing_status,
+        }
+
+        with self._window_lock:
+            self.recent_timing_records.append(timing_record)
+
+        try:
+            os.makedirs(os.path.dirname(TIMING_LOG_FILE), exist_ok=True)
+            with open(TIMING_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(timing_record, ensure_ascii=False) + "\n")
+        except Exception as te:
+            logger.debug("Failed saving timing log: %s", te)
+
+        delta_disp = f"{delta_val:+.3f}s" if delta_val is not None else "N/A"
+        logger.info(
+            "⏱️ [Dual-Trigger Timing] Shazam: %s | Sniffer: %s | ΔT: %s | Window [-4.5s, +1.5s]: %s | Status: %s",
+            chime_cet_str,
+            sniffer_cet or "Geen",
+            delta_disp,
+            "JA" if in_win else "NEE",
+            timing_status,
+        )
+
     def _dispatch_network_ring(self, burst: dict) -> None:
         """Deprecated in v3.5.1: Sniffer runs exclusively in passive shadow mode and NEVER triggers ringing."""
         logger.debug("[Network Sniffer] Shadow mode active — ring trigger suppressed for burst %s:%s", burst.get("dst_ip"), burst.get("dst_port"))
@@ -565,6 +682,34 @@ class NetworkSniffer:
                 "recent_candidates": list(self.learned_chime_candidates[-10:]),
                 "last_chime_ts": self._last_shazam_ring_time,
             }
+
+    def get_timing_analysis(self) -> dict:
+        """Returns Dual-Trigger Precision Timing metrics and events (v3.5.5)."""
+        with self._window_lock:
+            records = list(self.recent_timing_records)
+
+        matched = [r for r in records if r.get("delta_seconds") is not None]
+        deltas = [r["delta_seconds"] for r in matched]
+        avg_delta = round(sum(deltas) / len(deltas), 3) if deltas else None
+        min_delta = min(deltas) if deltas else None
+        max_delta = max(deltas) if deltas else None
+
+        return {
+            "status": "ok",
+            "configured_window": {
+                "min": -4.5,
+                "max": 1.5,
+                "description": "Netwerk verwacht tussen 4.5s vóór en 1.5s na Shazam chime",
+            },
+            "total_events": len(records),
+            "matched_count": len(matched),
+            "stats": {
+                "avg_delta_seconds": avg_delta,
+                "min_delta_seconds": min_delta,
+                "max_delta_seconds": max_delta,
+            },
+            "events": list(reversed(records)),
+        }
 
     async def start(self) -> None:
         """Starts ARP redirect and raw packet sniffer."""

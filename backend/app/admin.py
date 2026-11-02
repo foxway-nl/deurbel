@@ -327,6 +327,7 @@ async def get_admin_system_status(request: Request):
         "recent_bursts_count": len(network_sniffer.recent_bursts),
         "signature": network_sniffer.known_signature,
         "learner": network_sniffer.get_learner_status(),
+        "timing": network_sniffer.get_timing_analysis(),
     }
 
     from app.ring_coordinator import ring_coordinator
@@ -690,6 +691,15 @@ async def get_sniffer_learner(request: Request):
         "status": "ok",
         "learner": network_sniffer.get_learner_status(),
     }
+
+
+@router.get("/api/v1/admin/dual-trigger-timing")
+async def get_dual_trigger_timing(request: Request):
+    """Returns dual-trigger precision timing analysis between Sniffer and Shazam (v3.5.5)."""
+    require_admin(request)
+    from app.network_sniffer import network_sniffer
+    return network_sniffer.get_timing_analysis()
+
 
 
 

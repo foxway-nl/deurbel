@@ -707,6 +707,51 @@
                     </table>
                 </div>
             </div>
+
+            <!-- Dual-Trigger Precision Timing Monitor (v3.5.5) -->
+            <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4">
+                <div class="flex items-center justify-between pb-3 border-b border-dark-800">
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <h3 class="font-bold text-white text-sm">⏱️ Dual-Trigger Timing Analyse (Netwerk Sniffer vs. Shazam Audio Chime)</h3>
+                            <span id="timing-status-badge" class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">LIVE MONITOR</span>
+                        </div>
+                        <p class="text-xs text-gray-400">Meet het exacte tijdsverschil (&Delta;T = T<sub>sniff</sub> - T<sub>shazam</sub>) bij een fysieke aanbeldruk om het correlatievenster te valideren.</p>
+                        <div id="timing-summary-metrics" class="mt-2 flex flex-wrap gap-3 text-xs text-gray-300">
+                            <span class="bg-dark-800 px-2.5 py-1 rounded-md border border-dark-700">Venster: <b class="text-amber-400 font-mono">[-4.5s .. +1.5s]</b></span>
+                            <span class="bg-dark-800 px-2.5 py-1 rounded-md border border-dark-700">Belsessies: <b id="timing-total-count" class="text-cyan-400 font-mono">0</b></span>
+                            <span class="bg-dark-800 px-2.5 py-1 rounded-md border border-dark-700">Gemiddelde &Delta;T: <b id="timing-avg-delta" class="text-emerald-400 font-mono">-</b></span>
+                            <span class="bg-dark-800 px-2.5 py-1 rounded-md border border-dark-700">Matches: <b id="timing-match-rate" class="text-purple-400 font-mono">-</b></span>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button onclick="loadDualTriggerTiming()" class="px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs text-gray-300">
+                            Verversen
+                        </button>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs">
+                        <thead class="bg-dark-800/60 text-gray-400 uppercase text-[10px] tracking-wider">
+                            <tr>
+                                <th class="p-3">Belsessie (CET)</th>
+                                <th class="p-3">Netwerk Packet (T<sub>sniff</sub>)</th>
+                                <th class="p-3">Shazam Chime (T<sub>shazam</sub>)</th>
+                                <th class="p-3">Tijdsverschil (&Delta;T)</th>
+                                <th class="p-3">Netwerk Doel</th>
+                                <th class="p-3">Proto / Bytes</th>
+                                <th class="p-3">Status / Venster</th>
+                                <th class="p-3">Hex Payload Preview</th>
+                            </tr>
+                        </thead>
+                        <tbody id="timing-table-body" class="divide-y divide-dark-800 text-gray-300">
+                            <tr>
+                                <td colspan="8" class="p-4 text-center text-gray-500">Laden van dual-trigger timing data...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </section>
     </main>
 
@@ -784,6 +829,7 @@
                 loadDualRingVerifications(); 
                 loadShazamDetections(); 
                 loadNetworkSnifferBursts(); 
+                loadDualTriggerTiming();
                 initLogsAutoRefresh();
             }
         }
@@ -1303,9 +1349,73 @@
             }
         }
 
+        async function loadDualTriggerTiming() {
+            const tbody = document.getElementById('timing-table-body');
+            const totalEl = document.getElementById('timing-total-count');
+            const avgEl = document.getElementById('timing-avg-delta');
+            const matchEl = document.getElementById('timing-match-rate');
+            try {
+                const res = await fetch('/api/v1/admin/dual-trigger-timing');
+                if (!res.ok) return;
+                const d = await res.json();
+
+                if (totalEl) totalEl.innerText = d.total_events || 0;
+                if (avgEl) avgEl.innerText = (d.stats && d.stats.avg_delta_seconds !== null && d.stats.avg_delta_seconds !== undefined) ? `${d.stats.avg_delta_seconds > 0 ? '+' : ''}${d.stats.avg_delta_seconds}s` : '-';
+                if (matchEl) matchEl.innerText = `${d.matched_count || 0} / ${d.total_events || 0}`;
+
+                if (!tbody) return;
+                tbody.innerHTML = '';
+                if (d.events && d.events.length > 0) {
+                    d.events.forEach(ev => {
+                        const tr = document.createElement('tr');
+                        const isPerfect = ev.status === 'PERFECT_MATCH';
+                        const isOutOfWin = ev.status === 'OUT_OF_WINDOW';
+
+                        let badgeHtml = '';
+                        if (isPerfect) {
+                            badgeHtml = '<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">🟢 PERFECT MATCH</span>';
+                        } else if (isOutOfWin) {
+                            badgeHtml = '<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-amber-500/20 text-amber-400 border border-amber-500/30">🟡 BUITEN VENSTER</span>';
+                        } else {
+                            badgeHtml = '<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-dark-700 text-gray-400 border border-dark-600">⚪ CHIME ONLY</span>';
+                        }
+
+                        let deltaHtml = '-';
+                        if (ev.delta_seconds !== null && ev.delta_seconds !== undefined) {
+                            const dVal = ev.delta_seconds;
+                            const sign = dVal > 0 ? '+' : '';
+                            const dColor = isPerfect ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30' : 'text-amber-400 bg-amber-500/10 border-amber-500/30';
+                            deltaHtml = `<span class="px-2 py-0.5 rounded font-mono font-bold text-xs border ${dColor}">${sign}${dVal.toFixed(3)}s</span>`;
+                        }
+
+                        const targetStr = ev.target || '-';
+                        const protoStr = ev.protocol ? `${ev.protocol} (${ev.payload_len || 0}B)` : '-';
+                        const hexStr = ev.hex_preview ? ev.hex_preview.substring(0, 32) : '-';
+
+                        tr.innerHTML = `
+                            <td class="p-3 text-white font-mono text-[11px] font-bold">${formatLocalTime(ev.timestamp_cet)}</td>
+                            <td class="p-3 text-cyan-300 font-mono text-[11px]">${ev.t_sniffer_cet ? formatLocalTime(ev.t_sniffer_cet) : '<span class="text-gray-500">Geen</span>'}</td>
+                            <td class="p-3 text-purple-300 font-mono text-[11px]">${formatLocalTime(ev.t_shazam_cet)}</td>
+                            <td class="p-3">${deltaHtml}</td>
+                            <td class="p-3 font-mono text-white">${targetStr}</td>
+                            <td class="p-3 font-mono text-gray-300 text-[11px]">${protoStr}</td>
+                            <td class="p-3">${badgeHtml}</td>
+                            <td class="p-3 text-cyan-400 font-mono text-[10px] truncate max-w-[140px]" title="${ev.hex_preview || ''}">${hexStr}</td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="8" class="p-4 text-center text-gray-500">Nog geen timing-metingen. Druk op de fysieke deurbel om direct een meting uit te voeren.</td></tr>';
+                }
+            } catch (e) {
+                if (tbody) tbody.innerHTML = '<tr><td colspan="8" class="p-4 text-center text-red-400">Fout bij laden van dual-trigger timing data.</td></tr>';
+            }
+        }
+
         setInterval(() => {
             if (currentTab === 'tab-logs') {
                 loadNetworkSnifferBursts();
+                loadDualTriggerTiming();
             }
         }, 2000);
     </script>

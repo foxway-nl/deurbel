@@ -97,3 +97,39 @@ async def test_v355_person_and_vehicle_track_multi_frame_evaluation():
     # Must process without throwing IndexError: tuple index out of range
     await detector._process_frame_gatekeeper(dummy_frame, now, cfg)
 
+
+def test_v355_dual_trigger_timing_analysis():
+    """Verify dual-trigger timing analyzer records deltas in [-4.5s, +1.5s] window."""
+    import time
+    from app.network_sniffer import network_sniffer
+
+    # Push a mock packet to payload buffer
+    now_t = time.time()
+    packet_ts = now_t - 3.14  # Sniffer 3.14s before chime
+    network_sniffer._payload_buffer.append({
+        "timestamp": "2026-11-02 12:00:00.000",
+        "ts_float": packet_ts,
+        "dst_ip": "148.153.115.233",
+        "dst_port": 6404,
+        "protocol": "UDP",
+        "payload_len": 49,
+        "total_len": 77,
+        "is_syn": False,
+        "payload_hex": "536a49794e5445344f44616263",
+    })
+
+    # Trigger chime
+    network_sniffer.on_shazam_chime_triggered(now_t)
+
+    # Check timing analysis
+    analysis = network_sniffer.get_timing_analysis()
+    assert analysis["status"] == "ok"
+    assert analysis["configured_window"]["min"] == -4.5
+    assert analysis["configured_window"]["max"] == 1.5
+    assert analysis["total_events"] >= 1
+    recent = analysis["events"][0]
+    assert recent["in_window"] is True
+    assert recent["status"] == "PERFECT_MATCH"
+    assert abs(recent["delta_seconds"] - (-3.14)) < 0.15
+
+
