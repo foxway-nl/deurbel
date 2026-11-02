@@ -432,16 +432,37 @@ class NetworkSniffer:
         self._last_shazam_ring_time = chime_timestamp
         logger.info("🔔 [Sniffer Differential Learner] Shazam chime detected at %.3f — isolating candidate ring packets...", chime_timestamp)
 
-        # 1. Differential Byte Learning
+        # 1. Differential Byte Learning (Pre-Chime Window: -4.5s to +1.5s)
+        # Because the hardware button press sends network packets ~2.5s-3.5s BEFORE the audio-chime completes
         with self._window_lock:
             buf_packets = list(self._payload_buffer)
 
         candidates_found = 0
         for p in buf_packets:
             p_ts = p.get("ts_float", 0.0)
-            if abs(p_ts - chime_timestamp) <= 2.0:
+            delta = p_ts - chime_timestamp
+            if -4.5 <= delta <= 1.5:
                 hex_p = p.get("payload_hex", "")
-                if hex_p and (hex_p not in self.background_noise_hashes):
+                if not hex_p:
+                    continue
+
+                # Filter out routine cloud keepalives that fire 1000+ times/day
+                is_routine_heartbeat = (
+                    hex_p.startswith("31bc01000a2f323030302f34313033")
+                    or hex_p.startswith("31cc01000a2f323030302f34313033")
+                    or hex_p == "c00000000000"
+                )
+
+                # High priority match: EZVIZ P2P Intercom packet containing camera serial (SjIyNTE4ODcz / J22518873)
+                is_p2p_intercom = ("536a49794e5445344f44" in hex_p) or (p.get("protocol") == "UDP" and p.get("payload_len") == 49)
+
+                # Check if this exact hex appeared frequently in long-term background (>5s before chime)
+                seen_in_older_baseline = any(
+                    (other_p.get("payload_hex") == hex_p and (chime_timestamp - other_p.get("ts_float", 0.0)) > 5.0)
+                    for other_p in buf_packets
+                )
+
+                if is_p2p_intercom or (not is_routine_heartbeat and not seen_in_older_baseline):
                     cand = {
                         "timestamp": p["timestamp"],
                         "chime_timestamp": chime_timestamp,
@@ -451,7 +472,8 @@ class NetworkSniffer:
                         "protocol": p["protocol"],
                         "payload_len": p["payload_len"],
                         "hex_payload": hex_p,
-                        "reason": "DIFFERENTIAL_CHIME_MATCH",
+                        "delta_seconds": round(delta, 3),
+                        "reason": "P2P_INTERCOM_ALERT" if is_p2p_intercom else "DIFFERENTIAL_CHIME_MATCH",
                     }
                     with self._window_lock:
                         self.learned_chime_candidates.append(cand)
@@ -462,18 +484,19 @@ class NetworkSniffer:
                             f.write(json.dumps(cand, ensure_ascii=False) + "\n")
                     except Exception as le:
                         logger.debug("Failed saving sniffer learn log: %s", le)
-                    logger.info("🧪 [Sniffer Learner] Candidate differential payload isolated: dst=%s:%s, len=%d, hex=%s",
-                                cand["dst_ip"], cand["dst_port"], cand["payload_len"], cand["hex_payload"][:32])
+                    logger.info("🧪 [Sniffer Learner] Candidate differential payload isolated: dst=%s:%s, delta=%.2fs, hex=%s",
+                                cand["dst_ip"], cand["dst_port"], cand["delta_seconds"], cand["hex_payload"][:32])
 
         if candidates_found == 0:
-            logger.info("ℹ️ [Sniffer Learner] No unique differential packets in +/-2.0s window beyond baseline noise.")
+            logger.info("ℹ️ [Sniffer Learner] No unique differential packets in [-4.5s, +1.5s] window beyond baseline noise.")
 
-        # 2. Look at bursts in recent history within +-2.0s of chime for shadow diagnostics
+        # 2. Look at bursts in recent history within [-4.5s, +1.5s] of chime for shadow diagnostics
         candidates = []
         for b in list(self.recent_bursts):
             try:
                 b_ts = datetime.datetime.strptime(b["timestamp"], "%Y-%m-%d %H:%M:%S.%f").timestamp()
-                if abs(b_ts - chime_timestamp) <= 2.5:
+                delta_b = b_ts - chime_timestamp
+                if -4.5 <= delta_b <= 1.5:
                     candidates.append(b)
             except Exception:
                 pass
