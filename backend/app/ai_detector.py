@@ -805,8 +805,19 @@ class SmartDetector:
             self._cooldown_seconds = 5.0
             exclusion_zones = []
 
-        # ── 3. Layer 1: Fast YOLOv8n Inference (imgsz=640, <45ms) ─────────
+        # ── 2b. Motion Pre-Gating (Motion-First Verification) ─────────────
+        motion_pixel_count = int(np.count_nonzero(motion_mask))
+        motion_ratio = motion_pixel_count / float(w * h)
         is_hardware_motion_active = (now - self._last_hardware_motion_time) < 10.0
+        has_active_candidate = (now - self._last_candidate_seen_time) < 4.0 or len(self._candidate_tracks) > 0
+        is_motion_gate_open = is_hardware_motion_active or has_active_candidate or (motion_ratio >= 0.002)
+
+        if not is_motion_gate_open:
+            # Entire scene is static: skip YOLO inference to prevent evaluating parked cars
+            self._prune_stale_tracks(now)
+            return
+
+        # ── 3. Layer 1: Fast YOLOv8n Inference (imgsz=640, <45ms) ─────────
         if is_hardware_motion_active:
             person_conf_thresh = min(person_conf_thresh, 0.22)
             vehicle_conf_thresh = min(vehicle_conf_thresh, 0.22)
@@ -857,33 +868,32 @@ class SmartDetector:
             category = None
             if cid in PERSON_CLASSES:
                 category = "person"
-                # Layer 1 Shape & Aspect Ratio Filter (v3.5.5):
-                # A standing/walking human has box_height / box_width >= 1.25.
-                # Horizontal flat shadow patches and horizontal waving tree branches are rejected.
+                # Layer 1 Shape & Aspect Ratio Filter:
+                # Reject only extreme flat horizontal artifacts (aspect_ratio < 0.85, width > height)
                 box_w = max(1.0, bx2 - bx1)
                 box_h = max(1.0, by2 - by1)
                 aspect_ratio = box_h / box_w
-                if aspect_ratio < 1.25:
-                    logger.debug("Rejected person candidate with invalid aspect ratio %.2f < 1.25", aspect_ratio)
+                if aspect_ratio < 0.85:
+                    logger.debug("Rejected person candidate with invalid aspect ratio %.2f < 0.85", aspect_ratio)
                     asyncio.create_task(self._log_rejected_candidate(
                         "person", "Persoon", conf, 0.0,
-                        f"AFGEWEZEN: Aspect-ratio ongeldig ({aspect_ratio:.2f} < 1.25)",
+                        f"AFGEWEZEN: Aspect-ratio ongeldig ({aspect_ratio:.2f} < 0.85)",
                         box, frame
                     ))
                     continue
 
-                # Foliage/Tree zone check vs Doorstep Visitor (v3.5.5)
-                # Doorstep visitor stands close to the camera lens (mounted on right frame):
-                # box_h >= 28% frame height OR bottom edge reaches doorstep ground level (y2 >= 65%).
+                # Foliage/Tree zone check vs Doorstep Visitor:
+                # Tree canopy foliage is strictly in the upper canopy (y1 < 35% and y2 < 50% height).
+                # Walkway / doorstep visitors stand on ground level (y2 >= 40% height or box_h >= 18% height).
                 cx_norm = ((bx1 + bx2) / 2.0) / float(w)
-                is_doorstep_visitor = (box_h >= (0.28 * float(h))) or (by2 >= (0.65 * float(h)))
-                is_foliage_zone = (not is_doorstep_visitor) and ((cx_norm < 0.16) or (cx_norm > 0.68))
-                if is_doorstep_visitor:
+                is_doorstep_visitor = (by2 >= (0.40 * float(h))) or (box_h >= (0.18 * float(h)))
+                is_upper_tree_canopy = (not is_doorstep_visitor) and (by1 < (0.35 * float(h))) and (by2 < (0.50 * float(h))) and ((cx_norm < 0.16) or (cx_norm > 0.68))
+                if is_doorstep_visitor or is_hardware_motion_active:
                     req_conf = 0.20
-                elif is_foliage_zone:
-                    req_conf = 0.58
+                elif is_upper_tree_canopy:
+                    req_conf = 0.55
                 else:
-                    req_conf = max(min(person_conf_thresh, 0.42), 0.35)
+                    req_conf = max(min(person_conf_thresh, 0.38), 0.28)
             elif cid in VEHICLE_CLASSES:
                 category = "vehicle"
                 req_conf = min(vehicle_conf_thresh, 0.40)
@@ -937,12 +947,8 @@ class SmartDetector:
             # Static Parked Car & Stationary Spot Filter (v3.4.0)
             if category == "vehicle":
                 if self.is_stationary_parked(box, float(w), now):
-                    logger.debug("STATIONARY_PARKED_CAR rejected at %s", box)
-                    asyncio.create_task(self._log_rejected_candidate(
-                        "vehicle", label, conf, 0.0,
-                        "AFGEWEZEN: Stilstaande geparkeerde auto",
-                        box, frame
-                    ))
+                    logger.debug("STATIONARY_PARKED_CAR matched at %s", box)
+                    # Silently skip known parked cars without flooding ai_audit_logs
                     continue
 
             detected_candidates.append((category, label, conf, box, changed_pixel_ratio))
@@ -1107,11 +1113,11 @@ class SmartDetector:
                     box_w = max(1.0, last_box[2] - last_box[0])
                     box_h = max(1.0, last_box[3] - last_box[1])
                     aspect_ratio = box_h / box_w
-                    if aspect_ratio < 1.25:
+                    if aspect_ratio < 0.85:
                         if duration_tracked >= 1.0:
                             asyncio.create_task(self._log_rejected_candidate(
                                 "person", track.label, track.best_conf, delta_d_pct,
-                                f"AFGEWEZEN: Aspect-ratio ongeldig ({aspect_ratio:.2f} < 1.25)",
+                                f"AFGEWEZEN: Aspect-ratio ongeldig ({aspect_ratio:.2f} < 0.85)",
                                 last_box, frame
                             ))
                             to_remove.append(tid)
@@ -1119,13 +1125,13 @@ class SmartDetector:
 
                     cx_norm = cx2 / float(w)
                     last_h = max(1.0, last_box[3] - last_box[1])
-                    is_doorstep_visitor = (last_h >= (0.28 * float(h))) or (last_box[3] >= (0.65 * float(h)))
-                    is_foliage_zone = (not is_doorstep_visitor) and ((cx_norm < 0.16) or (cx_norm > 0.68))
+                    is_doorstep_visitor = (last_box[3] >= (0.40 * float(h))) or (last_h >= (0.18 * float(h)))
+                    is_upper_tree_canopy = (not is_doorstep_visitor) and (last_box[1] < (0.35 * float(h))) and (last_box[3] < (0.50 * float(h))) and ((cx_norm < 0.16) or (cx_norm > 0.68))
 
                     # Pedestrian verification over >= 2 frames:
                     if len(track.frames) >= 2:
-                        # In foliage zones with 4+ frames: check oscillation to filter swaying tree branches
-                        if len(track.frames) >= 4 and is_foliage_zone:
+                        # In upper tree canopy with 4+ frames: check oscillation to filter swaying tree branches
+                        if len(track.frames) >= 4 and is_upper_tree_canopy:
                             total_path = 0.0
                             for f_i in range(len(track.frames) - 1):
                                 fb1 = track.frames[f_i][1]
@@ -1148,20 +1154,20 @@ class SmartDetector:
 
                         # Approve walking pedestrian or doorstep visitor
                         if is_doorstep_visitor:
-                            min_disp = 0.5
-                        elif is_foliage_zone:
+                            min_disp = 0.3
+                        elif is_upper_tree_canopy:
                             min_disp = 2.5
                         else:
-                            min_disp = 1.5
+                            min_disp = 1.0
 
-                        if delta_d_pct >= min_disp or track.best_conf >= 0.58 or (is_doorstep_visitor and len(track.frames) >= 2):
+                        if delta_d_pct >= min_disp or track.best_conf >= 0.50 or (is_doorstep_visitor and len(track.frames) >= 2):
                             is_valid_object = True
                             verified_disp_pct = delta_d_pct
                             logger.info("Person APPROVED: %s conf=%.2f disp=%.1f%% frames=%d (doorstep=%s)", track.label, track.best_conf, delta_d_pct, len(track.frames), is_doorstep_visitor)
                     elif duration_tracked >= 1.8:
                         asyncio.create_task(self._log_rejected_candidate(
                             "person", track.label, track.best_conf, delta_d_pct,
-                            f"AFGEWEZEN: Te weinig verplaatsing ({delta_d_pct:.1f}% < 1.5%)",
+                            f"AFGEWEZEN: Te weinig verplaatsing ({delta_d_pct:.1f}% < 1.0%)",
                             last_box, frame
                         ))
                         to_remove.append(tid)

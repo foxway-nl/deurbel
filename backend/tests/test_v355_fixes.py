@@ -98,39 +98,61 @@ async def test_v355_person_and_vehicle_track_multi_frame_evaluation():
     await detector._process_frame_gatekeeper(dummy_frame, now, cfg)
 
 
-def test_v355_dual_trigger_timing_analysis():
+def test_v355_dual_trigger_timing_analysis(tmp_path, monkeypatch):
     """Verify dual-trigger timing analyzer records deltas in [-4.5s, +1.5s] window."""
     import time
+    import app.network_sniffer as sniffer_mod
     from app.network_sniffer import network_sniffer
 
-    # Push a mock packet to payload buffer
-    now_t = time.time()
-    packet_ts = now_t - 3.14  # Sniffer 3.14s before chime
-    network_sniffer._payload_buffer.append({
-        "timestamp": "2026-11-02 12:00:00.000",
-        "ts_float": packet_ts,
-        "dst_ip": "148.153.115.233",
-        "dst_port": 6404,
-        "protocol": "UDP",
-        "payload_len": 49,
-        "total_len": 77,
-        "is_syn": False,
-        "payload_hex": "536a49794e5445344f44616263",
-    })
+    # Isolate test from production log file and save in-memory state
+    test_log_file = str(tmp_path / "timing_test.jsonl")
+    monkeypatch.setattr(sniffer_mod, "TIMING_LOG_FILE", test_log_file)
 
-    # Trigger chime
-    network_sniffer.on_shazam_chime_triggered(now_t)
+    saved_recent = list(network_sniffer.recent_timing_records)
+    saved_buffer = list(network_sniffer._payload_buffer)
+    saved_candidates = list(network_sniffer.learned_chime_candidates)
 
-    # Check timing analysis
-    analysis = network_sniffer.get_timing_analysis()
-    assert analysis["status"] == "ok"
-    assert analysis["configured_window"]["min"] == -4.5
-    assert analysis["configured_window"]["max"] == 1.5
-    assert analysis["total_events"] >= 1
-    recent = analysis["events"][0]
-    assert recent["in_window"] is True
-    assert recent["status"] == "PERFECT_MATCH"
-    assert abs(recent["delta_seconds"] - (-3.14)) < 0.15
+    try:
+        network_sniffer.recent_timing_records.clear()
+        network_sniffer._payload_buffer.clear()
+        network_sniffer.learned_chime_candidates.clear()
+
+        # Push a mock packet to payload buffer
+        now_t = time.time()
+        packet_ts = now_t - 3.14  # Sniffer 3.14s before chime
+        network_sniffer._payload_buffer.append({
+            "timestamp": "2026-11-02 12:00:00.000",
+            "ts_float": packet_ts,
+            "dst_ip": "148.153.115.233",
+            "dst_port": 6404,
+            "protocol": "UDP",
+            "payload_len": 49,
+            "total_len": 77,
+            "is_syn": False,
+            "payload_hex": "536a49794e5445344f44616263",
+        })
+
+        # Trigger chime
+        network_sniffer.on_shazam_chime_triggered(now_t)
+
+        # Check timing analysis
+        analysis = network_sniffer.get_timing_analysis()
+        assert analysis["status"] == "ok"
+        assert analysis["configured_window"]["min"] == -4.5
+        assert analysis["configured_window"]["max"] == 1.5
+        assert analysis["total_events"] == 1
+        recent = analysis["events"][0]
+        assert recent["in_window"] is True
+        assert recent["status"] == "PERFECT_MATCH"
+        assert abs(recent["delta_seconds"] - (-3.14)) < 0.15
+    finally:
+        # Restore production state cleanly
+        network_sniffer.recent_timing_records.clear()
+        network_sniffer.recent_timing_records.extend(saved_recent)
+        network_sniffer._payload_buffer.clear()
+        network_sniffer._payload_buffer.extend(saved_buffer)
+        network_sniffer.learned_chime_candidates.clear()
+        network_sniffer.learned_chime_candidates.extend(saved_candidates)
 
 
 def test_v355_ring_cooldown_5s():
@@ -142,42 +164,52 @@ def test_v355_ring_cooldown_5s():
     assert ring_coordinator.cooldown_sec == 5.0
 
 
-def test_v355_hybrid_dual_trigger_coordination():
+def test_v355_hybrid_dual_trigger_coordination(tmp_path, monkeypatch):
     """Verify hybrid dual-trigger: NETWORK_SNIFF fires at 0.1s, SHAZAM verifies within 3.5s without duplicate ring."""
     import time
     from unittest.mock import MagicMock
     from app.ring_coordinator import RingCoordinator
+    import app.network_sniffer as sniffer_mod
+    from app.network_sniffer import network_sniffer
 
-    coordinator = RingCoordinator()
-    mock_dispatch = MagicMock()
-    coordinator._dispatch_ring_to_state_machine = mock_dispatch
+    test_log_file = str(tmp_path / "timing_test_hybrid.jsonl")
+    monkeypatch.setattr(sniffer_mod, "TIMING_LOG_FILE", test_log_file)
+    saved_recent = list(network_sniffer.recent_timing_records)
 
-    # 1. Network sniffer intercepts /2000/4675 hex at t=0
-    coordinator.register_signal("NETWORK_SNIFF", {"reason": "EZVIZ_CLOUD_INTERCOM_CALL (/2000/4675)"})
+    try:
+        coordinator = RingCoordinator()
+        mock_dispatch = MagicMock()
+        coordinator._dispatch_ring_to_state_machine = mock_dispatch
 
-    # Should immediately dispatch ring
-    assert mock_dispatch.call_count == 1
-    mock_dispatch.assert_called_with("NETWORK_SNIFF")
-    assert coordinator._active_window is not None
-    assert coordinator._active_window["first_source"] == "NETWORK_SNIFF"
-    assert coordinator._active_window["verified"] is False
+        # 1. Network sniffer intercepts /2000/4675 hex at t=0
+        coordinator.register_signal("NETWORK_SNIFF", {"reason": "EZVIZ_CLOUD_INTERCOM_CALL (/2000/4675)"})
 
-    # 2. Shazam chime arrives 1.5s later (acoustic verification)
-    coordinator.register_signal("SHAZAM_CHIME", {"ncc": 0.85})
+        # Should immediately dispatch ring
+        assert mock_dispatch.call_count == 1
+        mock_dispatch.assert_called_with("NETWORK_SNIFF")
+        assert coordinator._active_window is not None
+        assert coordinator._active_window["first_source"] == "NETWORK_SNIFF"
+        assert coordinator._active_window["verified"] is False
 
-    # Dispatch should NOT be called again (no duplicate ring)
-    assert mock_dispatch.call_count == 1
+        # 2. Shazam chime arrives 1.5s later (acoustic verification)
+        coordinator.register_signal("SHAZAM_CHIME", {"ncc": 0.85})
 
-    # Active window should be verified
-    assert coordinator._active_window["verified"] is True
-    assert coordinator._active_window["second_source"] == "SHAZAM_CHIME"
+        # Dispatch should NOT be called again (no duplicate ring)
+        assert mock_dispatch.call_count == 1
 
-    # Recent verifications history should record VERIFIED
-    assert len(coordinator.recent_verifications) >= 1
-    last_ver = coordinator.recent_verifications[-1]
-    assert last_ver["status"] == "VERIFIED"
-    assert last_ver["first_source"] == "NETWORK_SNIFF"
-    assert last_ver["second_source"] == "SHAZAM_CHIME"
+        # Active window should be verified
+        assert coordinator._active_window["verified"] is True
+        assert coordinator._active_window["second_source"] == "SHAZAM_CHIME"
+
+        # Recent verifications history should record VERIFIED
+        assert len(coordinator.recent_verifications) >= 1
+        last_ver = coordinator.recent_verifications[-1]
+        assert last_ver["status"] == "VERIFIED"
+        assert last_ver["first_source"] == "NETWORK_SNIFF"
+        assert last_ver["second_source"] == "SHAZAM_CHIME"
+    finally:
+        network_sniffer.recent_timing_records.clear()
+        network_sniffer.recent_timing_records.extend(saved_recent)
 
 
 def test_v355_sniffer_detects_2000_4675_hex():

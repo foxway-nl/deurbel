@@ -1201,13 +1201,19 @@ async def save_ai_audit_log(
         return cursor.lastrowid or 0
 
 
-async def get_recent_ai_audit_logs(limit: int = 50) -> list[dict]:
-    """Return the most recent AI verification audit logs."""
+async def get_recent_ai_audit_logs(limit: int = 50, status: Optional[str] = None) -> list[dict]:
+    """Return the most recent AI verification audit logs, optionally filtered by status."""
     async with get_db(write=False) as db:
-        cursor = await db.execute(
-            "SELECT * FROM ai_audit_logs ORDER BY id DESC LIMIT ?",
-            (max(1, min(limit, 200)),),
-        )
+        if status and status.upper() in ("APPROVED", "REJECTED"):
+            cursor = await db.execute(
+                "SELECT * FROM ai_audit_logs WHERE status = ? ORDER BY id DESC LIMIT ?",
+                (status.upper(), max(1, min(limit, 200))),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM ai_audit_logs ORDER BY id DESC LIMIT ?",
+                (max(1, min(limit, 200)),),
+            )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 

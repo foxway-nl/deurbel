@@ -254,10 +254,10 @@ async def update_admin_settings_endpoint(request: Request, body: dict):
 
 
 @router.get("/api/v1/admin/detections")
-async def get_admin_detections_endpoint(request: Request):
-    """Returns the last 50 AI audit logs for the Verification Inspector."""
+async def get_admin_detections_endpoint(request: Request, status: Optional[str] = None, limit: int = 50):
+    """Returns AI audit logs for the Verification Inspector, optionally filtered by status."""
     require_admin(request)
-    logs = await get_recent_ai_audit_logs(limit=50)
+    logs = await get_recent_ai_audit_logs(limit=limit, status=status)
     return logs
 
 
