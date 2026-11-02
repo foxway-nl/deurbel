@@ -31,7 +31,7 @@ logger = logging.getLogger("foxway.ring_coordinator")
 class RingCoordinator:
     """Central doorbell ring coordinator with mutual cross-verification."""
 
-    def __init__(self, verification_window_sec: float = 3.5, cooldown_sec: float = 10.0):
+    def __init__(self, verification_window_sec: float = 3.5, cooldown_sec: float = 5.0):
         self.verification_window_sec = verification_window_sec
         self.cooldown_sec = cooldown_sec
 

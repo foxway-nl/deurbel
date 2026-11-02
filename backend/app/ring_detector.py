@@ -8,7 +8,7 @@ Trained on real-world recordings of the EZVIZ DB1 Pro electronic chime:
 3-Layer Acoustic Filter:
 - Layer 1 (Spectral Whitening): Divides STFT frame by running 4-second background spectrum.
 - Layer 2 (Quartz Clock Pitch Stability): Peak frequencies stable within +-15 Hz for >=160ms and >=12 dB prominence.
-- Layer 3 (2D Normalized Cross-Correlation): NCC >= 0.82 triggers doorbell ringing (12s cooldown).
+- Layer 3 (2D Normalized Cross-Correlation): NCC >= 0.82 triggers doorbell ringing (5s cooldown).
 - Logs all attempts with NCC >= 0.45 into daily black-box JSONL.
 """
 
@@ -42,7 +42,7 @@ class ShazamChimeDetector:
         self.sr = 16000
         self.n_fft = 1024
         self.hop_length = 160
-        self.cooldown_seconds = 12.0
+        self.cooldown_seconds = 5.0
         self.ncc_trigger_threshold = 0.72
         self.ncc_log_threshold = 0.45
 

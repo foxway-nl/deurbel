@@ -133,3 +133,13 @@ def test_v355_dual_trigger_timing_analysis():
     assert abs(recent["delta_seconds"] - (-3.14)) < 0.15
 
 
+def test_v355_ring_cooldown_5s():
+    """Verify that doorbell ring cooldown is 5.0 seconds in ring_detector and ring_coordinator."""
+    from app.ring_detector import ring_detector
+    from app.ring_coordinator import ring_coordinator
+
+    assert ring_detector.cooldown_seconds == 5.0
+    assert ring_coordinator.cooldown_sec == 5.0
+
+
+
