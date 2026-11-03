@@ -207,21 +207,29 @@ class ShazamChimeDetector:
 
     def _audio_stream_worker(self) -> None:
         """Background thread streaming audio via RTSP from go2rtc (rtsp://127.0.0.1:8554/deurbel)."""
+        import array
+        import fcntl
+        import termios
+
         rtsp_url = "rtsp://127.0.0.1:8554/deurbel"
         cmd = [
             "nice", "-n", "15",
             "ffmpeg",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-probesize", "32",
+            "-analyzeduration", "0",
             "-rtsp_transport", "tcp",
             "-i", rtsp_url,
             "-vn",
             "-ar", "16000",
             "-ac", "1",
             "-f", "s16le",
-            "-bufsize", "16384",
+            "-flush_packets", "1",
             "pipe:1"
         ]
 
-        logger.info("Starting Shazam RTSP audio consumer on %s", rtsp_url)
+        logger.info("Starting Shazam RTSP audio consumer (low_delay) on %s", rtsp_url)
         had_disconnect = False
         while self._running:
             try:
@@ -229,17 +237,33 @@ class ShazamChimeDetector:
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
-                    bufsize=4096,
+                    bufsize=0,
                 )
                 if had_disconnect:
                     logger.info("🎉 [CAMERA RECONNECTED] Shazam RTSP audio consumer restored on %s!", rtsp_url)
                     had_disconnect = False
 
                 while self._running and self._process.poll() is None:
-                    chunk = self._process.stdout.read(3200) # 100ms chunk (3200 bytes)
+                    # Live-edge backlog protection: if pipe buffer has >300ms backlog, drain older bytes
+                    try:
+                        buf = array.array("i", [0])
+                        fcntl.ioctl(self._process.stdout.fileno(), termios.FIONREAD, buf)
+                        if buf[0] > 9600:
+                            self._process.stdout.read(buf[0] - 3200)
+                    except Exception:
+                        pass
+
+                    # Read 100ms chunk (3200 bytes = 1600 16-bit samples at 16kHz)
+                    chunk = bytearray()
+                    while len(chunk) < 3200 and self._running and self._process.poll() is None:
+                        part = self._process.stdout.read(3200 - len(chunk))
+                        if not part:
+                            break
+                        chunk.extend(part)
+
                     if not chunk:
                         break
-                    self.feed_pcm_samples(chunk)
+                    self.feed_pcm_samples(bytes(chunk))
             except Exception as e:
                 had_disconnect = True
                 logger.debug("Shazam audio stream error (retrying in 3s): %s", e)

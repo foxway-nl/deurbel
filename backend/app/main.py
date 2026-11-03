@@ -236,6 +236,16 @@ async def _on_ringing(call):
     from app.models import save_event
     snapshot_url = f"/api/v1/snapshots/{call.call_id}.jpg" if call.snapshot_path else ""
     trigger_src = getattr(call, "trigger_source", "UNKNOWN")
+
+    # Instant Zero-Latency WS broadcast to phone
+    push_task = asyncio.create_task(push_event("CALL_RINGING", {
+        "event_id": 0,
+        "call_id": call.call_id,
+        "snapshot_url": snapshot_url,
+        "timestamp": call.started_at,
+        "trigger_source": trigger_src,
+    }))
+
     event_dict = await save_event(
         event_type="ring",
         category="ring",
@@ -262,13 +272,7 @@ async def _on_ringing(call):
         except Exception as sniff_err:
             logger.debug("Failed auto-calibrating network sniffer: %s", sniff_err)
 
-    await push_event("CALL_RINGING", {
-        "event_id": event_dict["id"],
-        "call_id": call.call_id,
-        "snapshot_url": snapshot_url,
-        "timestamp": call.started_at,
-        "trigger_source": trigger_src,
-    })
+    await push_task
 
 
 async def _on_claimed(call):

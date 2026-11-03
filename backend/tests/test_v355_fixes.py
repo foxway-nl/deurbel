@@ -274,6 +274,19 @@ async def test_v355_ring_coordinator_no_force_flag():
         assert kwargs.get("trigger_source") == "SHAZAM_CHIME"
 
 
+def test_v355_shazam_audio_stream_worker_low_delay_flags():
+    """Verify that Shazam RTSP consumer uses low-delay and zero-buffer flags."""
+    import inspect
+    from app.ring_detector import ShazamChimeDetector
+
+    src = inspect.getsource(ShazamChimeDetector._audio_stream_worker)
+    assert "-fflags" in src and "nobuffer" in src
+    assert "-flags" in src and "low_delay" in src
+    assert "-flush_packets" in src
+    assert "FIONREAD" in src  # live-edge pipe drainer
+
+
+
 
 
 
