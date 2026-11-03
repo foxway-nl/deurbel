@@ -224,6 +224,10 @@ class SmartDetector:
         self._candidate_tracks: dict[str, CandidateDetection] = {}    # track_id -> CandidateDetection
         self._next_candidate_num: int = 1
 
+        # FASE 1: MOG2 Motion Gatekeeper (feature-flagged, default disabled)
+        from app.motion_gate import motion_gater
+        self.motion_gater = motion_gater
+
         # Worker state
         self._running: bool = False
         self._task: Optional[asyncio.Task] = None
@@ -794,6 +798,17 @@ class SmartDetector:
 
             zones_raw = sys_settings.get("exclusion_zones", "[]")
             exclusion_zones = json.loads(zones_raw) if zones_raw else []
+
+            # FASE 1: Optional MOG2 motion gate configuration (default disabled)
+            enable_mog2 = str(sys_settings.get("enable_mog2_motion_gate", "false")).lower() in ("true", "1")
+            mg_min_area = float(sys_settings.get("motion_gate_min_area_ratio", "0.003"))
+            mg_cooldown = float(sys_settings.get("motion_gate_cooldown_sec", "1.5"))
+            if getattr(self, "motion_gater", None):
+                self.motion_gater.update_config(
+                    min_area_ratio=mg_min_area,
+                    cooldown_sec=mg_cooldown,
+                    enabled=enable_mog2,
+                )
         except Exception:
             person_conf_thresh = 0.35
             vehicle_conf_thresh = 0.38
@@ -806,11 +821,25 @@ class SmartDetector:
             exclusion_zones = []
 
         # ── 2b. Motion Pre-Gating (Motion-First Verification) ─────────────
-        motion_pixel_count = int(np.count_nonzero(motion_mask))
-        motion_ratio = motion_pixel_count / float(w * h)
         is_hardware_motion_active = (now - self._last_hardware_motion_time) < 10.0
         has_active_candidate = (now - self._last_candidate_seen_time) < 4.0 or len(self._candidate_tracks) > 0
-        is_motion_gate_open = is_hardware_motion_active or has_active_candidate or (motion_ratio >= 0.002)
+
+        # FASE 1: If MOG2 motion gater is enabled via feature flag, use it:
+        if getattr(self, "motion_gater", None) and self.motion_gater.enabled:
+            stationary_boxes = [s["box"] for s in self.stationary_vehicles]
+            mg_res = self.motion_gater.process_frame(
+                frame,
+                now=now,
+                stationary_boxes=stationary_boxes,
+                force_open=is_hardware_motion_active or has_active_candidate,
+            )
+            is_motion_gate_open = mg_res.is_gate_open
+            if mg_res.motion_mask is not None:
+                motion_mask = mg_res.motion_mask
+        else:
+            motion_pixel_count = int(np.count_nonzero(motion_mask))
+            motion_ratio = motion_pixel_count / float(w * h)
+            is_motion_gate_open = is_hardware_motion_active or has_active_candidate or (motion_ratio >= 0.002)
 
         if not is_motion_gate_open:
             # Entire scene is static: skip YOLO inference to prevent evaluating parked cars
