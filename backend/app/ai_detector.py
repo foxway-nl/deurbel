@@ -68,15 +68,49 @@ COCO_NAMES = {
     17: "Paard", 18: "Schaap", 19: "Koe",
 }
 
-_MODEL_PATH = (
-    "/mnt/opslag/deurbel/backend/yolov8n.pt"
-    if os.path.exists("/mnt/opslag/deurbel/backend/yolov8n.pt")
-    else (
-        "/mnt/opslag/deurbel/backend/yolov8s.pt"
-        if os.path.exists("/mnt/opslag/deurbel/backend/yolov8s.pt")
-        else "yolov8n.pt"
-    )
-)
+def resolve_model_path(custom_path: Optional[str] = None) -> str:
+    """
+    Resolves the active YOLO detection model path (supports YOLO11 and YOLOv8).
+    Priority:
+    1. Explicit custom_path
+    2. Environment or SQLite override
+    3. Model registry active version
+    4. /mnt/opslag/deurbel/backend/app/yolo11n.pt
+    5. /mnt/opslag/deurbel/backend/app/yolo11s.pt
+    6. /mnt/opslag/deurbel/backend/app/yolov8n.pt
+    7. 'yolo11n.pt'
+    """
+    if custom_path and os.path.exists(custom_path):
+        return custom_path
+
+    env_path = os.environ.get("YOLO_MODEL_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    try:
+        from app.train_eval_toolkit import model_registry
+        reg_path = model_registry.get_active_model_path()
+        if reg_path and os.path.exists(reg_path):
+            return reg_path
+    except Exception:
+        pass
+
+    candidates = [
+        getattr(settings, "YOLO_MODEL_PATH", None),
+        "/mnt/opslag/deurbel/backend/app/yolo11n.pt",
+        "/mnt/opslag/deurbel/backend/app/yolo11s.pt",
+        "/mnt/opslag/deurbel/backend/app/yolov8n.pt",
+        "/mnt/opslag/deurbel/backend/yolov8n.pt",
+        "yolo11n.pt",
+        "yolov8n.pt",
+    ]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return "yolo11n.pt"
+
+
+_MODEL_PATH = resolve_model_path()
 
 
 def compute_iou(
@@ -228,6 +262,10 @@ class SmartDetector:
         from app.motion_gate import motion_gater
         self.motion_gater = motion_gater
 
+        # FASE 2: ByteTrack Consistent Object Tracker (feature-flagged, default disabled)
+        from app.object_tracker import consistent_tracker
+        self.consistent_tracker = consistent_tracker
+
         # Worker state
         self._running: bool = False
         self._task: Optional[asyncio.Task] = None
@@ -252,18 +290,20 @@ class SmartDetector:
         now = time.time()
         return (now - self._last_verified_object_seen) < 3.0 or (now - self._last_hardware_motion_time) < 3.0
 
-    def init_model(self) -> bool:
-        """Initialize official Ultralytics YOLOv8n model and Roboflow Supervision components."""
-        if self.model is not None and self.tracker is not None:
+    def init_model(self, model_path: Optional[str] = None) -> bool:
+        """Initialize official Ultralytics YOLO model (YOLO11 / YOLOv8) and Supervision ByteTrack."""
+        path = resolve_model_path(model_path)
+        if self.model is not None and getattr(self, "_active_model_path", None) == path:
             return True
         try:
-            self.model = YOLO(_MODEL_PATH)
+            self.model = YOLO(path)
+            self._active_model_path = path
             self.tracker = sv.ByteTrack(lost_track_buffer=30, minimum_matching_threshold=0.8)
             self.smoother = sv.DetectionsSmoother(length=3)
-            logger.info("Ultralytics YOLOv8n + Supervision ByteTrack initialized from %s", _MODEL_PATH)
+            logger.info("Ultralytics YOLO model initialized successfully from %s", path)
             return True
         except Exception as e:
-            logger.error("Failed loading YOLOv8n/Supervision: %s", e)
+            logger.error("Failed loading YOLO model from %s: %s", path, e)
             return False
 
     def is_in_quiet_hours(self, start_str: str, end_str: str, check_time: Optional[datetime] = None) -> bool:
@@ -809,6 +849,17 @@ class SmartDetector:
                     cooldown_sec=mg_cooldown,
                     enabled=enable_mog2,
                 )
+
+            # FASE 2: Optional ByteTrack consistency configuration (default disabled)
+            enable_bytetrack = str(sys_settings.get("enable_bytetrack_consistency", "false")).lower() in ("true", "1")
+            bt_min_frames = int(sys_settings.get("bytetrack_min_frames", "3"))
+            bt_driving_disp = float(sys_settings.get("bytetrack_driving_displacement_px", "25.0"))
+            if getattr(self, "consistent_tracker", None):
+                self.consistent_tracker.update_config(
+                    min_track_frames=bt_min_frames,
+                    driving_displacement_px=bt_driving_disp,
+                    enabled=enable_bytetrack,
+                )
         except Exception:
             person_conf_thresh = 0.35
             vehicle_conf_thresh = 0.38
@@ -846,7 +897,7 @@ class SmartDetector:
             self._prune_stale_tracks(now)
             return
 
-        # ── 3. Layer 1: Fast YOLOv8n Inference (imgsz=640, <45ms) ─────────
+        # ── 3. Layer 1: Fast YOLO Inference (imgsz=640, <45ms) ───────────
         if is_hardware_motion_active:
             person_conf_thresh = min(person_conf_thresh, 0.22)
             vehicle_conf_thresh = min(vehicle_conf_thresh, 0.22)
@@ -860,11 +911,12 @@ class SmartDetector:
                 frame,
                 classes=[0, 1, 2, 3, 5, 7, 14, 15, 16, 17, 18, 19],
                 conf=yolo_conf,
+                iou=0.45,
                 imgsz=640,
                 verbose=False,
             )
         except Exception as e:
-            logger.warning("YOLOv8n inference failed: %s", e)
+            logger.warning("YOLO inference failed: %s", e)
             return
 
         has_yolo_boxes = results and len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0
@@ -884,6 +936,73 @@ class SmartDetector:
             if int(cls_val) in VEHICLE_CLASSES
         ]
         self.update_stationary_vehicles(detected_vehicle_boxes, now, w)
+
+        # FASE 2: ByteTrack Consistent Tracking Evaluation (if feature flag enabled)
+        if getattr(self, "consistent_tracker", None) and self.consistent_tracker.enabled:
+            from app.object_tracker import TrackState
+            tracked_objs = self.consistent_tracker.update(
+                boxes=boxes,
+                confs=confs,
+                classes=classes,
+                frame=frame,
+                now=now,
+                coco_names=COCO_NAMES,
+            )
+            for tobj in tracked_objs:
+                if not tobj.is_confirmed or tobj.has_been_dispatched:
+                    continue
+
+                # Loopvlak ground-plane filter
+                if tobj.best_box[3] < (0.18 * h):
+                    continue
+
+                # Exclusion zones filter
+                in_z, _ = self.is_in_exclusion_zone(tobj.best_box, (h, w), exclusion_zones)
+                if in_z:
+                    continue
+
+                if tobj.category == "vehicle":
+                    if tobj.state == TrackState.DRIVING:
+                        tobj.has_been_dispatched = True
+                        logger.info("ByteTrack Vehicle DRIVING APPROVED: ID=%d, label=%s, disp=%.1fpx", tobj.tracker_id, tobj.label, tobj.window_displacement_px)
+                        asyncio.create_task(self._dispatch_verified_detection(
+                            category="vehicle",
+                            label=tobj.label,
+                            confidence=tobj.best_conf,
+                            disp_pct=round((tobj.total_displacement_px / float(w)) * 100.0, 1),
+                            box=tobj.best_box,
+                            keyframe=tobj.best_frame if tobj.best_frame is not None else frame,
+                            cfg=cfg,
+                        ))
+                    elif tobj.state == TrackState.PARKED:
+                        logger.debug("ByteTrack Vehicle PARKED suppressed: ID=%d, label=%s, disp=%.1fpx", tobj.tracker_id, tobj.label, tobj.window_displacement_px)
+
+                elif tobj.category == "person" and tobj.state == TrackState.WALKING:
+                    tobj.has_been_dispatched = True
+                    logger.info("ByteTrack Person WALKING APPROVED: ID=%d, label=%s, disp=%.1fpx", tobj.tracker_id, tobj.label, tobj.total_displacement_px)
+                    asyncio.create_task(self._dispatch_verified_detection(
+                        category="person",
+                        label=tobj.label,
+                        confidence=tobj.best_conf,
+                        disp_pct=round((tobj.total_displacement_px / float(w)) * 100.0, 1),
+                        box=tobj.best_box,
+                        keyframe=tobj.best_frame if tobj.best_frame is not None else frame,
+                        cfg=cfg,
+                    ))
+
+                elif tobj.category == "animal" and tobj.state == TrackState.ANIMAL:
+                    tobj.has_been_dispatched = True
+                    logger.info("ByteTrack Animal APPROVED: ID=%d, label=%s, conf=%.2f", tobj.tracker_id, tobj.label, tobj.best_conf)
+                    asyncio.create_task(self._dispatch_verified_detection(
+                        category="animal",
+                        label=tobj.label,
+                        confidence=tobj.best_conf,
+                        disp_pct=round((tobj.total_displacement_px / float(w)) * 100.0, 1),
+                        box=tobj.best_box,
+                        keyframe=tobj.best_frame if tobj.best_frame is not None else frame,
+                        cfg=cfg,
+                    ))
+            return
 
         detected_candidates = []
 

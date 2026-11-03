@@ -1,0 +1,23 @@
+{
+  "active_version": "yolo11n",
+  "models": {
+    "yolo11n": {
+      "path": "/mnt/opslag/deurbel/backend/app/yolo11n.pt",
+      "architecture": "YOLO11-Nano",
+      "description": "Default official Ultralytics YOLO11n (5.4MB, fast CPU inference)",
+      "parameters": "2.6M"
+    },
+    "yolo11s": {
+      "path": "/mnt/opslag/deurbel/backend/app/yolo11s.pt",
+      "architecture": "YOLO11-Small",
+      "description": "Ultralytics YOLO11s (18.4MB, higher animal/vehicle recall)",
+      "parameters": "9.4M"
+    },
+    "yolov8n": {
+      "path": "/mnt/opslag/deurbel/backend/app/yolov8n.pt",
+      "architecture": "YOLOv8-Nano",
+      "description": "Legacy base YOLOv8n fallback",
+      "parameters": "3.2M"
+    }
+  }
+}
