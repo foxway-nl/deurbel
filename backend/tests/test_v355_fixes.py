@@ -164,8 +164,8 @@ def test_v355_ring_cooldown_5s():
     assert ring_coordinator.cooldown_sec == 5.0
 
 
-def test_v355_hybrid_dual_trigger_coordination(tmp_path, monkeypatch):
-    """Verify hybrid dual-trigger: NETWORK_SNIFF fires at 0.1s, SHAZAM verifies within 3.5s without duplicate ring."""
+def test_v355_shazam_exclusive_ring_trigger(tmp_path, monkeypatch):
+    """Verify that only SHAZAM_CHIME triggers the state machine, and NETWORK_SNIFF is ignored."""
     import time
     from unittest.mock import MagicMock
     from app.ring_coordinator import RingCoordinator
@@ -181,32 +181,16 @@ def test_v355_hybrid_dual_trigger_coordination(tmp_path, monkeypatch):
         mock_dispatch = MagicMock()
         coordinator._dispatch_ring_to_state_machine = mock_dispatch
 
-        # 1. Network sniffer intercepts /2000/4675 hex at t=0
+        # 1. Network sniffer signal arriving in shadow mode should NEVER trigger ringing
         coordinator.register_signal("NETWORK_SNIFF", {"reason": "EZVIZ_CLOUD_INTERCOM_CALL (/2000/4675)"})
+        assert mock_dispatch.call_count == 0
 
-        # Should immediately dispatch ring
-        assert mock_dispatch.call_count == 1
-        mock_dispatch.assert_called_with("NETWORK_SNIFF")
-        assert coordinator._active_window is not None
-        assert coordinator._active_window["first_source"] == "NETWORK_SNIFF"
-        assert coordinator._active_window["verified"] is False
-
-        # 2. Shazam chime arrives 1.5s later (acoustic verification)
+        # 2. Shazam chime arriving MUST trigger ringing
         coordinator.register_signal("SHAZAM_CHIME", {"ncc": 0.85})
-
-        # Dispatch should NOT be called again (no duplicate ring)
         assert mock_dispatch.call_count == 1
-
-        # Active window should be verified
-        assert coordinator._active_window["verified"] is True
-        assert coordinator._active_window["second_source"] == "SHAZAM_CHIME"
-
-        # Recent verifications history should record VERIFIED
-        assert len(coordinator.recent_verifications) >= 1
-        last_ver = coordinator.recent_verifications[-1]
-        assert last_ver["status"] == "VERIFIED"
-        assert last_ver["first_source"] == "NETWORK_SNIFF"
-        assert last_ver["second_source"] == "SHAZAM_CHIME"
+        mock_dispatch.assert_called_with("SHAZAM_CHIME")
+        assert coordinator._active_window is not None
+        assert coordinator._active_window["first_source"] == "SHAZAM_CHIME"
     finally:
         network_sniffer.recent_timing_records.clear()
         network_sniffer.recent_timing_records.extend(saved_recent)
@@ -273,8 +257,8 @@ async def test_v355_doorstep_visitor_ir_contrast_approved():
 
 
 @pytest.mark.asyncio
-async def test_v355_ring_coordinator_force_flag():
-    """Verify that RingCoordinator._dispatch_ring_to_state_machine calls call_sm.ring with force=True."""
+async def test_v355_ring_coordinator_no_force_flag():
+    """Verify that RingCoordinator._dispatch_ring_to_state_machine calls call_sm.ring without force."""
     import asyncio
     from unittest.mock import AsyncMock, patch
     from app.ring_coordinator import ring_coordinator
@@ -286,7 +270,7 @@ async def test_v355_ring_coordinator_force_flag():
         await asyncio.sleep(0.05)
         assert mock_ring.call_count >= 1
         _, kwargs = mock_ring.call_args
-        assert kwargs.get("force") is True
+        assert "force" not in kwargs or kwargs.get("force") is not True
         assert kwargs.get("trigger_source") == "SHAZAM_CHIME"
 
 

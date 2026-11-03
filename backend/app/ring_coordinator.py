@@ -70,6 +70,11 @@ class RingCoordinator:
         now = time.time()
         details = details or {}
 
+        # 100% Decoupling: Sniffer is in passive shadow mode and NEVER triggers ringing
+        if source == "NETWORK_SNIFF":
+            logger.debug("[RingCoordinator] NETWORK_SNIFF ignored as ring trigger (sniffer in shadow learner mode)")
+            return
+
         with self._lock:
             # 1. Check if there is an active verification window waiting for the second signal
             if self._active_window is not None:
@@ -147,7 +152,7 @@ class RingCoordinator:
             self._schedule_verification_check(window)
 
     def _dispatch_ring_to_state_machine(self, source: str) -> None:
-        """Invokes call_sm.ring(force=True, trigger_source=source) immediately."""
+        """Invokes call_sm.ring(trigger_source=source) immediately."""
         async def _async_trigger():
             try:
                 if self._on_ring_callback:
@@ -156,7 +161,7 @@ class RingCoordinator:
                         await res
                     return
                 from app.main import call_sm
-                await call_sm.ring(force=True, trigger_source=source)
+                await call_sm.ring(trigger_source=source)
             except Exception as e:
                 logger.error("[RingCoordinator] Failed to invoke call_sm.ring: %s", e)
 
