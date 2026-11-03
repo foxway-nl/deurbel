@@ -52,56 +52,66 @@ def _get_credentials() -> tuple[str, int, str, str]:
 # Master locks and active session tracking
 _speak_lock = asyncio.Lock()
 _voicecom_thread_lock = threading.RLock()
+_sdk_lock = threading.Lock()
 _active_voice_handle: int = -1
 _active_user_id: int = -1
 _active_sdk = None
+_sdk_initialized: bool = False
 
 
 def _get_sdk():
-    search_dirs = [
-        "/usr/local/lib/python3.11/site-packages/HCNetSDK/Libs/linux",
-        "/app/HCNetSDK/Libs/linux",
-        "/mnt/opslag/deurbel/backend/HCNetSDK/Libs/linux",
-    ]
-    try:
-        import HCNetSDK
-        pkg_dir = Path(HCNetSDK.__file__).parent / "Libs" / "linux"
-        if pkg_dir.exists():
-            search_dirs.insert(0, str(pkg_dir))
-    except Exception:
-        pass
+    global _active_sdk, _sdk_initialized
+    with _sdk_lock:
+        if _active_sdk is not None:
+            return _active_sdk
 
-    sdk_dir = next((d for d in search_dirs if os.path.exists(os.path.join(d, "libhcnetsdk.so"))), None)
-    if not sdk_dir:
-        raise RuntimeError("libhcnetsdk.so not found")
+        search_dirs = [
+            "/usr/local/lib/python3.11/site-packages/HCNetSDK/Libs/linux",
+            "/app/HCNetSDK/Libs/linux",
+            "/mnt/opslag/deurbel/backend/HCNetSDK/Libs/linux",
+        ]
+        try:
+            import HCNetSDK
+            pkg_dir = Path(HCNetSDK.__file__).parent / "Libs" / "linux"
+            if pkg_dir.exists():
+                search_dirs.insert(0, str(pkg_dir))
+        except Exception:
+            pass
 
-    com_dir = os.path.join(sdk_dir, "HCNetSDKCom")
-    cur_ld = os.environ.get("LD_LIBRARY_PATH", "")
-    os.environ["LD_LIBRARY_PATH"] = f"{sdk_dir}:{com_dir}:{cur_ld}"
+        sdk_dir = next((d for d in search_dirs if os.path.exists(os.path.join(d, "libhcnetsdk.so"))), None)
+        if not sdk_dir:
+            raise RuntimeError("libhcnetsdk.so not found")
 
-    for dep in ["libhpr.so", "libcrypto.so.1.1", "libssl.so.1.1", "libHCCore.so"]:
-        dep_p = os.path.join(sdk_dir, dep)
-        if os.path.exists(dep_p):
-            try:
-                ctypes.CDLL(dep_p, mode=ctypes.RTLD_GLOBAL)
-            except Exception:
-                pass
+        com_dir = os.path.join(sdk_dir, "HCNetSDKCom")
+        cur_ld = os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["LD_LIBRARY_PATH"] = f"{sdk_dir}:{com_dir}:{cur_ld}"
 
-    sdk = ctypes.CDLL(os.path.join(sdk_dir, "libhcnetsdk.so"), mode=ctypes.RTLD_GLOBAL)
+        for dep in ["libhpr.so", "libcrypto.so.1.1", "libssl.so.1.1", "libHCCore.so"]:
+            dep_p = os.path.join(sdk_dir, dep)
+            if os.path.exists(dep_p):
+                try:
+                    ctypes.CDLL(dep_p, mode=ctypes.RTLD_GLOBAL)
+                except Exception:
+                    pass
 
-    class NET_DVR_LOCAL_SDK_PATH(ctypes.Structure):
-        _fields_ = [("sPath", ctypes.c_char * 256), ("byRes", ctypes.c_byte * 128)]
+        sdk = ctypes.CDLL(os.path.join(sdk_dir, "libhcnetsdk.so"), mode=ctypes.RTLD_GLOBAL)
 
-    p_com = NET_DVR_LOCAL_SDK_PATH(sPath=f"{com_dir}/".encode("utf-8"))
-    sdk.NET_DVR_SetSDKInitCfg(1, ctypes.byref(p_com))
+        if not _sdk_initialized:
+            class NET_DVR_LOCAL_SDK_PATH(ctypes.Structure):
+                _fields_ = [("sPath", ctypes.c_char * 256), ("byRes", ctypes.c_byte * 128)]
 
-    p_lib = NET_DVR_LOCAL_SDK_PATH(sPath=f"{sdk_dir}/".encode("utf-8"))
-    sdk.NET_DVR_SetSDKInitCfg(2, ctypes.byref(p_lib))
+            p_com = NET_DVR_LOCAL_SDK_PATH(sPath=f"{com_dir}/".encode("utf-8"))
+            sdk.NET_DVR_SetSDKInitCfg(1, ctypes.byref(p_com))
 
-    if not sdk.NET_DVR_Init():
-        raise RuntimeError(f"NET_DVR_Init failed: {sdk.NET_DVR_GetLastError()}")
+            p_lib = NET_DVR_LOCAL_SDK_PATH(sPath=f"{sdk_dir}/".encode("utf-8"))
+            sdk.NET_DVR_SetSDKInitCfg(2, ctypes.byref(p_lib))
 
-    return sdk
+            if not sdk.NET_DVR_Init():
+                raise RuntimeError(f"NET_DVR_Init failed: {sdk.NET_DVR_GetLastError()}")
+            _sdk_initialized = True
+
+        _active_sdk = sdk
+        return _active_sdk
 
 
 def force_close_active_voicecom(logout_user: bool = False):

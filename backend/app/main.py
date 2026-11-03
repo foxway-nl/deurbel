@@ -244,9 +244,8 @@ async def _on_ringing(call):
         snapshot_url=snapshot_url,
         trigger_source=trigger_src,
     )
-    # Pre-warm Hikvision Port 8000 SDK session so user answering has instant (<200ms) two-way audio
-    from app.audio_bridge import async_prewarm_sdk_session
-    asyncio.create_task(async_prewarm_sdk_session())
+    # LiveVoiceComSession connects on-demand when the user answers (taps "Opnemen").
+    # We do NOT prewarm over port 8000 during ringing to avoid native C-SDK thread contention.
 
     # Trigger passive doorbell status monitor (v3.4.0)
     try:

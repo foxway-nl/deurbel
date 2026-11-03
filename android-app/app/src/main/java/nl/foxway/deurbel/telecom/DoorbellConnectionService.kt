@@ -210,15 +210,20 @@ class DoorbellConnectionService : ConnectionService() {
         }
 
         fun launchCallActivity(context: Context, callId: String, snapshotUrl: String, isActive: Boolean) {
-            val intent = Intent(context, CallActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                        Intent.FLAG_ACTIVITY_SINGLE_TOP
-                putExtra(CallActivity.EXTRA_CALL_ID, callId)
-                putExtra(CallActivity.EXTRA_IS_ACTIVE, isActive)
-                putExtra(CallActivity.EXTRA_SNAPSHOT_URL, snapshotUrl)
+            try {
+                val intent = Intent(context, CallActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    putExtra(CallActivity.EXTRA_CALL_ID, callId)
+                    putExtra(CallActivity.EXTRA_IS_ACTIVE, isActive)
+                    putExtra(CallActivity.EXTRA_SNAPSHOT_URL, snapshotUrl)
+                }
+                context.startActivity(intent)
+                Log.i(TAG, "CallActivity launched (callId=$callId, isActive=$isActive)")
+            } catch (t: Throwable) {
+                Log.w(TAG, "Direct CallActivity launch deferred/blocked by OS: ${t.message} (fullScreenIntent notification active)")
             }
-            context.startActivity(intent)
         }
 
         fun notifyAnswered() {
@@ -309,8 +314,12 @@ class DoorbellConnectionService : ConnectionService() {
         // Start ringtone & vibration for incoming doorbell call
         connection.startRingtone()
 
-        // Start LiveStreamController pre-warm immediately
-        nl.foxway.deurbel.network.LiveStreamController.getInstance(this).start()
+        // Start LiveStreamController pre-warm safely
+        try {
+            nl.foxway.deurbel.network.LiveStreamController.getInstance(this).start()
+        } catch (e: Exception) {
+            Log.w(TAG, "LiveStream prewarm error: ${e.message}")
+        }
 
         // Launch full-screen CallActivity over lockscreen only if not already visible
         if (!CallActivity.isCallActivityVisible) {
@@ -329,7 +338,11 @@ class DoorbellConnectionService : ConnectionService() {
         val extras = request?.extras ?: Bundle()
         val callId = extras.getString(EXTRA_CALL_ID) ?: ""
         val snapshotUrl = extras.getString(EXTRA_SNAPSHOT_URL) ?: ""
-        nl.foxway.deurbel.network.LiveStreamController.getInstance(this).start()
+        try {
+            nl.foxway.deurbel.network.LiveStreamController.getInstance(this).start()
+        } catch (e: Exception) {
+            Log.w(TAG, "LiveStream fallback start error: ${e.message}")
+        }
         if (!CallActivity.isCallActivityVisible) {
             launchCallActivity(this, callId, snapshotUrl, false)
         }

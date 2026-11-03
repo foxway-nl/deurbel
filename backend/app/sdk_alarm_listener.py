@@ -897,28 +897,34 @@ class SDKAlarmListener:
 
         # 2. Query C-SDK NET_DVR_GetDVRWorkState_V30
         try:
-            with self._channel_lock:
-                uid = self._user_id
-                sdk = self._sdk
-                if uid >= 0 and sdk is not None:
-                    # Allocate safe 128 KB buffer
-                    buf = (ctypes.c_uint8 * 131072)()
-                    sdk.NET_DVR_GetDVRWorkState_V30.restype = ctypes.c_bool
-                    sdk.NET_DVR_GetDVRWorkState_V30.argtypes = [ctypes.c_int32, ctypes.c_void_p]
-                    ok = sdk.NET_DVR_GetDVRWorkState_V30(uid, ctypes.byref(buf))
-                    if ok:
-                        raw = bytes(buf[:128])
-                        dw_dev_static = struct.unpack("<I", raw[:4])[0]
-                        status_data["csdk_workstate"] = {
-                            "success": True,
-                            "dwDeviceStatic": dw_dev_static,
-                            "raw_bytes_prefix_hex": raw[:32].hex(),
-                        }
+            acquired = self._channel_lock.acquire(timeout=0.5)
+            if acquired:
+                try:
+                    uid = self._user_id
+                    sdk = self._sdk
+                    if uid >= 0 and sdk is not None:
+                        # Allocate safe 128 KB buffer
+                        buf = (ctypes.c_uint8 * 131072)()
+                        sdk.NET_DVR_GetDVRWorkState_V30.restype = ctypes.c_bool
+                        sdk.NET_DVR_GetDVRWorkState_V30.argtypes = [ctypes.c_int32, ctypes.c_void_p]
+                        ok = sdk.NET_DVR_GetDVRWorkState_V30(uid, ctypes.byref(buf))
+                        if ok:
+                            raw = bytes(buf[:128])
+                            dw_dev_static = struct.unpack("<I", raw[:4])[0]
+                            status_data["csdk_workstate"] = {
+                                "success": True,
+                                "dwDeviceStatic": dw_dev_static,
+                                "raw_bytes_prefix_hex": raw[:32].hex(),
+                            }
+                        else:
+                            err = sdk.NET_DVR_GetLastError() if hasattr(sdk, "NET_DVR_GetLastError") else -1
+                            status_data["csdk_workstate"] = {"success": False, "error_code": err}
                     else:
-                        err = sdk.NET_DVR_GetLastError() if hasattr(sdk, "NET_DVR_GetLastError") else -1
-                        status_data["csdk_workstate"] = {"success": False, "error_code": err}
-                else:
-                    status_data["csdk_workstate"] = {"success": False, "reason": "C-SDK alarm not logged in"}
+                        status_data["csdk_workstate"] = {"success": False, "reason": "C-SDK alarm not logged in"}
+                finally:
+                    self._channel_lock.release()
+            else:
+                status_data["csdk_workstate"] = {"success": False, "reason": "Channel lock busy"}
         except Exception as csdk_err:
             logger.debug("Failed getting C-SDK workstate: %s", csdk_err)
             status_data["csdk_workstate"] = {"success": False, "error": str(csdk_err)}
