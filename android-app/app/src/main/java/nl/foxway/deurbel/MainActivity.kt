@@ -62,6 +62,7 @@ class MainActivity : ComponentActivity() {
                         try {
                             WebSocketForegroundService.start(this@MainActivity)
                         } catch (_: Exception) {}
+                        FoxwayApp.instance.syncFcmToken()
                     }
                 }
 
@@ -71,6 +72,7 @@ class MainActivity : ComponentActivity() {
                             try {
                                 WebSocketForegroundService.start(this@MainActivity)
                             } catch (_: Exception) {}
+                            FoxwayApp.instance.syncFcmToken()
                         }
                     )
                 } else {

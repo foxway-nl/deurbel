@@ -689,6 +689,7 @@ fun OnboardingScreen(
                                     wan = wanToSave
                                 )
                                 AppLogger.getInstance(context).info("Toestel gekoppeld als ${body.userName}")
+                                FoxwayApp.instance.syncFcmToken()
 
                                 // Sync last_seen_event_id to latest server event to prevent notification explosion on login
                                 val eventPrefs = context.getSharedPreferences("foxway_events", Context.MODE_PRIVATE)

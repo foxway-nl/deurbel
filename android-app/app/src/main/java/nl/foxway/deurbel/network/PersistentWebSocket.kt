@@ -118,6 +118,15 @@ class PersistentWebSocket(
                         val isLan = resolved.isLan
                         nl.foxway.deurbel.data.AppLogger.getInstance(nl.foxway.deurbel.FoxwayApp.instance)
                             .network("WebSocket verbonden met ${if (isLan) "LAN" else "WAN"}")
+                        scope.launch {
+                            try {
+                                val cachedToken = preferencesManager.getFcmToken()
+                                if (cachedToken.isNotBlank()) {
+                                    ws.send("{\"type\": \"fcm_token_update\", \"fcm_token\": \"$cachedToken\"}")
+                                    Log.d(TAG, "Sent cached FCM token via WebSocket onOpen")
+                                }
+                            } catch (_: Exception) {}
+                        }
                     }
 
                     override fun onMessage(ws: WebSocket, text: String) {

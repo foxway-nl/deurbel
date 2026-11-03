@@ -1,6 +1,12 @@
 package nl.foxway.deurbel.network
 
 import android.util.Log
+import com.google.gson.Gson
+import com.google.gson.GsonBuilder
+import com.google.gson.TypeAdapter
+import com.google.gson.stream.JsonReader
+import com.google.gson.stream.JsonToken
+import com.google.gson.stream.JsonWriter
 import nl.foxway.deurbel.data.models.EndpointConfig
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
@@ -61,6 +67,11 @@ object ApiClientFactory {
         chain.proceed(request)
     }
 
+    val lenientGson: Gson = GsonBuilder()
+        .registerTypeAdapter(Boolean::class.java, LenientBooleanAdapter())
+        .registerTypeAdapter(java.lang.Boolean::class.java, LenientBooleanAdapter())
+        .create()
+
     val okHttpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -97,9 +108,38 @@ object ApiClientFactory {
         return Retrofit.Builder()
             .baseUrl(url)
             .client(okHttpClient)
-            .addConverterFactory(GsonConverterFactory.create())
+            .addConverterFactory(GsonConverterFactory.create(lenientGson))
             .build()
             .create(FoxwayApi::class.java)
+    }
+
+    private class LenientBooleanAdapter : TypeAdapter<Boolean>() {
+        override fun write(out: JsonWriter, value: Boolean?) {
+            if (value == null) {
+                out.nullValue()
+            } else {
+                out.value(value)
+            }
+        }
+
+        override fun read(reader: JsonReader): Boolean {
+            return when (reader.peek()) {
+                JsonToken.BOOLEAN -> reader.nextBoolean()
+                JsonToken.NUMBER -> reader.nextInt() != 0
+                JsonToken.STRING -> {
+                    val str = reader.nextString().trim()
+                    str.equals("true", ignoreCase = true) || str == "1"
+                }
+                JsonToken.NULL -> {
+                    reader.nextNull()
+                    false
+                }
+                else -> {
+                    reader.skipValue()
+                    false
+                }
+            }
+        }
     }
 
     /**

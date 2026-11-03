@@ -7,6 +7,7 @@ import android.app.NotificationManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -58,6 +59,47 @@ class FoxwayApp : Application() {
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Could not auto-start background service: ${e.message}")
+            }
+            syncFcmToken()
+        }
+    }
+
+    /**
+     * Proactively fetch and synchronize the FCM registration token with the backend.
+     * Ensures high-priority wakeup pushes always reach this device even after reboot/sleep.
+     */
+    fun syncFcmToken() {
+        applicationScope.launch {
+            try {
+                FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+                    if (task.isSuccessful && !task.result.isNullOrBlank()) {
+                        val token = task.result
+                        applicationScope.launch {
+                            try {
+                                preferencesManager.saveFcmToken(token)
+                                val userId = preferencesManager.getUserId()
+                                if (userId.isNotBlank()) {
+                                    val resolver = nl.foxway.deurbel.network.EndpointResolver(preferencesManager)
+                                    val resolved = resolver.resolve()
+                                    val api = nl.foxway.deurbel.network.ApiClientFactory.createApi(resolved.apiBaseUrl)
+                                    val response = api.updateFcmToken(
+                                        userId,
+                                        nl.foxway.deurbel.data.models.FcmTokenUpdate(token)
+                                    )
+                                    if (response.isSuccessful) {
+                                        Log.i(TAG, "FCM token successfully synced to backend for user: $userId")
+                                    } else {
+                                        Log.w(TAG, "FCM token sync response code: ${response.code()}")
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed uploading FCM token to backend: ${e.message}")
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "FirebaseMessaging getInstance failed: ${e.message}")
             }
         }
     }

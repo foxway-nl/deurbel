@@ -1030,7 +1030,13 @@ async def get_events_since(since_id: int = 0, limit: int = 50, order: str = "asc
                 (since_id, max(1, min(limit, 200))),
             )
         rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            d = dict(r)
+            if "silent" in d:
+                d["silent"] = bool(d["silent"])
+            result.append(d)
+        return result
 
 
 async def get_unnotified_events(since: Optional[str] = None, limit: int = 20) -> list[dict]:
@@ -1055,7 +1061,13 @@ async def get_unnotified_events(since: Optional[str] = None, limit: int = 20) ->
                 (max(1, min(limit, 100)),),
             )
         rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            d = dict(r)
+            if "silent" in d:
+                d["silent"] = bool(d["silent"])
+            result.append(d)
+        return result
 
 
 async def get_dynamic_wan_url() -> str:
