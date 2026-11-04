@@ -244,12 +244,12 @@ class ShazamChimeDetector:
                     had_disconnect = False
 
                 while self._running and self._process.poll() is None:
-                    # Live-edge backlog protection: if pipe buffer has >300ms backlog, drain older bytes
+                    # Runaway backlog protection: only drain if pipe buffer lags >10s behind live edge
                     try:
                         buf = array.array("i", [0])
                         fcntl.ioctl(self._process.stdout.fileno(), termios.FIONREAD, buf)
-                        if buf[0] > 9600:
-                            self._process.stdout.read(buf[0] - 3200)
+                        if buf[0] > 320000:
+                            self._process.stdout.read(buf[0] - 32000)
                     except Exception:
                         pass
 
