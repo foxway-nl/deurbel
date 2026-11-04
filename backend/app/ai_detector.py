@@ -275,6 +275,9 @@ class SmartDetector:
         self._last_person_seen: float = 0.0
         self._last_rejected_log_time: dict[str, float] = {}
 
+        # Pre-load user-verified parking spots from ai_audit_logs into baseline memory
+        self.load_verified_parked_anchors()
+
     def notify_hardware_motion(self) -> None:
         """Signaled by Port 8000 SDK Alarm (0x4000 dwAlarmType == 3) to trigger 4 FPS High-Speed Scan Burst."""
         self._last_hardware_motion_time = time.time()
@@ -366,6 +369,47 @@ class SmartDetector:
         except Exception as e:
             logger.warning("Error updating parked baseline: %s", e)
             return self.parked_vehicle_boxes
+
+    def load_verified_parked_anchors(self) -> None:
+        """Pre-load user-verified parked vehicle locations from ai_audit_logs into baseline memory."""
+        try:
+            import sqlite3
+            from app.database import get_db_path
+            db_path = get_db_path()
+            if os.path.exists(db_path):
+                with sqlite3.connect(db_path, timeout=5.0) as conn:
+                    cur = conn.cursor()
+                    rows = cur.execute(
+                        "SELECT boxes_json FROM ai_audit_logs WHERE feedback_reason IN ('PARKED_CAR', 'PERSON_NEAR_PARKED_CAR') ORDER BY id DESC LIMIT 50"
+                    ).fetchall()
+                    loaded = 0
+                    now_t = time.time()
+                    for (b_json,) in rows:
+                        if b_json:
+                            try:
+                                b_list = json.loads(b_json)
+                                for item in b_list:
+                                    if "x1" in item and "x2" in item:
+                                        p_box = (float(item["x1"]), float(item["y1"]), float(item["x2"]), float(item["y2"]))
+                                        if not any(compute_iou(p_box, existing) >= 0.60 for existing in self.parked_vehicle_boxes):
+                                            self.parked_vehicle_boxes.append(p_box)
+                                            loaded += 1
+                                            bx1, by1, bx2, by2 = p_box
+                                            self.stationary_vehicles.append({
+                                                "box": p_box,
+                                                "cx": (bx1 + bx2) / 2.0,
+                                                "cy": (by1 + by2) / 2.0,
+                                                "first_seen": now_t - 3600.0,
+                                                "last_seen": now_t,
+                                                "stationary_frames": 500,
+                                                "is_baseline": True,
+                                            })
+                            except Exception:
+                                pass
+                    if loaded > 0:
+                        logger.info("🚗 Loaded %d user-verified parked vehicle anchors into active memory", loaded)
+        except Exception as e:
+            logger.debug("Could not pre-load verified parked anchors: %s", e)
 
     def is_stationary_parked(self, box: tuple[float, float, float, float], w: float, now: float) -> bool:
         """
@@ -947,6 +991,7 @@ class SmartDetector:
                 frame=frame,
                 now=now,
                 coco_names=COCO_NAMES,
+                known_anchors=self.parked_vehicle_boxes,
             )
             for tobj in tracked_objs:
                 if not tobj.is_confirmed or tobj.has_been_dispatched:
@@ -962,6 +1007,16 @@ class SmartDetector:
                     continue
 
                 if tobj.category == "vehicle":
+                    # Person Dominance: if a person is in the scene, suppress vehicle dispatch
+                    has_person_near = any(
+                        t.category == "person" and t.is_confirmed
+                        for t in tracked_objs
+                    ) or ((now - self._last_person_seen) < 12.0)
+
+                    if has_person_near:
+                        logger.debug("ByteTrack Vehicle dispatch suppressed: Person dominance active in scene")
+                        continue
+
                     if tobj.state == TrackState.DRIVING:
                         tobj.has_been_dispatched = True
                         logger.info("ByteTrack Vehicle DRIVING APPROVED: ID=%d, label=%s, disp=%.1fpx", tobj.tracker_id, tobj.label, tobj.window_displacement_px)
@@ -1228,7 +1283,7 @@ class SmartDetector:
                             max_stat_iou = iou
 
                     # Only reject as parked if stationary overlap is high and it hasn't moved
-                    if max_stat_iou >= 0.70 and delta_d < 0.035:
+                    if max_stat_iou >= 0.45 and delta_d < 0.10:
                         if duration_tracked >= 1.5:
                             asyncio.create_task(self._log_rejected_candidate(
                                 "vehicle", track.label, track.best_conf, delta_d_pct,

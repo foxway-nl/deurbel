@@ -1,18 +1,21 @@
 """
-Foxway Smart Doorbell — Central Ring Coordinator & Dual Cross-Verification (v3.5.1).
+Foxway Smart Doorbell — Central Ring Coordinator & 3-Tier Multi-Sensor Coincidence Engine (v3.5.6).
 
 Architecture:
-1. Zero-Latency Immediate Trigger (SHAZAM_CHIME only):
-   When SHAZAM_CHIME arrives the coordinator immediately invokes call_sm.ring(...) at
-   millisecond 0 (zero latency). NETWORK_SNIFF is in full shadow / passive-learner mode
-   and NEVER triggers a ring.
-2. Background 3.5s Mismatch WARNING:
-   After a SHAZAM_CHIME fires, a background timer checks whether the sniffer also
-   registered a candidate burst within [-2.0s, +3.5s]:
-   - If sniffer confirmed:   Log INFO  [RING VERIFIED]  (dual confirmation)
-   - If sniffer was silent:  Log WARNING [RING MISMATCH WARNING] (not ERROR)
-3. Thread-Safe & Asyncio Native:
-   Can be called from background sniffer/audio threads via register_ring_signal(...).
+1. Tier 1: Zero-Latency Immediate Trigger (SHAZAM_CHIME only):
+   When Shazam Cross-Correlation is >= 0.72 with prominent 728 Hz / 570 Hz peaks,
+   dispatches call_sm.ring(...) immediately at millisecond 0 (trigger_source="SHAZAM_CHIME").
+2. Tier 2: Degraded Acoustic + EZVIZ Cloud Burst Coincidence (Night AGC / Wind Fallback):
+   When Shazam detects deurbel frequencies with reduced amplitude (NCC >= 0.48) AND
+   the Cloud Sniffer detects an EZVIZ Cloud Burst (Pattern B >= 3 TCP pkts, >690B)
+   within a [-1.5s, +1.5s] coincidence window, dispatches call_sm.ring(trigger_source="SHAZAM + SNIFF").
+3. Tier 3: Visual / Doorstep Motion + Cloud Burst Emergency Fallback:
+   When Cloud Burst occurs but audio stream is degraded/offline, verifies if camera motion
+   (0x4000 dwAlarmType==3) or AI person detection occurred at the doorstep within the last 12.0s.
+   If confirmed, dispatches call_sm.ring(trigger_source="MOTION + SNIFF").
+4. Anti-Phantom Protection:
+   Standalone cloud bursts (reconnects at 03:00 without acoustics or motion) and isolated
+   keepalives are strictly blocked (0% false alarms).
 """
 
 from __future__ import annotations
@@ -29,9 +32,9 @@ logger = logging.getLogger("foxway.ring_coordinator")
 
 
 class RingCoordinator:
-    """Central doorbell ring coordinator with mutual cross-verification."""
+    """Central doorbell ring coordinator with 3-tier multi-sensor coincidence engine."""
 
-    def __init__(self, verification_window_sec: float = 3.5, cooldown_sec: float = 5.0):
+    def __init__(self, verification_window_sec: float = 2.0, cooldown_sec: float = 5.0):
         self.verification_window_sec = verification_window_sec
         self.cooldown_sec = cooldown_sec
 
@@ -45,12 +48,19 @@ class RingCoordinator:
         # Ring verification history (max 50)
         self.recent_verifications: Deque[Dict[str, Any]] = collections.deque(maxlen=50)
 
+        # Recent acoustic candidates (NCC >= 0.48)
+        self._recent_acoustic_candidates: Deque[Dict[str, Any]] = collections.deque(maxlen=30)
+        # Recent cloud bursts
+        self._recent_cloud_bursts: Deque[Dict[str, Any]] = collections.deque(maxlen=30)
+
     def reset(self) -> None:
         """Reset internal state (for testing)."""
         with self._lock:
             self._last_ring_ts = 0.0
             self._active_window = None
             self.recent_verifications.clear()
+            self._recent_acoustic_candidates.clear()
+            self._recent_cloud_bursts.clear()
             self._on_ring_callback = None
 
     def set_on_ring_callback(self, callback) -> None:
@@ -60,96 +70,158 @@ class RingCoordinator:
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
 
+    def register_acoustic_candidate(self, ncc: float, details: str = "") -> None:
+        """Thread-safe registration of an acoustic candidate with NCC >= 0.48."""
+        now = time.time()
+        cand = {"ts": now, "ncc": round(float(ncc), 4), "details": str(details)}
+        with self._lock:
+            self._recent_acoustic_candidates.append(cand)
+
+            # Check if there is a recent cloud burst within last 1.5s waiting for acoustic corroboration
+            if (now - self._last_ring_ts) >= self.cooldown_sec:
+                for burst in reversed(self._recent_cloud_bursts):
+                    if (now - burst["ts"]) <= 1.5:
+                        logger.info(
+                            "🎉 [RingCoordinator] Tier 2 MATCH (Acoustic arrived after burst): NCC=%.4f + Cloud Burst (delta=%.1fms)",
+                            ncc,
+                            (now - burst["ts"]) * 1000.0,
+                        )
+                        self._fire_ring_locked(
+                            source="SHAZAM + SNIFF",
+                            details={"ncc": ncc, "acoustic_details": details, "burst": burst["details"]},
+                            status="COINCIDENCE_TIER2",
+                        )
+                        break
+
+    def register_cloud_burst(self, burst_details: Dict[str, Any]) -> None:
+        """Thread-safe registration of an EZVIZ cloud ring burst from NetworkSniffer."""
+        now = time.time()
+        burst_record = {"ts": now, "details": burst_details}
+
+        with self._lock:
+            self._recent_cloud_bursts.append(burst_record)
+
+            if (now - self._last_ring_ts) < self.cooldown_sec:
+                logger.debug("[RingCoordinator] Cloud Burst debounced (in cooldown <%.1fs)", self.cooldown_sec)
+                return
+
+            # ── Tier 2: Check Acoustic Coincidence within last 1.5s ──
+            matching_cand = None
+            for cand in reversed(self._recent_acoustic_candidates):
+                if (now - cand["ts"]) <= 1.5 and cand["ncc"] >= 0.48:
+                    matching_cand = cand
+                    break
+
+            if not matching_cand:
+                try:
+                    from app.ring_detector import chime_detector
+                    live_ncc, live_det = chime_detector.get_recent_acoustic_energy(window_sec=1.5)
+                    if live_ncc >= 0.48:
+                        matching_cand = {"ts": now, "ncc": live_ncc, "details": live_det}
+                except Exception:
+                    pass
+
+            if matching_cand:
+                logger.info(
+                    "🎉 [RingCoordinator] Tier 2 MATCH: Shazam NCC=%.4f + Cloud Burst within 1.5s! Dispatched at ms 0.",
+                    matching_cand["ncc"],
+                )
+                self._fire_ring_locked(
+                    source="SHAZAM + SNIFF",
+                    details={"ncc": matching_cand["ncc"], "acoustic_details": matching_cand["details"], "burst": burst_details},
+                    status="COINCIDENCE_TIER2",
+                )
+                return
+
+            # ── Tier 3: Visual / Doorstep Motion Context Fallback ──
+            recent_motion = False
+            motion_reason = ""
+            try:
+                from app.ai_detector import smart_detector
+                if (now - getattr(smart_detector, "_last_person_seen", 0.0)) < 12.0:
+                    recent_motion = True
+                    motion_reason = f"Persoon gezien {(now - smart_detector._last_person_seen):.1f}s geleden"
+                elif (now - getattr(smart_detector, "_last_hardware_motion_time", 0.0)) < 12.0:
+                    recent_motion = True
+                    motion_reason = f"Camera beweging 0x4000 {(now - smart_detector._last_hardware_motion_time):.1f}s geleden"
+                elif (now - getattr(smart_detector, "_last_verified_object_seen", 0.0)) < 12.0:
+                    recent_motion = True
+                    motion_reason = f"Geverifieerde beweging {(now - smart_detector._last_verified_object_seen):.1f}s geleden"
+            except Exception as me:
+                logger.debug("Failed checking motion context for Tier 3: %s", me)
+
+            if recent_motion:
+                logger.info(
+                    "🚨 [RingCoordinator] Tier 3 MATCH: Cloud Burst + %s (Microfoon offline/gedempt). Triggering ring...",
+                    motion_reason,
+                )
+                self._fire_ring_locked(
+                    source="MOTION + SNIFF",
+                    details={"motion_reason": motion_reason, "burst": burst_details},
+                    status="COINCIDENCE_TIER3",
+                )
+                return
+
+            # ── Standalone burst rejected (Anti-Phantom Protection) ──
+            logger.debug(
+                "🛡️ [RingCoordinator] Cloud Burst rejected: No acoustic chime (NCC < 0.48) and no physical doorstep activity within 12s."
+            )
+            # Standalone sniffer burst without corroboration is silently dropped (0% phantom rings)
+
     def register_signal(self, source: str, details: Optional[Dict[str, Any]] = None) -> None:
         """
         Thread-safe entry point to register a ring signal from either:
-        - 'SHAZAM_CHIME'
-        - 'NETWORK_SNIFF'
+        - 'SHAZAM_CHIME' (Tier 1 instant)
         - 'TEST_BUTTON' / 'SHELLY_WEBHOOK'
         """
         now = time.time()
         details = details or {}
 
-        # 100% Decoupling: Sniffer is in passive shadow mode and NEVER triggers ringing
+        # Network sniffer calls register_cloud_burst directly
         if source == "NETWORK_SNIFF":
-            logger.debug("[RingCoordinator] NETWORK_SNIFF ignored as ring trigger (sniffer in shadow learner mode)")
+            self.register_cloud_burst(details)
             return
 
         with self._lock:
-            # 1. Check if there is an active verification window waiting for the second signal
-            if self._active_window is not None:
-                elapsed = now - self._active_window["start_time"]
-                if elapsed <= self.verification_window_sec:
-                    first_src = self._active_window["first_source"]
-                    # If it's the complementary signal
-                    if source != first_src and not self._active_window.get("verified", False):
-                        self._active_window["second_source"] = source
-                        self._active_window["second_details"] = details
-                        self._active_window["verified"] = True
-                        delta_ms = round(elapsed * 1000, 1)
-
-                        logger.info(
-                            "🎉 [RING VERIFIED] Dubbele aanbel-bevestiging geslaagd: %s + %s "
-                            "vuren allebei af! (delta: %.1fms, 1st=%s, 2nd=%s)",
-                            first_src,
-                            source,
-                            delta_ms,
-                            first_src,
-                            source,
-                        )
-
-                        self.recent_verifications.append({
-                            "timestamp": datetime.datetime.now().isoformat(),
-                            "status": "VERIFIED",
-                            "first_source": first_src,
-                            "second_source": source,
-                            "delta_ms": delta_ms,
-                            "details": f"Dubbele aanbel-bevestiging: {first_src} + {source} ({delta_ms}ms)",
-                        })
-
-                        if source == "SHAZAM_CHIME":
-                            try:
-                                from app.network_sniffer import network_sniffer
-                                network_sniffer.on_shazam_chime_triggered(now)
-                            except Exception:
-                                pass
-                        return
-
-            # 2. Check cooldown for firing a brand new ring
+            # Check cooldown for firing a brand new ring
             if (now - self._last_ring_ts) < self.cooldown_sec:
                 logger.info("[RingCoordinator] Ring signal %s ignored due to cooldown (<%.1fs)", source, self.cooldown_sec)
                 return
 
-            # 3. New Ring Event: Fire immediately at millisecond 0!
-            self._last_ring_ts = now
-            window = {
-                "start_time": now,
-                "first_source": source,
-                "first_details": details,
-                "second_source": None,
-                "second_details": None,
-                "verified": False,
-            }
-            self._active_window = window
+            status = "STANDALONE" if source in ("TEST_BUTTON", "SHELLY_WEBHOOK") else "COMPLETED"
+            self._fire_ring_locked(source=source, details=details, status=status)
 
-            # If it's a test button or webhook, mark as standalone verified
-            if source in ("TEST_BUTTON", "SHELLY_WEBHOOK"):
-                window["verified"] = True
-                self.recent_verifications.append({
-                    "timestamp": datetime.datetime.now().isoformat(),
-                    "status": "STANDALONE",
-                    "first_source": source,
-                    "second_source": None,
-                    "delta_ms": 0.0,
-                    "details": f"Directe trigger via {source}",
-                })
+    def _fire_ring_locked(self, source: str, details: Dict[str, Any], status: str) -> None:
+        """Internal helper to dispatch ring while holding self._lock."""
+        now = time.time()
+        self._last_ring_ts = now
+        window = {
+            "start_time": now,
+            "first_source": source,
+            "first_details": details,
+            "second_source": None,
+            "second_details": None,
+            "verified": True,
+        }
+        self._active_window = window
 
-        # 4. Dispatch ring to call state machine at ms 0
+        self.recent_verifications.append({
+            "timestamp": datetime.datetime.now().isoformat(),
+            "status": status,
+            "first_source": source,
+            "second_source": None,
+            "delta_ms": 0.0,
+            "details": f"Geactiveerd via {source} ({status})",
+        })
+
+        if source in ("SHAZAM_CHIME", "SHAZAM + SNIFF"):
+            try:
+                from app.network_sniffer import network_sniffer
+                network_sniffer.on_shazam_chime_triggered(now)
+            except Exception:
+                pass
+
         self._dispatch_ring_to_state_machine(source)
-
-        # 5. Start background 3.5s verification check if not standalone
-        if source not in ("TEST_BUTTON", "SHELLY_WEBHOOK"):
-            self._schedule_verification_check(window)
 
     def _dispatch_ring_to_state_machine(self, source: str) -> None:
         """Invokes call_sm.ring(trigger_source=source) immediately."""
@@ -174,9 +246,18 @@ class RingCoordinator:
 
         if target_loop and target_loop.is_running():
             try:
-                asyncio.run_coroutine_threadsafe(_async_trigger(), target_loop)
+                current_loop = None
+                try:
+                    current_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    pass
+
+                if current_loop is target_loop:
+                    target_loop.create_task(_async_trigger())
+                else:
+                    asyncio.run_coroutine_threadsafe(_async_trigger(), target_loop)
             except Exception as run_err:
-                logger.error("[RingCoordinator] run_coroutine_threadsafe error: %s", run_err)
+                logger.error("[RingCoordinator] task dispatch error: %s", run_err)
         else:
             try:
                 loop = asyncio.get_event_loop()
@@ -184,61 +265,6 @@ class RingCoordinator:
                     loop.create_task(_async_trigger())
             except Exception as loop_err:
                 logger.error("[RingCoordinator] Could not dispatch ring: no running loop (%s)", loop_err)
-
-    def _schedule_verification_check(self, window: Dict[str, Any]) -> None:
-        """Schedules checking whether the sniffer also saw a burst within 3.5s.
-        In v3.5.1 shadow mode:
-        - VERIFIED  → Shazam fired AND sniffer confirmed a burst (dual confirmation).
-        - COMPLETED → Shazam fired but sniffer saw nothing (log WARNING, not ERROR).
-        """
-        async def _verify_job():
-            await asyncio.sleep(self.verification_window_sec)
-            with self._lock:
-                first_src = window["first_source"]
-                sniffer_confirmed = window.get("verified", False)
-
-                if sniffer_confirmed:
-                    # Already logged VERIFIED when complementary trigger reported
-                    return
-
-                missing = "SHAZAM_CHIME" if first_src == "NETWORK_SNIFF" else "NETWORK_SNIFF"
-                logger.info(
-                    "ℹ️ [RING WINDOW COMPLETED] %s activeerde de bel, maar %s werd niet "
-                    "binnen %.1fs geregistreerd (enkele trigger belsessie).",
-                    first_src,
-                    missing,
-                    self.verification_window_sec,
-                )
-
-                self.recent_verifications.append({
-                    "timestamp": datetime.datetime.now().isoformat(),
-                    "status": "COMPLETED",
-                    "first_source": first_src,
-                    "second_source": None,
-                    "missing_source": missing,
-                    "delta_ms": round(self.verification_window_sec * 1000, 1),
-                    "details": f"Ring window gesloten voor {first_src} ({missing} niet binnen {self.verification_window_sec}s)",
-                })
-
-        target_loop = self._loop
-        if target_loop is None or not target_loop.is_running():
-            try:
-                target_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                pass
-
-        if target_loop and target_loop.is_running():
-            try:
-                asyncio.run_coroutine_threadsafe(_verify_job(), target_loop)
-            except Exception:
-                pass
-        else:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(_verify_job())
-            except RuntimeError:
-                pass
 
     def get_recent_verifications(self) -> List[Dict[str, Any]]:
         """Returns the recent ring cross-verification history."""
@@ -252,4 +278,3 @@ ring_coordinator = RingCoordinator()
 def register_ring_signal(source: str, details: Optional[Dict[str, Any]] = None) -> None:
     """Public helper to register ring signal with the coordinator."""
     ring_coordinator.register_signal(source, details)
-

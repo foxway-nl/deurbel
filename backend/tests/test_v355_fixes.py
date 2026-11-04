@@ -407,6 +407,103 @@ async def test_v355_ai_inspector_active_learning_feedback():
         assert len(smart_detector.stationary_vehicles) > initial_stationary_count
 
 
+@pytest.mark.asyncio
+async def test_v356_ring_coordinator_coincidence_tiers():
+    """Verify 3-Tier Multi-Sensor Coincidence Engine: Tier 1, Tier 2, Tier 3, and Anti-Phantom Protection."""
+    import time
+    from unittest.mock import AsyncMock, patch
+    from app.ring_coordinator import ring_coordinator
+    from app.ai_detector import smart_detector
+
+    mock_ring = AsyncMock()
+    with patch("app.main.call_sm.ring", mock_ring):
+        ring_coordinator.set_loop(asyncio.get_running_loop())
+
+        # Test Case 1: Tier 1 Instant Shazam Chime (NCC >= 0.72)
+        ring_coordinator.reset()
+        mock_ring.reset_mock()
+        ring_coordinator.register_signal("SHAZAM_CHIME", {"ncc": 0.85})
+        await asyncio.sleep(0.05)
+        assert mock_ring.call_count == 1
+        _, kwargs = mock_ring.call_args
+        assert kwargs["trigger_source"] == "SHAZAM_CHIME"
+
+        # Test Case 2: Tier 2 Acoustic Coincidence (NCC >= 0.48 + Cloud Burst within 1.5s)
+        ring_coordinator.reset()
+        mock_ring.reset_mock()
+        ring_coordinator.register_acoustic_candidate(0.55, details="NCC=0.55")
+        ring_coordinator.register_cloud_burst({"dst_port": 8820, "packet_count": 3, "total_bytes": 693})
+        await asyncio.sleep(0.05)
+        assert mock_ring.call_count == 1
+        _, kwargs = mock_ring.call_args
+        assert kwargs["trigger_source"] == "SHAZAM + SNIFF"
+
+        # Test Case 3: Tier 3 Motion Context Emergency Fallback (Microphone offline + Cloud Burst + Doorstep Activity)
+        ring_coordinator.reset()
+        mock_ring.reset_mock()
+        smart_detector._last_person_seen = time.time()  # Person seen 0s ago
+        ring_coordinator.register_cloud_burst({"dst_port": 8820, "packet_count": 3, "total_bytes": 693})
+        await asyncio.sleep(0.05)
+        assert mock_ring.call_count == 1
+        _, kwargs = mock_ring.call_args
+        assert kwargs["trigger_source"] == "MOTION + SNIFF"
+
+        # Test Case 4: Anti-Phantom Protection (Standalone Cloud Burst with no acoustics and no motion)
+        ring_coordinator.reset()
+        mock_ring.reset_mock()
+        smart_detector._last_person_seen = time.time() - 100.0  # Long ago
+        smart_detector._last_hardware_motion_time = time.time() - 100.0
+        smart_detector._last_verified_object_seen = time.time() - 100.0
+        ring_coordinator.register_cloud_burst({"dst_port": 8820, "packet_count": 3, "total_bytes": 693})
+        await asyncio.sleep(0.05)
+        # MUST BE BLOCKED: No ring triggered and no verification created!
+        assert mock_ring.call_count == 0
+        verifs = ring_coordinator.get_recent_verifications()
+        assert len(verifs) == 0
+
+
+def test_v356_object_tracker_persistent_anchor_and_anti_drift():
+    """Verify Arlo/Reolink-grade persistent parking anchor and anti-shadow drift."""
+    import numpy as np
+    from app.object_tracker import ConsistentObjectTracker, TrackState
+
+    tracker = ConsistentObjectTracker(enabled=True, min_track_frames=3, driving_displacement_px=25.0)
+
+    # Known anchor parking spot (from user feedback)
+    known_anchors = [(134.0, 227.0, 223.0, 262.0)]
+    now = 1000.0
+
+    # Frame 1: Vehicle detected overlapping known anchor
+    box_t0 = np.array([[135.0, 228.0, 222.0, 261.0]])
+    confs = np.array([0.85])
+    classes = np.array([2])  # Car
+    dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    objs = tracker.update(box_t0, confs, classes, dummy_frame, now=now, known_anchors=known_anchors)
+    assert len(objs) == 1
+    tobj = objs[0]
+    # Initialized directly as ANCHORED
+    assert tobj.is_anchored is True
+    assert tobj.state == TrackState.PARKED
+
+    # Frame 2-5: Small shadow drift / lighting jitter (shifted by 15-28px)
+    for i in range(5):
+        now += 0.2
+        box_jitter = np.array([[135.0 + (i * 4.0), 228.0, 222.0 + (i * 4.0), 261.0]])
+        objs = tracker.update(box_jitter, confs, classes, dummy_frame, now=now, known_anchors=known_anchors)
+        # MUST STAY PARKED (anti-drift prevents shadow-triggered DRIVING)
+        assert objs[0].state == TrackState.PARKED
+
+    # Frame 6-7: True physical driving departure (moves smoothly away at 30px per frame)
+    for i in range(1, 3):
+        now += 0.2
+        box_moving = np.array([[155.0 + (i * 30.0), 228.0, 242.0 + (i * 30.0), 261.0]])
+        objs = tracker.update(box_moving, confs, classes, dummy_frame, now=now, known_anchors=known_anchors)
+
+    assert objs[0].state == TrackState.DRIVING
+
+
+
 
 
 

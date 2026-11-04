@@ -44,7 +44,7 @@ class ShazamChimeDetector:
         self.hop_length = 160
         self.cooldown_seconds = 5.0
         self.ncc_trigger_threshold = 0.72
-        self.ncc_log_threshold = 0.45
+        self.ncc_log_threshold = 0.25
 
         self._pattern_spec: Optional[np.ndarray] = None
         self._pattern_norm: Optional[np.ndarray] = None
@@ -180,17 +180,27 @@ class ShazamChimeDetector:
             window = np.array(self._sample_buffer, dtype=np.float32)[-int(2.0 * self.sr):]
 
         ncc, matched, details = self.evaluate_audio_window(window)
+        now_eval = time.time()
 
         if ncc >= self.ncc_log_threshold:
             self._recent_detections.append({
                 "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                "ts": now_eval,
                 "ncc": round(float(ncc), 4),
                 "matched": bool(matched),
                 "details": str(details),
             })
 
+        # Register acoustic candidate with RingCoordinator (Tier 2 Coincidence Matrix)
+        if ncc >= 0.48:
+            try:
+                from app.ring_coordinator import ring_coordinator
+                ring_coordinator.register_acoustic_candidate(ncc=float(ncc), details=str(details))
+            except Exception:
+                pass
+
         if matched:
-            now = time.time()
+            now = now_eval
             if (now - self._last_trigger_ts) >= self.cooldown_seconds:
                 self._last_trigger_ts = now
                 logger.info("🚨 [Shazam Chime] 100% MATCH (NCC=%.4f)! Registering ring signal with coordinator...", ncc)
@@ -204,6 +214,21 @@ class ShazamChimeDetector:
                         asyncio.run_coroutine_threadsafe(call_sm.ring(trigger_source="SHAZAM_CHIME"), self._loop)
             else:
                 logger.info("[Shazam Chime] Match debounced (<%.1fs cooldown)", self.cooldown_seconds)
+
+    def get_recent_acoustic_energy(self, window_sec: float = 2.0) -> tuple[float, str]:
+        """Returns the highest NCC score and details registered within the last window_sec seconds."""
+        now = time.time()
+        best_ncc = 0.0
+        best_details = ""
+        for item in reversed(self._recent_detections):
+            item_ts = item.get("ts", 0.0)
+            if (now - item_ts) <= window_sec:
+                if item.get("ncc", 0.0) > best_ncc:
+                    best_ncc = float(item["ncc"])
+                    best_details = str(item.get("details", ""))
+            else:
+                break
+        return best_ncc, best_details
 
     def _audio_stream_worker(self) -> None:
         """Background thread streaming audio via RTSP from go2rtc (rtsp://127.0.0.1:8554/deurbel)."""

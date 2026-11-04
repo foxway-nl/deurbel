@@ -381,11 +381,19 @@ class NetworkSniffer:
                 "payload_hex": first_payload_hex,
             }
 
-            # Check if this matches known doorbell ring signature (Shadow Evaluation only)
+            # Check if this matches known doorbell ring signature
             is_ring = self._check_ring_signature(burst_dict)
             if is_ring:
                 burst_dict["signature_matched"] = True
-                logger.debug("🧪 [Sniffer Shadow Mode] Signature matched but doorbell ring is suppressed (shadow mode).")
+                logger.info(
+                    "🎯 [Network Sniffer] Cloud Doorbell Ring Signature matched (%s:%s, %d pkts, %dB)! Notifying RingCoordinator...",
+                    dst_ip, dst_port, len(group_pkts), total_bytes,
+                )
+                try:
+                    from app.ring_coordinator import ring_coordinator
+                    ring_coordinator.register_cloud_burst(burst_dict)
+                except Exception as ce:
+                    logger.debug("Failed notifying coordinator of cloud burst: %s", ce)
 
             self.recent_bursts.append(burst_dict)
             self._append_burst_log(burst_dict)

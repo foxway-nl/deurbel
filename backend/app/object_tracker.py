@@ -35,6 +35,19 @@ import supervision as sv
 logger = logging.getLogger("foxway.object_tracker")
 
 
+def compute_box_iou(box1: Tuple[float, float, float, float], box2: Tuple[float, float, float, float]) -> float:
+    """Compute Intersection over Union (IoU) between two boxes."""
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    a1 = max(0.0, box1[2] - box1[0]) * max(0.0, box1[3] - box1[1])
+    a2 = max(0.0, box2[2] - box2[0]) * max(0.0, box2[3] - box2[1])
+    union = a1 + a2 - inter
+    return (inter / union) if union > 0.0 else 0.0
+
+
 class TrackState(str, Enum):
     INITIALIZING = "INITIALIZING"
     PARKED = "PARKED"
@@ -82,6 +95,9 @@ class TrackedObject:
         self.total_displacement_px: float = 0.0
         self.window_displacement_px: float = 0.0
         self.speed_px_per_sec: float = 0.0
+        self.is_anchored: bool = False
+        self.anchor_box: Optional[Tuple[float, float, float, float]] = None
+        self.anchor_centroid: Optional[Tuple[float, float]] = None
 
     def update(
         self,
@@ -125,13 +141,39 @@ class TrackedObject:
         self.speed_px_per_sec = (self.window_displacement_px / dt) if dt > 0.05 else 0.0
 
         # Classify state
-        if not self.is_confirmed:
+        if self.is_anchored:
+            self.is_confirmed = True
+
+        if not self.is_confirmed and not self.is_anchored:
             self.state = TrackState.INITIALIZING
         elif self.category == "vehicle":
-            if self.window_displacement_px >= driving_threshold_px or self.total_displacement_px >= (driving_threshold_px * 1.2):
-                self.state = TrackState.DRIVING
+            # Persistent Parking Anchor Memory (Arlo / Reolink standard)
+            if not self.is_anchored:
+                # If vehicle was already parked, or observed for >= 6 frames with small movement:
+                if self.state == TrackState.PARKED or (len(self.history) >= 6 and self.total_displacement_px < driving_threshold_px * 1.5):
+                    self.is_anchored = True
+                    self.anchor_box = box
+                    self.anchor_centroid = (cx, cy)
+                    self.state = TrackState.PARKED
+
+            if self.is_anchored and self.anchor_centroid is not None:
+                anchor_disp = math.hypot(cx - self.anchor_centroid[0], cy - self.anchor_centroid[1])
+                # An anchored car cannot become DRIVING from minor shadow/lighting shifts (< 70px)
+                # It requires true physical displacement >= 70px (or >= 11% frame width) and speed >= 45px/s
+                min_departure_disp = max(70.0, 0.11 * frame_width)
+                if anchor_disp >= min_departure_disp and self.speed_px_per_sec >= 45.0:
+                    self.state = TrackState.DRIVING
+                else:
+                    self.state = TrackState.PARKED
             else:
-                self.state = TrackState.PARKED
+                # Freshly arriving or passing vehicle:
+                min_moving_disp = max(40.0, 0.06 * frame_width)
+                if self.window_displacement_px >= min_moving_disp and self.speed_px_per_sec >= 40.0:
+                    self.state = TrackState.DRIVING
+                elif len(self.history) >= min_track_frames and self.total_displacement_px >= (driving_threshold_px * 2.0):
+                    self.state = TrackState.DRIVING
+                else:
+                    self.state = TrackState.PARKED
         elif self.category == "person":
             min_person_px = 0.010 * frame_width  # 1.0% width = ~6.4px
             if self.total_displacement_px >= min_person_px or self.best_conf >= 0.50:
@@ -208,6 +250,7 @@ class ConsistentObjectTracker:
         frame: np.ndarray,
         now: Optional[float] = None,
         coco_names: Optional[Dict[int, str]] = None,
+        known_anchors: Optional[List[Tuple[float, float, float, float]]] = None,
     ) -> List[TrackedObject]:
         """
         Updates ByteTrack with current frame's raw detections.
@@ -263,7 +306,7 @@ class ConsistentObjectTracker:
                 label = coco_names.get(t_cls, cat.capitalize())
 
                 if tid not in self.tracks:
-                    self.tracks[tid] = TrackedObject(
+                    new_obj = TrackedObject(
                         tracker_id=tid,
                         category=cat,
                         label=label,
@@ -272,6 +315,17 @@ class ConsistentObjectTracker:
                         timestamp=now_ts,
                         frame=frame,
                     )
+                    # Check if this new vehicle overlaps with a known parked anchor
+                    if cat == "vehicle" and known_anchors:
+                        for anchor in known_anchors:
+                            if compute_box_iou(t_box, anchor) >= 0.35:
+                                new_obj.is_anchored = True
+                                new_obj.anchor_box = t_box
+                                new_obj.anchor_centroid = ((t_box[0] + t_box[2]) / 2.0, (t_box[1] + t_box[3]) / 2.0)
+                                new_obj.state = TrackState.PARKED
+                                logger.debug("Vehicle track %d initialized directly as ANCHORED (IoU>=0.35 with known parking spot)", tid)
+                                break
+                    self.tracks[tid] = new_obj
                 else:
                     self.tracks[tid].update(
                         box=t_box,
