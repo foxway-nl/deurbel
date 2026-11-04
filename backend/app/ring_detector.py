@@ -151,8 +151,7 @@ class ShazamChimeDetector:
                 best_ncc = ncc
 
         details = f"NCC={best_ncc:.4f}, P1={prominence_tone1:.1f}x, P2={prominence_tone2:.1f}x"
-        is_strong_dual_tone = bool(prominence_tone1 >= 12.0 and prominence_tone2 >= 12.0 and best_ncc >= 0.45)
-        matched = bool(((best_ncc >= self.ncc_trigger_threshold) and pitch_prominent) or is_strong_dual_tone)
+        matched = bool((best_ncc >= self.ncc_trigger_threshold) and pitch_prominent)
 
         if best_ncc >= self.ncc_log_threshold:
             log_shazam_event(
@@ -245,12 +244,12 @@ class ShazamChimeDetector:
                     had_disconnect = False
 
                 while self._running and self._process.poll() is None:
-                    # Live-edge backlog protection: if pipe buffer has >3s backlog, drain older bytes
+                    # Live-edge backlog protection: if pipe buffer has >300ms backlog, drain older bytes
                     try:
                         buf = array.array("i", [0])
                         fcntl.ioctl(self._process.stdout.fileno(), termios.FIONREAD, buf)
-                        if buf[0] > 96000:
-                            self._process.stdout.read(buf[0] - 32000)
+                        if buf[0] > 9600:
+                            self._process.stdout.read(buf[0] - 3200)
                     except Exception:
                         pass
 

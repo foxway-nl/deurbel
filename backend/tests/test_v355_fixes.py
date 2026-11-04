@@ -181,18 +181,16 @@ def test_v355_shazam_exclusive_ring_trigger(tmp_path, monkeypatch):
         mock_dispatch = MagicMock()
         coordinator._dispatch_ring_to_state_machine = mock_dispatch
 
-        # 1. Network sniffer signal triggers ringing immediately at ms 0
-        coordinator.register_signal("NETWORK_SNIFF", {"reason": "EZVIZ_CLOUD_INTERCOM_CALL (/2000/4103)"})
-        assert mock_dispatch.call_count == 1
-        mock_dispatch.assert_called_with("NETWORK_SNIFF")
-        assert coordinator._active_window is not None
-        assert coordinator._active_window["first_source"] == "NETWORK_SNIFF"
+        # 1. Network sniffer signal arriving in shadow mode should NEVER trigger ringing
+        coordinator.register_signal("NETWORK_SNIFF", {"reason": "EZVIZ_CLOUD_INTERCOM_CALL (/2000/4675)"})
+        assert mock_dispatch.call_count == 0
 
-        # 2. Shazam chime arriving within 3.5s confirms and verifies without duplicate ring
+        # 2. Shazam chime arriving MUST trigger ringing
         coordinator.register_signal("SHAZAM_CHIME", {"ncc": 0.85})
-        assert mock_dispatch.call_count == 1  # No duplicate ring
-        assert coordinator._active_window["verified"] is True
-        assert coordinator._active_window["second_source"] == "SHAZAM_CHIME"
+        assert mock_dispatch.call_count == 1
+        mock_dispatch.assert_called_with("SHAZAM_CHIME")
+        assert coordinator._active_window is not None
+        assert coordinator._active_window["first_source"] == "SHAZAM_CHIME"
     finally:
         network_sniffer.recent_timing_records.clear()
         network_sniffer.recent_timing_records.extend(saved_recent)
