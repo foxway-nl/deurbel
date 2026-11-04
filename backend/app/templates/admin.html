@@ -522,8 +522,8 @@
             <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4">
                 <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-4 border-b border-dark-800 gap-3">
                     <div>
-                        <h2 class="text-lg font-bold text-white">AI Verificatie-Inspector</h2>
-                        <p class="text-xs text-gray-400">Geen zwarte doos meer: bekijk exact waarom een beweging werd goedgekeurd of afgewezen.</p>
+                        <h2 class="text-lg font-bold text-white">AI Verificatie-Inspector (250 Records)</h2>
+                        <p class="text-xs text-gray-400">Bekijk de laatste 250 evaluaties. Beoordeel het AI-besluit: de AI leert direct van jouw invulling!</p>
                     </div>
                     <div class="flex items-center gap-2">
                         <div class="flex bg-dark-950 p-1 rounded-xl border border-dark-700">
@@ -548,11 +548,12 @@
                                 <th class="p-3">Verplaatsing (&Delta;d)</th>
                                 <th class="p-3">Reden & Bounding Box</th>
                                 <th class="p-3">Snapshot</th>
+                                <th class="p-3">Beoordeling (AI Leren)</th>
                             </tr>
                         </thead>
                         <tbody id="inspector-table-body" class="divide-y divide-dark-800 text-gray-300">
                             <tr>
-                                <td colspan="7" class="p-6 text-center text-gray-500">Laden van inspectielogs...</td>
+                                <td colspan="8" class="p-6 text-center text-gray-500">Laden van inspectielogs (250 records)...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -980,9 +981,9 @@
 
         async function loadAuditLogs() {
             const tbody = document.getElementById('inspector-table-body');
-            tbody.innerHTML = '<tr><td colspan="7" class="p-4 text-center text-gray-500">Laden...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" class="p-4 text-center text-gray-500">Laden van 250 records...</td></tr>';
             try {
-                let url = '/api/v1/admin/detections?limit=100';
+                let url = '/api/v1/admin/detections?limit=250';
                 if (currentAuditFilter !== 'ALL') {
                     url += `&status=${currentAuditFilter}`;
                 }
@@ -995,7 +996,7 @@
                         : currentAuditFilter === 'REJECTED' 
                             ? 'Geen afgewezen evaluaties gevonden.' 
                             : 'Nog geen evaluaties geregistreerd.';
-                    tbody.innerHTML = `<tr><td colspan="7" class="p-6 text-center text-gray-500">${msg}</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="8" class="p-6 text-center text-gray-500">${msg}</td></tr>`;
                     return;
                 }
                 tbody.innerHTML = '';
@@ -1010,6 +1011,66 @@
 
                     const snapUrl = `/api/v1/admin/inspector-snapshot/${item.id}`;
 
+                    // Feedback Column HTML
+                    const userFb = item.user_feedback;
+                    let feedbackHtml = '';
+                    if (userFb === 'CORRECT') {
+                        feedbackHtml = `
+                            <div class="flex items-center gap-1.5">
+                                <span class="px-2 py-0.5 rounded-lg text-[11px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                    ✅ Besluit klopt
+                                </span>
+                                <button onclick="toggleIncorrectMenu(${item.id})" class="text-gray-400 hover:text-white text-xs px-1" title="Wijzigen">✏️</button>
+                            </div>
+                        `;
+                    } else if (userFb === 'INCORRECT') {
+                        const r = item.feedback_reason || '';
+                        const rLabel = r === 'PARKED_CAR' ? '🚗 Geparkeerd'
+                            : r === 'MISSED_OBJECT' ? '👤 Gemist'
+                            : r === 'WRONG_CLASS' ? '🏷️ Type fout'
+                            : '❌ Onjuist';
+                        feedbackHtml = `
+                            <div class="flex items-center gap-1.5">
+                                <span class="px-2 py-0.5 rounded-lg text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30" title="Geleerd door AI">
+                                    ${rLabel}
+                                </span>
+                                <button onclick="toggleIncorrectMenu(${item.id})" class="text-gray-400 hover:text-white text-xs px-1" title="Wijzigen">✏️</button>
+                            </div>
+                        `;
+                    } else {
+                        feedbackHtml = `
+                            <div class="flex items-center gap-1" id="fb-box-${item.id}">
+                                <button onclick="submitAuditFeedback(${item.id}, 'CORRECT', 'VALID')" class="px-2 py-1 rounded-lg bg-emerald-950/60 hover:bg-emerald-800 border border-emerald-700/50 text-emerald-300 font-semibold text-[11px] transition" title="Besluit van AI was goed">
+                                    👍 Goed
+                                </button>
+                                <div class="relative inline-block text-left">
+                                    <button onclick="toggleIncorrectMenu(${item.id})" class="px-2 py-1 rounded-lg bg-red-950/60 hover:bg-red-800 border border-red-700/50 text-red-300 font-semibold text-[11px] transition" title="Besluit van AI was fout">
+                                        👎 Fout ▾
+                                    </button>
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    // Append inline dropdown menu container
+                    feedbackHtml += `
+                        <div id="incorrect-menu-${item.id}" class="hidden absolute z-30 mt-1 w-56 rounded-xl bg-dark-900 border border-dark-700 shadow-2xl p-1.5 text-xs space-y-1">
+                            <div class="text-[10px] text-gray-400 px-2 py-0.5 uppercase font-bold border-b border-dark-800">Kies correctie:</div>
+                            <button onclick="submitAuditFeedback(${item.id}, 'INCORRECT', 'PARKED_CAR')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-amber-300 transition flex items-center gap-1.5">
+                                <span>🚗</span> <span>Geparkeerde auto (Onterecht)</span>
+                            </button>
+                            <button onclick="submitAuditFeedback(${item.id}, 'INCORRECT', 'MISSED_OBJECT')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-cyan-300 transition flex items-center gap-1.5">
+                                <span>👤</span> <span>Gemist object (Had gemeld)</span>
+                            </button>
+                            <button onclick="submitAuditFeedback(${item.id}, 'INCORRECT', 'WRONG_CLASS')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-purple-300 transition flex items-center gap-1.5">
+                                <span>🏷️</span> <span>Verkeerd object-type</span>
+                            </button>
+                            <button onclick="submitAuditFeedback(${item.id}, 'CORRECT', 'VALID')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-emerald-400 transition flex items-center gap-1.5 border-t border-dark-800">
+                                <span>✅</span> <span>Besluit was toch goed</span>
+                            </button>
+                        </div>
+                    `;
+
                     tr.innerHTML = `
                         <td class="p-3"><span class="px-2 py-0.5 rounded-full font-bold ${badgeClass}">${item.status}</span></td>
                         <td class="p-3 text-gray-400 font-mono text-[11px]">${formatLocalTime(item.timestamp)}</td>
@@ -1020,11 +1081,43 @@
                         <td class="p-3">
                             <img src="${snapUrl}" class="w-20 h-15 object-cover rounded cursor-pointer border border-dark-700 hover:opacity-80 transition" onclick="openSnapModal('${snapUrl}')" alt="Snap" onerror="this.onerror=null; this.src='/api/v1/live/instant.jpg';" />
                         </td>
+                        <td class="p-3 relative">${feedbackHtml}</td>
                     `;
                     tbody.appendChild(tr);
                 });
             } catch (e) {
-                tbody.innerHTML = '<tr><td colspan="7" class="p-4 text-center text-red-400">Fout bij laden van inspectielogs.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="8" class="p-4 text-center text-red-400">Fout bij laden van inspectielogs.</td></tr>';
+            }
+        }
+
+        async function submitAuditFeedback(logId, feedback, reason = '') {
+            try {
+                // Close any open menus
+                toggleIncorrectMenu(logId, true);
+                const res = await fetch(`/api/v1/admin/detections/${logId}/feedback`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ feedback, reason }),
+                });
+                if (!res.ok) {
+                    alert('Fout bij opslaan van beoordeling.');
+                    return;
+                }
+                const data = await res.json();
+                loadAuditLogs();
+            } catch (e) {
+                alert('Netwerkfout bij opslaan beoordeling: ' + e);
+            }
+        }
+
+        function toggleIncorrectMenu(logId, forceClose = false) {
+            const menu = document.getElementById(`incorrect-menu-${logId}`);
+            // Close all other menus
+            document.querySelectorAll('[id^="incorrect-menu-"]').forEach(m => {
+                if (m !== menu || forceClose) m.classList.add('hidden');
+            });
+            if (menu && !forceClose) {
+                menu.classList.toggle('hidden');
             }
         }
 

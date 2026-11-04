@@ -296,3 +296,4 @@ class ConsistentObjectTracker:
 
 # Singleton instance
 consistent_tracker = ConsistentObjectTracker(enabled=False)
+

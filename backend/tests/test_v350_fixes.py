@@ -55,26 +55,23 @@ async def test_v350_ring_coordinator_verification():
     assert len(called_events) == 1
     assert called_events[0][0] == "SHAZAM_CHIME"
 
-    # NETWORK_SNIFF is now shadow-only — must NOT add a second ring event
+    # NETWORK_SNIFF within 3.5s confirms the ring without duplicate event
     ring_coordinator.register_signal("NETWORK_SNIFF", {"pattern": "A", "bytes": 312})
     await asyncio.sleep(0.05)
-    assert len(called_events) == 1, "NETWORK_SNIFF must never trigger ring in shadow mode"
-
-    # Wait for the verification window to close
-    await asyncio.sleep(3.6)
+    assert len(called_events) == 1, "Dual verification must never trigger duplicate ring event"
 
     verifications = ring_coordinator.get_recent_verifications()
     assert len(verifications) >= 1
     latest = verifications[0]
-    # In v3.5.1 shadow mode only SHAZAM_CHIME triggers, so status is COMPLETED
-    assert latest["status"] == "COMPLETED"
+    assert latest["status"] == "VERIFIED"
     assert latest["first_source"] == "SHAZAM_CHIME"
+    assert latest["second_source"] == "NETWORK_SNIFF"
 
 
 @pytest.mark.asyncio
 async def test_v350_ring_coordinator_mismatch():
-    """Test 1b (v3.5.1): NETWORK_SNIFF alone in shadow mode NEVER triggers ring.
-    Sniffer-only events are silently dropped (shadow learner mode).
+    """Test 1b: NETWORK_SNIFF triggers ring immediately at ms 0.
+    If SHAZAM_CHIME does not follow within 3.5s, window completes as COMPLETED.
     """
     ring_coordinator.set_loop(asyncio.get_running_loop())
     ring_coordinator.reset()
@@ -85,21 +82,21 @@ async def test_v350_ring_coordinator_mismatch():
 
     ring_coordinator.set_on_ring_callback(mock_handler)
 
-    # Only NETWORK_SNIFF fires — must NOT ring in v3.5.1
+    # NETWORK_SNIFF fires — triggers ring immediately at ms 0
     ring_coordinator.register_signal("NETWORK_SNIFF", {"pattern": "B", "pkts": 3})
     await asyncio.sleep(0.05)
-    assert len(called_events) == 0, "NETWORK_SNIFF must be completely blocked in shadow mode"
+    assert len(called_events) == 1
+    assert called_events[0][0] == "NETWORK_SNIFF"
 
-    # After 3.5s no ring should have fired either
+    # After 3.6s window closes without duplicate ring
     await asyncio.sleep(3.6)
-    assert len(called_events) == 0, "NETWORK_SNIFF must never cause a delayed ring"
-
-    # No verifications should be created for shadow-only sniffer events
+    assert len(called_events) == 1
     verifications = ring_coordinator.get_recent_verifications()
-    # Either no verifications at all, or if any exist they must not be from NETWORK_SNIFF alone
-    for v in verifications:
-        assert v.get("first_source") != "NETWORK_SNIFF", \
-            "Shadow-mode sniffer must not create ring verifications"
+    assert len(verifications) >= 1
+    latest = verifications[0]
+    assert latest["status"] == "COMPLETED"
+    assert latest["first_source"] == "NETWORK_SNIFF"
+    assert latest["missing_source"] == "SHAZAM_CHIME"
 
 
 def test_v350_day_folders_and_resolution(tmp_path):
@@ -160,6 +157,6 @@ async def test_v350_app_version_reports_v351():
         resp = await client.get("/api/v1/app/version")
         assert resp.status_code == 200
         data = resp.json()
-        # Accept either v3.5.0 or v3.5.1 (backend version string may not be bumped)
-        assert data["version"] in ("3.5.0", "3.5.1", "3.5.2", "3.5.3")
-        assert data["version_code"] in (32, 34, 35, 36)
+        # Accept known backend versions up to v3.5.5
+        assert data["version"] in ("3.5.0", "3.5.1", "3.5.2", "3.5.3", "3.5.4", "3.5.5")
+        assert data["version_code"] in (32, 34, 35, 36, 37, 38)

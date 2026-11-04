@@ -223,3 +223,4 @@ def train_yolo_model(
 
 
 model_registry = ModelRegistry()
+

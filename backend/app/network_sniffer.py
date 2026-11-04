@@ -334,6 +334,12 @@ class NetworkSniffer:
                 if (pkt_now_t - self._last_shazam_ring_time) > 5.0 and payload_hex:
                     self.background_noise_hashes.add(payload_hex)
 
+            # Zero-latency instant trigger if doorbell call endpoint is detected
+            if proto_name == "TCP" and dport == 8820 and payload_hex:
+                if "2f323030302f34313033" in payload_hex or "2f323030302f34363735" in payload_hex or payload_hex.startswith("31bc01000a"):
+                    logger.info("⚡ [Sniffer Instant Button] Hardware Doorbell Button packet (/2000/4103) received! Dispatching at ms 0!")
+                    self._dispatch_network_ring(pkt_record)
+
         try:
             sock.close()
         except Exception:
@@ -381,11 +387,11 @@ class NetworkSniffer:
                 "payload_hex": first_payload_hex,
             }
 
-            # Check if this matches known doorbell ring signature (Shadow Evaluation only)
+            # Check if this matches known doorbell ring signature
             is_ring = self._check_ring_signature(burst_dict)
             if is_ring:
                 burst_dict["signature_matched"] = True
-                logger.debug("🧪 [Sniffer Shadow Mode] Signature matched but doorbell ring is suppressed (shadow mode).")
+                self._dispatch_network_ring(burst_dict)
 
             self.recent_bursts.append(burst_dict)
             self._append_burst_log(burst_dict)
@@ -419,6 +425,11 @@ class NetworkSniffer:
 
         # ── EZVIZ Cloud Port 8820 TCP Analysis ──
         if protocol == "TCP" and dst_port == 8820:
+            payload_hex = burst.get("payload_hex", "")
+            if "2f323030302f34313033" in payload_hex or "2f323030302f34363735" in payload_hex or payload_hex.startswith("31bc01000a"):
+                logger.info("🎯 [Sniffer] Hardware Doorbell Button Signature Matched on TCP 8820 (/2000/4103 / 31bc01000a)!")
+                return True
+
             # Filter out isolated 1 or 2 packet keepalives of 191B
             is_191_keepalive = all(185 <= sz <= 194 for sz in payload_sizes)
             if pkt_count < 3 and is_191_keepalive:
@@ -670,8 +681,18 @@ class NetworkSniffer:
         )
 
     def _dispatch_network_ring(self, burst: dict) -> None:
-        """Deprecated: Sniffer runs exclusively in passive shadow mode and NEVER triggers ringing."""
-        logger.debug("[Network Sniffer] Shadow mode active — ring trigger suppressed for burst %s:%s", burst.get("dst_ip"), burst.get("dst_port"))
+        """Dispatches verified network ring to central RingCoordinator."""
+        now_t = time.time()
+        if (now_t - self._last_sniff_trigger_time) < self._cooldown_seconds:
+            logger.debug("[Network Sniffer] Ring trigger in cooldown (<%.1fs)", self._cooldown_seconds)
+            return
+        self._last_sniff_trigger_time = now_t
+        logger.info("🚨 [Network Sniffer] DOORBELL BUTTON PRESSED! (Packet to %s:%s) -> Registering ring signal...", burst.get("dst_ip"), burst.get("dst_port"))
+        try:
+            from app.ring_coordinator import register_ring_signal
+            register_ring_signal(source="NETWORK_SNIFF", details=burst)
+        except Exception as e:
+            logger.error("[Network Sniffer] Failed to dispatch ring: %s", e)
 
     def get_learner_status(self) -> dict:
         """Returns the current status of the Differential Byte Learner."""

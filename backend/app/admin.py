@@ -45,6 +45,7 @@ from app.models import (
     get_system_setting,
     update_system_settings,
     get_recent_ai_audit_logs,
+    save_ai_audit_feedback,
     save_crash_log,
     get_recent_crash_logs,
     get_camera_credentials,
@@ -253,12 +254,93 @@ async def update_admin_settings_endpoint(request: Request, body: dict):
     return {"status": "ok", "message": f"Succesvol {len(clean_updates)} instellingen bijgewerkt"}
 
 
+class DetectionFeedbackRequest(BaseModel):
+    feedback: str  # "CORRECT" or "INCORRECT"
+    reason: Optional[str] = ""  # "PARKED_CAR", "MISSED_OBJECT", "WRONG_CLASS", "VALID"
+    notes: Optional[str] = ""
+
+
 @router.get("/api/v1/admin/detections")
-async def get_admin_detections_endpoint(request: Request, status: Optional[str] = None, limit: int = 50):
-    """Returns AI audit logs for the Verification Inspector, optionally filtered by status."""
+async def get_admin_detections_endpoint(request: Request, status: Optional[str] = None, limit: int = 250):
+    """Returns AI audit logs for the Verification Inspector, optionally filtered by status (default 250)."""
     require_admin(request)
     logs = await get_recent_ai_audit_logs(limit=limit, status=status)
     return logs
+
+
+@router.post("/api/v1/admin/detections/{log_id}/feedback")
+async def post_detection_feedback_endpoint(log_id: int, body: DetectionFeedbackRequest, request: Request):
+    """
+    Submits user ground-truth feedback on an AI evaluation decision (v3.5.5).
+    Active Learning:
+    1. Records feedback in ai_audit_logs.
+    2. If marked as PARKED_CAR: immediately registers the bounding box into stationary vehicles memory,
+       so this parked vehicle is permanently ignored and never triggers false alerts again.
+    3. Persists sample to verified_feedback.jsonl for fine-tuning dataset generation.
+    """
+    require_admin(request)
+    updated_row = await save_ai_audit_feedback(log_id, body.feedback.upper(), body.reason.upper() if body.reason else "")
+    if not updated_row:
+        raise HTTPException(404, "Audit log not found")
+
+    learned_actions = []
+
+    # Active Learning 1: If user confirms it was a parked car that was incorrectly triggered/evaluated
+    if body.reason and body.reason.upper() == "PARKED_CAR":
+        try:
+            boxes_json = updated_row.get("boxes_json") or "[]"
+            boxes = json.loads(boxes_json)
+            if boxes:
+                from app.ai_detector import ai_detector
+                now = time.time()
+                for b in boxes:
+                    if len(b) == 4:
+                        box_tuple = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
+                        ai_detector.stationary_vehicles.append({
+                            "box": box_tuple,
+                            "first_seen": now - 3600.0,
+                            "last_seen": now,
+                            "stationary_frames": 999,
+                            "is_baseline": True,
+                        })
+                learned_actions.append(f"Geleerd: {len(boxes)} geparkeerde auto-locatie(s) direct toegevoegd aan uitsluitingsgeheugen")
+        except Exception as e:
+            logger.warning("Failed active learning for parked car: %s", e)
+
+    # Active Learning 2: Append to fine-tuning annotations
+    try:
+        feedback_dataset_path = "/mnt/opslag/deurbel/training_dataset/verified_feedback.jsonl"
+        os.makedirs(os.path.dirname(feedback_dataset_path), exist_ok=True)
+        feedback_record = {
+            "log_id": log_id,
+            "timestamp": updated_row.get("timestamp"),
+            "category": updated_row.get("category"),
+            "label": updated_row.get("label"),
+            "confidence": updated_row.get("confidence"),
+            "displacement_pct": updated_row.get("displacement_pct"),
+            "snapshot_path": updated_row.get("snapshot_path"),
+            "boxes_json": updated_row.get("boxes_json"),
+            "ai_status": updated_row.get("status"),
+            "user_feedback": body.feedback.upper(),
+            "feedback_reason": body.reason.upper() if body.reason else "",
+            "notes": body.notes,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with open(feedback_dataset_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(feedback_record, ensure_ascii=False) + "\n")
+        learned_actions.append("Opgeslagen als geverifieerd trainingsvoorbeeld voor fine-tuning")
+    except Exception as e:
+        logger.warning("Failed logging verified feedback dataset: %s", e)
+
+    return {
+        "status": "ok",
+        "log_id": log_id,
+        "user_feedback": updated_row.get("user_feedback"),
+        "feedback_reason": updated_row.get("feedback_reason"),
+        "feedback_at": updated_row.get("feedback_at"),
+        "learned_actions": learned_actions,
+        "message": "Feedback succesvol verwerkt en AI-geheugen direct bijgewerkt",
+    }
 
 
 @router.get("/api/v1/admin/system-status")

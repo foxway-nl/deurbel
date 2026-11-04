@@ -2,10 +2,10 @@
 Foxway Smart Doorbell — Central Ring Coordinator & Dual Cross-Verification (v3.5.1).
 
 Architecture:
-1. Zero-Latency Immediate Trigger (SHAZAM_CHIME only):
-   When SHAZAM_CHIME arrives the coordinator immediately invokes call_sm.ring(...) at
-   millisecond 0 (zero latency). NETWORK_SNIFF is in full shadow / passive-learner mode
-   and NEVER triggers a ring.
+1. Zero-Latency Immediate Trigger (Dual-Trigger: NETWORK_SNIFF or SHAZAM_CHIME):
+   Whichever signal arrives first immediately invokes call_sm.ring(...) at
+   millisecond 0 (zero latency). The complementary signal within 3.5s confirms
+   and verifies the ring without triggering duplicate calls (cooldown 5.0s).
 2. Background 3.5s Mismatch WARNING:
    After a SHAZAM_CHIME fires, a background timer checks whether the sniffer also
    registered a candidate burst within [-2.0s, +3.5s]:
@@ -69,11 +69,6 @@ class RingCoordinator:
         """
         now = time.time()
         details = details or {}
-
-        # 100% Decoupling: Sniffer is in passive shadow mode and NEVER triggers ringing
-        if source == "NETWORK_SNIFF":
-            logger.debug("[RingCoordinator] NETWORK_SNIFF ignored as ring trigger (sniffer in shadow learner mode)")
-            return
 
         with self._lock:
             # 1. Check if there is an active verification window waiting for the second signal

@@ -262,7 +262,10 @@ CREATE TABLE IF NOT EXISTS ai_audit_logs (
     displacement_pct REAL NOT NULL,
     reason           TEXT NOT NULL,
     snapshot_path    TEXT DEFAULT '',
-    boxes_json       TEXT DEFAULT '[]'
+    boxes_json       TEXT DEFAULT '[]',
+    user_feedback    TEXT DEFAULT NULL,
+    feedback_reason  TEXT DEFAULT NULL,
+    feedback_at      TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS crash_logs (
@@ -348,6 +351,17 @@ async def init_db() -> None:
             )
         except Exception:
             pass
+
+        # Migration: ensure user_feedback columns exist in ai_audit_logs (v3.5.5)
+        for col_def in [
+            "user_feedback TEXT DEFAULT NULL",
+            "feedback_reason TEXT DEFAULT NULL",
+            "feedback_at TEXT DEFAULT NULL",
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE ai_audit_logs ADD COLUMN {col_def}")
+            except Exception:
+                pass
 
         # Seed default system_settings (v2.6.0 standards: 20s pre-roll, 20s post-roll, 8s cooldown, 2 frames verify)
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -1213,21 +1227,43 @@ async def save_ai_audit_log(
         return cursor.lastrowid or 0
 
 
-async def get_recent_ai_audit_logs(limit: int = 50, status: Optional[str] = None) -> list[dict]:
-    """Return the most recent AI verification audit logs, optionally filtered by status."""
+async def get_recent_ai_audit_logs(limit: int = 250, status: Optional[str] = None) -> list[dict]:
+    """Return the most recent AI verification audit logs, optionally filtered by status (supports up to 500)."""
+    fetch_limit = max(1, min(limit, 500))
     async with get_db(write=False) as db:
         if status and status.upper() in ("APPROVED", "REJECTED"):
             cursor = await db.execute(
                 "SELECT * FROM ai_audit_logs WHERE status = ? ORDER BY id DESC LIMIT ?",
-                (status.upper(), max(1, min(limit, 200))),
+                (status.upper(), fetch_limit),
             )
         else:
             cursor = await db.execute(
                 "SELECT * FROM ai_audit_logs ORDER BY id DESC LIMIT ?",
-                (max(1, min(limit, 200)),),
+                (fetch_limit,),
             )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+
+
+async def save_ai_audit_feedback(
+    log_id: int,
+    feedback: str,
+    reason: str = "",
+) -> Optional[dict]:
+    """Save user feedback on an AI audit log entry and return the updated row."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    async with get_db(write=True) as db:
+        await db.execute(
+            """
+            UPDATE ai_audit_logs
+            SET user_feedback = ?, feedback_reason = ?, feedback_at = ?
+            WHERE id = ?
+            """,
+            (feedback, reason, now_iso, log_id),
+        )
+        cursor = await db.execute("SELECT * FROM ai_audit_logs WHERE id = ?", (log_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
 
 # ── Client Crash Logs (Task 1 & Task 2) ──────────────────────────────
