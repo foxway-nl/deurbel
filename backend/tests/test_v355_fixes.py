@@ -283,7 +283,39 @@ def test_v355_shazam_audio_stream_worker_low_delay_flags():
     assert "-fflags" in src and "nobuffer" in src
     assert "-flags" in src and "low_delay" in src
     assert "-flush_packets" in src
-    assert "FIONREAD" in src  # live-edge pipe drainer
+    assert "FIONREAD" in src
+
+
+@pytest.mark.asyncio
+async def test_v355_foolproof_doorbell_discovery(monkeypatch):
+    """Verify that camera discovery strictly enforces hardware MAC and model validation."""
+    from app.camera_discovery import (
+        get_mac_for_ip,
+        is_doorbell_alive,
+        KNOWN_DOORBELL_MAC,
+        KNOWN_DOORBELL_OUI,
+    )
+
+    # 1. Verification of MAC resolution
+    mac_31 = get_mac_for_ip("192.168.2.31")
+    if mac_31:
+        assert mac_31.startswith(KNOWN_DOORBELL_OUI)
+
+    # 2. Reject alien host (e.g. 192.168.2.4 with wrong MAC)
+    async def mock_port_true(host, port, timeout=0.5):
+        return True
+
+    monkeypatch.setattr("app.camera_discovery.check_port", mock_port_true)
+    monkeypatch.setattr("app.camera_discovery.get_mac_for_ip", lambda ip: "ea:8a:e7:06:ee:5a" if ip == "192.168.2.4" else "d4:e8:53:18:78:9b")
+
+    # Wrong MAC host must be rejected
+    alive_alien = await is_doorbell_alive("192.168.2.4")
+    assert alive_alien is False
+
+    # Authentic host with matching MAC must be accepted
+    alive_doorbell = await is_doorbell_alive("192.168.2.31")
+    assert alive_doorbell is True
+
 
 
 

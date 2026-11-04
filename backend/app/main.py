@@ -177,16 +177,14 @@ async def _doorbell_health_monitor() -> None:
     while True:
         try:
             loop = asyncio.get_running_loop()
-            online = False
             creds = await get_camera_credentials()
             cam_ip = creds.get("ip", "")
             cam_port = creds.get("port", 8000)
+            cam_user = creds.get("user", "admin")
+            cam_pass = creds.get("pass", "")
 
-            if cam_ip:
-                for port in (cam_port, 554):
-                    if await loop.run_in_executor(None, _check_tcp_port, cam_ip, port, 5.0):
-                        online = True
-                        break
+            from app.camera_discovery import is_doorbell_alive, auto_heal_doorbell_ip
+            online = await is_doorbell_alive(cam_ip, cam_port, 554, user=cam_user, password=cam_pass)
 
             now = time.time()
             if online:
