@@ -317,6 +317,97 @@ async def test_v355_foolproof_doorbell_discovery(monkeypatch):
     assert alive_doorbell is True
 
 
+@pytest.mark.asyncio
+async def test_v355_ai_inspector_audit_logs_and_stats():
+    """Verify that get_recent_ai_audit_logs filters by reviewed state and stats calculation works."""
+    from app.database import get_db
+    from app.models import get_recent_ai_audit_logs, get_ai_audit_stats, save_ai_audit_feedback
+
+    # Insert test audit log entries
+    async with get_db(write=True) as db:
+        await db.execute(
+            """
+            INSERT INTO ai_audit_logs (timestamp, status, category, label, confidence, displacement_pct, reason, snapshot_path, boxes_json)
+            VALUES ('2026-11-04T20:00:00Z', 'APPROVED', 'vehicle', 'auto', 0.88, 12.0, 'Motion detected', '/tmp/snap1.jpg', '[[0.1, 0.2, 0.4, 0.5]]')
+            """
+        )
+        cursor = await db.execute("SELECT last_insert_rowid()")
+        row = await cursor.fetchone()
+        log_id = row[0]
+
+    # Check pending logs
+    pending = await get_recent_ai_audit_logs(limit=10, reviewed=False)
+    assert any(item["id"] == log_id for item in pending)
+
+    # Save feedback with reason and notes
+    updated = await save_ai_audit_feedback(
+        log_id,
+        feedback="INCORRECT",
+        reason="PERSON_NEAR_PARKED_CAR",
+        notes="Iemand liep langs stilstaande auto",
+    )
+    assert updated is not None
+    assert updated["user_feedback"] == "INCORRECT"
+    assert updated["feedback_reason"] == "PERSON_NEAR_PARKED_CAR"
+    assert updated.get("notes") == "Iemand liep langs stilstaande auto"
+
+    # Pending logs should now exclude this item
+    pending_after = await get_recent_ai_audit_logs(limit=10, reviewed=False)
+    assert not any(item["id"] == log_id for item in pending_after)
+
+    # Reviewed logs should include this item
+    reviewed_list = await get_recent_ai_audit_logs(limit=10, reviewed=True)
+    assert any(item["id"] == log_id for item in reviewed_list)
+
+    # Stats should reflect at least 1 reviewed
+    stats = await get_ai_audit_stats()
+    assert isinstance(stats, dict)
+    assert "total" in stats
+    assert "pending" in stats
+    assert "reviewed" in stats
+    assert stats["reviewed"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_v355_ai_inspector_active_learning_feedback():
+    """Verify that feedback endpoint triggers active learning and saves to jsonl."""
+    from app.database import get_db
+    from app.admin import post_detection_feedback_endpoint, DetectionFeedbackRequest
+    from app.ai_detector import smart_detector
+
+    async with get_db(write=True) as db:
+        await db.execute(
+            """
+            INSERT INTO ai_audit_logs (timestamp, status, category, label, confidence, displacement_pct, reason, snapshot_path, boxes_json)
+            VALUES ('2026-11-04T20:05:00Z', 'APPROVED', 'vehicle', 'auto', 0.85, 10.0, 'Motion detected', '/tmp/snap2.jpg', '[[0.2, 0.3, 0.5, 0.6]]')
+            """
+        )
+        cursor = await db.execute("SELECT last_insert_rowid()")
+        row = await cursor.fetchone()
+        log_id = row[0]
+
+    req = MagicMock()
+    req.cookies = {}
+    req.session = {}
+
+    initial_stationary_count = len(smart_detector.stationary_vehicles)
+
+    body = DetectionFeedbackRequest(
+        feedback="INCORRECT",
+        reason="PERSON_NEAR_PARKED_CAR",
+        notes="Auto stond stil op oprit",
+    )
+
+    with patch("app.admin.require_admin", return_value=True):
+        resp = await post_detection_feedback_endpoint(log_id, body, req)
+        assert resp["status"] == "ok"
+        assert resp["user_feedback"] == "INCORRECT"
+        assert resp["feedback_reason"] == "PERSON_NEAR_PARKED_CAR"
+        assert resp["notes"] == "Auto stond stil op oprit"
+        assert len(smart_detector.stationary_vehicles) > initial_stationary_count
+
+
+
 
 
 

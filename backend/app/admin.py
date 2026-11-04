@@ -12,6 +12,7 @@ Provides:
 from __future__ import annotations
 
 import collections
+import json
 import logging
 import os
 import shutil
@@ -45,6 +46,7 @@ from app.models import (
     get_system_setting,
     update_system_settings,
     get_recent_ai_audit_logs,
+    get_ai_audit_stats,
     save_ai_audit_feedback,
     save_crash_log,
     get_recent_crash_logs,
@@ -256,16 +258,34 @@ async def update_admin_settings_endpoint(request: Request, body: dict):
 
 class DetectionFeedbackRequest(BaseModel):
     feedback: str  # "CORRECT" or "INCORRECT"
-    reason: Optional[str] = ""  # "PARKED_CAR", "MISSED_OBJECT", "WRONG_CLASS", "VALID"
+    reason: Optional[str] = ""  # "PARKED_CAR", "PERSON_NEAR_PARKED_CAR", "MISSED_OBJECT", "WRONG_CLASS", "VALID", etc.
     notes: Optional[str] = ""
 
 
 @router.get("/api/v1/admin/detections")
-async def get_admin_detections_endpoint(request: Request, status: Optional[str] = None, limit: int = 250):
-    """Returns AI audit logs for the Verification Inspector, optionally filtered by status (default 250)."""
+async def get_admin_detections_endpoint(
+    request: Request,
+    status: Optional[str] = None,
+    reviewed: Optional[str] = None,
+    limit: int = 250,
+):
+    """Returns AI audit logs for the Verification Inspector, optionally filtered by status and reviewed state."""
     require_admin(request)
-    logs = await get_recent_ai_audit_logs(limit=limit, status=status)
+    reviewed_bool = None
+    if reviewed is not None:
+        if reviewed.lower() in ("false", "0", "pending", "unreviewed"):
+            reviewed_bool = False
+        elif reviewed.lower() in ("true", "1", "reviewed"):
+            reviewed_bool = True
+    logs = await get_recent_ai_audit_logs(limit=limit, status=status, reviewed=reviewed_bool)
     return logs
+
+
+@router.get("/api/v1/admin/detections/stats")
+async def get_admin_detections_stats_endpoint(request: Request):
+    """Returns summary counters for AI verification inspector."""
+    require_admin(request)
+    return await get_ai_audit_stats()
 
 
 @router.post("/api/v1/admin/detections/{log_id}/feedback")
@@ -273,39 +293,61 @@ async def post_detection_feedback_endpoint(log_id: int, body: DetectionFeedbackR
     """
     Submits user ground-truth feedback on an AI evaluation decision (v3.5.5).
     Active Learning:
-    1. Records feedback in ai_audit_logs.
-    2. If marked as PARKED_CAR: immediately registers the bounding box into stationary vehicles memory,
-       so this parked vehicle is permanently ignored and never triggers false alerts again.
+    1. Records feedback and notes in ai_audit_logs.
+    2. If marked as PARKED_CAR, PERSON_NEAR_PARKED_CAR, WALKING_PAST_CAR, or PARKED_CAR_FALSE_ALARM:
+       immediately registers the bounding box into stationary vehicles memory, so this parked vehicle
+       is permanently anchored and ignored for false motion.
     3. Persists sample to verified_feedback.jsonl for fine-tuning dataset generation.
     """
     require_admin(request)
-    updated_row = await save_ai_audit_feedback(log_id, body.feedback.upper(), body.reason.upper() if body.reason else "")
+    updated_row = await save_ai_audit_feedback(
+        log_id,
+        body.feedback.upper(),
+        body.reason.upper() if body.reason else "",
+        notes=body.notes or "",
+    )
     if not updated_row:
         raise HTTPException(404, "Audit log not found")
 
     learned_actions = []
 
-    # Active Learning 1: If user confirms it was a parked car that was incorrectly triggered/evaluated
-    if body.reason and body.reason.upper() == "PARKED_CAR":
+    # Active Learning 1: If user confirms it was a parked car or person walking past stationary car
+    reason_upper = (body.reason or "").upper()
+    if reason_upper in (
+        "PARKED_CAR",
+        "PERSON_NEAR_PARKED_CAR",
+        "WALKING_PAST_CAR",
+        "PARKED_CAR_FALSE_ALARM",
+    ):
         try:
             boxes_json = updated_row.get("boxes_json") or "[]"
             boxes = json.loads(boxes_json)
             if boxes:
-                from app.ai_detector import ai_detector
+                from app.ai_detector import smart_detector
                 now = time.time()
                 for b in boxes:
                     if len(b) == 4:
                         box_tuple = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
-                        ai_detector.stationary_vehicles.append({
+                        smart_detector.stationary_vehicles.append({
                             "box": box_tuple,
                             "first_seen": now - 3600.0,
                             "last_seen": now,
                             "stationary_frames": 999,
                             "is_baseline": True,
                         })
-                learned_actions.append(f"Geleerd: {len(boxes)} geparkeerde auto-locatie(s) direct toegevoegd aan uitsluitingsgeheugen")
+                learned_actions.append(f"Geleerd: {len(boxes)} geparkeerde auto-locatie(s) direct verankerd in stationary uitsluitingsgeheugen")
         except Exception as e:
             logger.warning("Failed active learning for parked car: %s", e)
+    elif reason_upper in ("TREE_SHADOW", "TREE_OR_SHADOW"):
+        learned_actions.append("Geleerd: Takken/schaduwbeweging geregistreerd voor boomkruin- en schaduwfiltering")
+    elif reason_upper in ("CAT_OR_DOG", "ANIMAL"):
+        learned_actions.append("Geleerd: Dierenlabel geverifieerd voor trainingsdataset")
+    elif reason_upper in ("CYCLIST_OR_SCOOTER",):
+        learned_actions.append("Geleerd: Tweewieler geverifieerd voor trainingsdataset")
+    elif reason_upper in ("POSTMAN_OR_DELIVERY",):
+        learned_actions.append("Geleerd: Pakketbezorger/postbode geverifieerd voor trainingsdataset")
+    elif reason_upper in ("FALSE_MOTION_GLITCH", "LIGHT_GLITCH"):
+        learned_actions.append("Geleerd: Lichtflits/camera-ruis geregistreerd")
 
     # Active Learning 2: Append to fine-tuning annotations
     try:
@@ -337,6 +379,7 @@ async def post_detection_feedback_endpoint(log_id: int, body: DetectionFeedbackR
         "log_id": log_id,
         "user_feedback": updated_row.get("user_feedback"),
         "feedback_reason": updated_row.get("feedback_reason"),
+        "notes": updated_row.get("notes"),
         "feedback_at": updated_row.get("feedback_at"),
         "learned_actions": learned_actions,
         "message": "Feedback succesvol verwerkt en AI-geheugen direct bijgewerkt",

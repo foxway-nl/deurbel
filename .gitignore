@@ -42,4 +42,5 @@ firebase-sa.json
 *.key
 *.log
 logs/
+training_dataset/*.jsonl
 .antigravityignore

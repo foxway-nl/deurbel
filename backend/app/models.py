@@ -357,6 +357,7 @@ async def init_db() -> None:
             "user_feedback TEXT DEFAULT NULL",
             "feedback_reason TEXT DEFAULT NULL",
             "feedback_at TEXT DEFAULT NULL",
+            "notes TEXT DEFAULT NULL",
         ]:
             try:
                 await db.execute(f"ALTER TABLE ai_audit_logs ADD COLUMN {col_def}")
@@ -1227,40 +1228,83 @@ async def save_ai_audit_log(
         return cursor.lastrowid or 0
 
 
-async def get_recent_ai_audit_logs(limit: int = 250, status: Optional[str] = None) -> list[dict]:
-    """Return the most recent AI verification audit logs, optionally filtered by status (supports up to 500)."""
+async def get_recent_ai_audit_logs(
+    limit: int = 250,
+    status: Optional[str] = None,
+    reviewed: Optional[bool] = None,
+) -> list[dict]:
+    """Return the most recent AI verification audit logs, optionally filtered by status and reviewed status."""
     fetch_limit = max(1, min(limit, 500))
     async with get_db(write=False) as db:
+        conditions = []
+        params = []
         if status and status.upper() in ("APPROVED", "REJECTED"):
-            cursor = await db.execute(
-                "SELECT * FROM ai_audit_logs WHERE status = ? ORDER BY id DESC LIMIT ?",
-                (status.upper(), fetch_limit),
-            )
-        else:
-            cursor = await db.execute(
-                "SELECT * FROM ai_audit_logs ORDER BY id DESC LIMIT ?",
-                (fetch_limit,),
-            )
+            conditions.append("status = ?")
+            params.append(status.upper())
+        if reviewed is True:
+            conditions.append("(user_feedback IS NOT NULL AND user_feedback != '')")
+        elif reviewed is False:
+            conditions.append("(user_feedback IS NULL OR user_feedback = '')")
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        query = f"SELECT * FROM ai_audit_logs {where_clause} ORDER BY id DESC LIMIT ?"
+        params.append(fetch_limit)
+        cursor = await db.execute(query, tuple(params))
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+
+
+async def get_ai_audit_stats() -> dict:
+    """Return summary statistics for the AI audit logs (total, pending, reviewed, correct, incorrect)."""
+    async with get_db(write=False) as db:
+        cursor = await db.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN user_feedback IS NULL OR user_feedback = '' THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN user_feedback IS NOT NULL AND user_feedback != '' THEN 1 ELSE 0 END) as reviewed,
+                SUM(CASE WHEN user_feedback = 'CORRECT' THEN 1 ELSE 0 END) as correct,
+                SUM(CASE WHEN user_feedback = 'INCORRECT' THEN 1 ELSE 0 END) as incorrect
+            FROM ai_audit_logs
+        """)
+        row = await cursor.fetchone()
+        if row:
+            return {
+                "total": int(row["total"] or 0),
+                "pending": int(row["pending"] or 0),
+                "reviewed": int(row["reviewed"] or 0),
+                "correct": int(row["correct"] or 0),
+                "incorrect": int(row["incorrect"] or 0),
+            }
+        return {"total": 0, "pending": 0, "reviewed": 0, "correct": 0, "incorrect": 0}
 
 
 async def save_ai_audit_feedback(
     log_id: int,
     feedback: str,
     reason: str = "",
+    notes: str = "",
 ) -> Optional[dict]:
     """Save user feedback on an AI audit log entry and return the updated row."""
     now_iso = datetime.now(timezone.utc).isoformat()
     async with get_db(write=True) as db:
-        await db.execute(
-            """
-            UPDATE ai_audit_logs
-            SET user_feedback = ?, feedback_reason = ?, feedback_at = ?
-            WHERE id = ?
-            """,
-            (feedback, reason, now_iso, log_id),
-        )
+        try:
+            await db.execute(
+                """
+                UPDATE ai_audit_logs
+                SET user_feedback = ?, feedback_reason = ?, notes = ?, feedback_at = ?
+                WHERE id = ?
+                """,
+                (feedback, reason, notes, now_iso, log_id),
+            )
+        except Exception:
+            await db.execute(
+                """
+                UPDATE ai_audit_logs
+                SET user_feedback = ?, feedback_reason = ?, feedback_at = ?
+                WHERE id = ?
+                """,
+                (feedback, reason, now_iso, log_id),
+            )
         cursor = await db.execute("SELECT * FROM ai_audit_logs WHERE id = ?", (log_id,))
         row = await cursor.fetchone()
         return dict(row) if row else None

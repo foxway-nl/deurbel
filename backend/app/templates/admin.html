@@ -520,20 +520,63 @@
         <!-- ============================================================== -->
         <section id="tab-inspector" class="tab-content hidden space-y-6">
             <div class="bg-dark-900 border border-dark-800 rounded-2xl p-5 shadow-xl space-y-4">
-                <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-4 border-b border-dark-800 gap-3">
+                <div class="flex flex-col lg:flex-row items-start lg:items-center justify-between pb-4 border-b border-dark-800 gap-4">
                     <div>
-                        <h2 class="text-lg font-bold text-white">AI Verificatie-Inspector (250 Records)</h2>
-                        <p class="text-xs text-gray-400">Bekijk de laatste 250 evaluaties. Beoordeel het AI-besluit: de AI leert direct van jouw invulling!</p>
-                    </div>
-                    <div class="flex items-center gap-2">
-                        <div class="flex bg-dark-950 p-1 rounded-xl border border-dark-700">
-                            <button id="filter-audit-ALL" onclick="setAuditFilter('ALL')" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 text-white transition">Alle</button>
-                            <button id="filter-audit-APPROVED" onclick="setAuditFilter('APPROVED')" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-gray-400 hover:text-white transition">✅ Goedgekeurd (Passed)</button>
-                            <button id="filter-audit-REJECTED" onclick="setAuditFilter('REJECTED')" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-gray-400 hover:text-white transition">❌ Afgewezen (Rejected)</button>
+                        <div class="flex items-center gap-2.5">
+                            <h2 class="text-lg font-bold text-white">AI Verificatie-Inspector</h2>
+                            <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">Active Learning</span>
                         </div>
-                        <button onclick="loadAuditLogs()" class="px-4 py-2 rounded-xl bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs font-semibold text-gray-300 flex items-center gap-2">
+                        <p class="text-xs text-gray-400 mt-0.5">Beoordeel evaluaties razendsnel zónder pagina-herlaad. De AI leert direct van jouw feedback voor 100% detectie.</p>
+                        
+                        <!-- Statistics Counter Bar -->
+                        <div class="mt-3 flex flex-wrap gap-2.5 text-xs text-gray-300">
+                            <span class="bg-dark-950 px-3 py-1 rounded-lg border border-dark-800 flex items-center gap-1.5">
+                                <span>📬</span> Te Beoordelen: <b id="stat-pending" class="text-amber-400 font-mono">0</b>
+                            </span>
+                            <span class="bg-dark-950 px-3 py-1 rounded-lg border border-dark-800 flex items-center gap-1.5">
+                                <span>✅</span> Besluit Klopt: <b id="stat-correct" class="text-emerald-400 font-mono">0</b>
+                            </span>
+                            <span class="bg-dark-950 px-3 py-1 rounded-lg border border-dark-800 flex items-center gap-1.5">
+                                <span>❌</span> Gecorrigeerd: <b id="stat-incorrect" class="text-cyan-400 font-mono">0</b>
+                            </span>
+                            <span class="bg-dark-950 px-3 py-1 rounded-lg border border-dark-800 flex items-center gap-1.5">
+                                <span>📊</span> Totaal: <b id="stat-total" class="text-gray-400 font-mono">0</b>
+                            </span>
+                        </div>
+                    </div>
+
+                    <div class="flex flex-col sm:flex-row items-start sm:items-center gap-2.5 w-full lg:w-auto">
+                        <!-- Quick Review Button -->
+                        <button onclick="startQuickReview()" class="w-full sm:w-auto px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-lg flex items-center justify-center gap-2 transition active:scale-95 border border-emerald-400/30">
+                            <span>⚡</span>
+                            <span>Start Snelle Review Galerij</span>
+                        </button>
+                        <button onclick="loadAuditLogs()" class="w-full sm:w-auto px-3.5 py-2 rounded-xl bg-dark-800 hover:bg-dark-700 border border-dark-700 text-xs font-semibold text-gray-300 flex items-center justify-center gap-2 transition">
                             <span>🔄</span> Verversen
                         </button>
+                    </div>
+                </div>
+
+                <!-- Workflow Filter Controls -->
+                <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pt-1">
+                    <!-- Workflow Mode: Pending vs Reviewed vs All -->
+                    <div class="flex bg-dark-950 p-1 rounded-xl border border-dark-700 text-xs font-semibold">
+                        <button id="filter-review-pending" onclick="setReviewFilter('pending')" class="px-3.5 py-1.5 rounded-lg bg-emerald-600 text-white transition flex items-center gap-1.5">
+                            <span>📬</span> <span>Te Beoordelen</span> (<span id="badge-review-pending" class="font-mono">0</span>)
+                        </button>
+                        <button id="filter-review-reviewed" onclick="setReviewFilter('reviewed')" class="px-3.5 py-1.5 rounded-lg text-gray-400 hover:text-white transition flex items-center gap-1.5">
+                            <span>✅</span> <span>Reeds Beoordeeld</span> (<span id="badge-review-reviewed" class="font-mono">0</span>)
+                        </button>
+                        <button id="filter-review-all" onclick="setReviewFilter('all')" class="px-3.5 py-1.5 rounded-lg text-gray-400 hover:text-white transition flex items-center gap-1.5">
+                            <span>📋</span> <span>Alle Evaluaties</span> (<span id="badge-review-all" class="font-mono">0</span>)
+                        </button>
+                    </div>
+
+                    <!-- AI Status Subfilter: All / Approved / Rejected -->
+                    <div class="flex bg-dark-950 p-1 rounded-xl border border-dark-700 text-xs font-semibold">
+                        <button id="filter-audit-ALL" onclick="setStatusFilter('ALL')" class="px-3 py-1.5 rounded-lg bg-dark-800 text-white border border-dark-600 transition">Alle</button>
+                        <button id="filter-audit-APPROVED" onclick="setStatusFilter('APPROVED')" class="px-3 py-1.5 rounded-lg text-gray-400 hover:text-white transition">✅ Goedgekeurd</button>
+                        <button id="filter-audit-REJECTED" onclick="setStatusFilter('REJECTED')" class="px-3 py-1.5 rounded-lg text-gray-400 hover:text-white transition">❌ Afgewezen</button>
                     </div>
                 </div>
 
@@ -547,7 +590,7 @@
                                 <th class="p-3">Zekerheid</th>
                                 <th class="p-3">Verplaatsing (&Delta;d)</th>
                                 <th class="p-3">Reden & Bounding Box</th>
-                                <th class="p-3">Snapshot</th>
+                                <th class="p-3">Snapshot (Klik om te openen)</th>
                                 <th class="p-3">Beoordeling (AI Leren)</th>
                             </tr>
                         </thead>
@@ -649,13 +692,156 @@
         </section>
     </main>
 
-    <!-- Modal for Snapshot View -->
-    <div id="snap-modal" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden z-50 flex items-center justify-center p-4" onclick="closeSnapModal()">
-        <div class="max-w-3xl w-full bg-dark-900 border border-dark-700 rounded-2xl overflow-hidden p-2 relative" onclick="event.stopPropagation()">
-            <img id="modal-img" src="" alt="Snapshot" class="w-full aspect-[4/3] object-contain rounded-xl">
-            <button onclick="closeSnapModal()" class="absolute top-4 right-4 bg-dark-800/80 text-white rounded-full p-2 hover:bg-dark-700">
-                ✕
-            </button>
+    <!-- ============================================================== -->
+    <!-- Modal: AI Snapshot Review Station & Carousel                   -->
+    <!-- ============================================================== -->
+    <div id="snap-modal" class="fixed inset-0 bg-black/85 backdrop-blur-md hidden z-50 flex items-center justify-center p-2 sm:p-4" onclick="closeSnapModal()">
+        <div class="max-w-4xl w-full bg-dark-900 border border-dark-700 rounded-2xl overflow-hidden p-4 sm:p-5 relative shadow-2xl flex flex-col space-y-4 max-h-[96vh] overflow-y-auto" onclick="event.stopPropagation()">
+            
+            <!-- Modal Header -->
+            <div class="flex items-center justify-between pb-3 border-b border-dark-800">
+                <div class="flex items-center gap-2 sm:gap-3 flex-wrap">
+                    <span class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                        <span>🔍</span> AI Opname Review
+                    </span>
+                    <span id="modal-status-badge" class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">APPROVED</span>
+                    <span id="modal-category-badge" class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">🚗 Auto</span>
+                    <span id="modal-timestamp" class="text-xs text-gray-400 font-mono">19:30:15</span>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="text-xs font-mono text-cyan-400 bg-dark-950 px-3 py-1 rounded-lg border border-dark-800">
+                        Opname <b id="modal-curr-idx">1</b> van <b id="modal-total-count">0</b>
+                    </span>
+                    <button onclick="closeSnapModal()" class="bg-dark-800 hover:bg-dark-700 text-gray-300 hover:text-white rounded-xl px-3 py-1.5 text-xs font-bold border border-dark-700 transition" title="Sluiten (ESC)">
+                        ✕ Sluiten
+                    </button>
+                </div>
+            </div>
+
+            <!-- Modal Content (Dynamic Carousel Container) -->
+            <div id="modal-content-container" class="space-y-4">
+                <!-- Image & Navigation Container -->
+                <div class="relative bg-black rounded-xl overflow-hidden border border-dark-800 flex items-center justify-center group">
+                    <img id="modal-img" src="" alt="Snapshot" class="w-full aspect-[4/3] max-h-[50vh] object-contain mx-auto" onerror="this.onerror=null; this.src='/api/v1/live/instant.jpg';">
+                    
+                    <!-- Carousel Left / Right Buttons -->
+                    <button onclick="navigateModal(-1)" class="absolute left-3 top-1/2 -translate-y-1/2 bg-black/60 hover:bg-black/90 text-white rounded-full p-3 border border-dark-700 opacity-80 hover:opacity-100 transition shadow-lg" title="Vorige foto (Pijltje Links)">
+                        ◀
+                    </button>
+                    <button onclick="navigateModal(1)" class="absolute right-3 top-1/2 -translate-y-1/2 bg-black/60 hover:bg-black/90 text-white rounded-full p-3 border border-dark-700 opacity-80 hover:opacity-100 transition shadow-lg" title="Volgende foto (Pijltje Rechts)">
+                        ▶
+                    </button>
+                    
+                    <!-- Keyboard shortcut hint -->
+                    <div class="absolute bottom-2 right-2 bg-black/70 text-[10px] text-gray-400 px-2 py-0.5 rounded border border-dark-800 pointer-events-none">
+                        Sneltoetsen: ← Vorige | Volgende → | 1 = Goed | ESC Sluiten
+                    </div>
+                </div>
+
+                <!-- Metrics & Reason Box -->
+                <div class="bg-dark-950 rounded-xl p-3 border border-dark-800 flex flex-wrap items-center justify-between gap-3 text-xs">
+                    <div class="flex items-center gap-4 flex-wrap">
+                        <div><span class="text-gray-500">Zekerheid:</span> <b id="modal-conf" class="text-cyan-400 font-mono">85%</b></div>
+                        <div><span class="text-gray-500">Verplaatsing:</span> <b id="modal-disp" class="text-emerald-400 font-mono">12.5%</b></div>
+                        <div><span class="text-gray-500">AI Besluit Reden:</span> <span id="modal-reason" class="text-gray-300 font-mono">-</span></div>
+                    </div>
+                    <div id="modal-feedback-toast" class="hidden px-3 py-1 rounded-lg text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                        <!-- feedback toast -->
+                    </div>
+                </div>
+
+                <!-- Review Actions Section -->
+                <div class="space-y-3 pt-1">
+                    <div class="text-xs font-bold text-gray-300 uppercase tracking-wider flex items-center gap-1.5">
+                        <span>🎯</span> Jouw Beoordeling voor AI Active Learning:
+                    </div>
+
+                    <!-- Primary Quick Buttons -->
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <button onclick="submitModalFeedback('CORRECT', 'VALID')" class="w-full py-3 px-4 rounded-xl bg-emerald-600/90 hover:bg-emerald-500 text-white font-bold text-sm shadow-lg flex items-center justify-center gap-2 border border-emerald-400/40 transition active:scale-[0.98]">
+                            <span>👍</span>
+                            <span>Besluit Klopt (Goed) <span class="text-[11px] font-normal text-emerald-200">[Toets 1]</span></span>
+                        </button>
+                        <div class="relative">
+                            <button onclick="toggleModalReasonGrid()" class="w-full py-3 px-4 rounded-xl bg-red-600/90 hover:bg-red-500 text-white font-bold text-sm shadow-lg flex items-center justify-center gap-2 border border-red-400/40 transition active:scale-[0.98]">
+                                <span>👎</span>
+                                <span>Besluit Was Onjuist (Kies reden) ▾</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Granular Reasons Grid (Expandable) -->
+                    <div id="modal-reason-grid" class="space-y-2 p-3 bg-dark-950 rounded-xl border border-dark-800">
+                        <div class="text-[11px] font-semibold text-gray-400 flex items-center justify-between">
+                            <span>Waarom was deze detectie foutief? (Kies om direct op te slaan en AI te leren):</span>
+                        </div>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                            <button onclick="submitModalFeedback('INCORRECT', 'PERSON_NEAR_PARKED_CAR')" class="p-2.5 rounded-lg bg-dark-900 hover:bg-indigo-950/70 border border-indigo-700/50 text-indigo-300 text-left font-semibold flex items-center gap-2 transition">
+                                <span class="text-base">🚶‍♂️</span>
+                                <div>
+                                    <div class="text-white">Persoon liep langs geparkeerde auto</div>
+                                    <div class="text-[10px] text-gray-400">Auto stond stil (voorkomt false car motion)</div>
+                                </div>
+                            </button>
+                            <button onclick="submitModalFeedback('INCORRECT', 'PARKED_CAR')" class="p-2.5 rounded-lg bg-dark-900 hover:bg-amber-950/70 border border-amber-700/50 text-amber-300 text-left font-semibold flex items-center gap-2 transition">
+                                <span class="text-base">🚗</span>
+                                <div>
+                                    <div class="text-white">Geparkeerde auto bewoog niet</div>
+                                    <div class="text-[10px] text-gray-400">Veranker auto direct in stilstaand geheugen</div>
+                                </div>
+                            </button>
+                            <button onclick="submitModalFeedback('INCORRECT', 'TREE_SHADOW')" class="p-2.5 rounded-lg bg-dark-900 hover:bg-emerald-950/70 border border-emerald-700/50 text-emerald-300 text-left font-semibold flex items-center gap-2 transition">
+                                <span class="text-base">🌿</span>
+                                <div>
+                                    <div class="text-white">Boom, struik of takken</div>
+                                    <div class="text-[10px] text-gray-400">Wind- of schaduwbeweging in de tuin</div>
+                                </div>
+                            </button>
+                            <button onclick="submitModalFeedback('INCORRECT', 'MISSED_OBJECT')" class="p-2.5 rounded-lg bg-dark-900 hover:bg-cyan-950/70 border border-cyan-700/50 text-cyan-300 text-left font-semibold flex items-center gap-2 transition">
+                                <span class="text-base">👤</span>
+                                <div>
+                                    <div class="text-white">Gemist object</div>
+                                    <div class="text-[10px] text-gray-400">Had gemeld moeten worden als notificatie</div>
+                                </div>
+                            </button>
+                            <button onclick="submitModalFeedback('INCORRECT', 'WRONG_CLASS')" class="p-2.5 rounded-lg bg-dark-900 hover:bg-purple-950/70 border border-purple-700/50 text-purple-300 text-left font-semibold flex items-center gap-2 transition">
+                                <span class="text-base">🏷️</span>
+                                <div>
+                                    <div class="text-white">Verkeerd object-type</div>
+                                    <div class="text-[10px] text-gray-400">Bv. auto gezien i.p.v. persoon of fiets</div>
+                                </div>
+                            </button>
+                            <button onclick="submitModalFeedback('INCORRECT', 'CAT_OR_DOG')" class="p-2.5 rounded-lg bg-dark-900 hover:bg-yellow-950/70 border border-yellow-700/50 text-yellow-300 text-left font-semibold flex items-center gap-2 transition">
+                                <span class="text-base">🐈</span>
+                                <div>
+                                    <div class="text-white">Dier (kat, hond of vogel)</div>
+                                    <div class="text-[10px] text-gray-400">Huisdier of vogel in de tuin</div>
+                                </div>
+                            </button>
+                            <button onclick="submitModalFeedback('INCORRECT', 'CYCLIST_OR_SCOOTER')" class="p-2.5 rounded-lg bg-dark-900 hover:bg-teal-950/70 border border-teal-700/50 text-teal-300 text-left font-semibold flex items-center gap-2 transition">
+                                <span class="text-base">🚴</span>
+                                <div>
+                                    <div class="text-white">Fietser / scooter</div>
+                                    <div class="text-[10px] text-gray-400">Voorbijrijdende tweewieler op straat</div>
+                                </div>
+                            </button>
+                            <button onclick="submitModalFeedback('INCORRECT', 'FALSE_MOTION_GLITCH')" class="p-2.5 rounded-lg bg-dark-900 hover:bg-rose-950/70 border border-rose-700/50 text-rose-300 text-left font-semibold flex items-center gap-2 transition">
+                                <span class="text-base">💡</span>
+                                <div>
+                                    <div class="text-white">Lichtflits / koplamp reflectie</div>
+                                    <div class="text-[10px] text-gray-400">Plotselinge lichtverandering of ruis</div>
+                                </div>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Free Notes Field -->
+                    <div class="flex items-center gap-2 pt-1">
+                        <span class="text-xs text-gray-400">Toelichting:</span>
+                        <input id="modal-notes" type="text" placeholder="Optionele notitie (bv. 'postbode zette doos neer bij voordeur')..." class="flex-1 bg-dark-950 border border-dark-800 rounded-xl px-3 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:border-indigo-500 outline-none" />
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -961,49 +1147,137 @@
             }
         }
 
-        // AI Verification Inspector Filter & Loader
-        let currentAuditFilter = 'ALL';
+        // AI Verification Inspector State & Management (v3.5.5)
+        let currentReviewFilter = 'pending'; // 'pending' | 'reviewed' | 'all'
+        let currentStatusFilter = 'ALL';     // 'ALL' | 'APPROVED' | 'REJECTED'
+        let currentAuditLogs = [];
+        let currentModalIndex = -1;
+        let auditStats = { total: 0, pending: 0, reviewed: 0, correct: 0, incorrect: 0 };
 
-        function setAuditFilter(filter) {
-            currentAuditFilter = filter;
-            ['ALL', 'APPROVED', 'REJECTED'].forEach(f => {
-                const btn = document.getElementById('filter-audit-' + f);
+        function getReasonLabel(reason) {
+            switch (reason) {
+                case 'PERSON_NEAR_PARKED_CAR': return '🚶‍♂️ Wandelaar langs auto';
+                case 'PARKED_CAR':
+                case 'PARKED_CAR_FALSE_ALARM': return '🚗 Geparkeerd';
+                case 'TREE_SHADOW':
+                case 'TREE_OR_SHADOW': return '🌿 Boom/schaduw';
+                case 'MISSED_OBJECT': return '👤 Gemist object';
+                case 'WRONG_CLASS': return '🏷️ Type fout';
+                case 'CAT_OR_DOG':
+                case 'ANIMAL': return '🐈 Dier';
+                case 'CYCLIST_OR_SCOOTER': return '🚴 Fietser';
+                case 'POSTMAN_OR_DELIVERY': return '📦 Bezorger';
+                case 'FALSE_MOTION_GLITCH': return '💡 Lichtflits';
+                default: return reason ? `❌ ${reason}` : '❌ Onjuist';
+            }
+        }
+
+        function setReviewFilter(filter) {
+            currentReviewFilter = filter;
+            ['pending', 'reviewed', 'all'].forEach(f => {
+                const btn = document.getElementById('filter-review-' + f);
                 if (btn) {
                     if (f === filter) {
-                        btn.className = "px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 text-white transition";
+                        btn.className = "px-3.5 py-1.5 rounded-lg bg-emerald-600 text-white transition flex items-center gap-1.5 shadow";
                     } else {
-                        btn.className = "px-3 py-1.5 rounded-lg text-xs font-semibold text-gray-400 hover:text-white transition";
+                        btn.className = "px-3.5 py-1.5 rounded-lg text-gray-400 hover:text-white transition flex items-center gap-1.5";
                     }
                 }
             });
             loadAuditLogs();
         }
 
+        function setStatusFilter(status) {
+            currentStatusFilter = status;
+            ['ALL', 'APPROVED', 'REJECTED'].forEach(s => {
+                const btn = document.getElementById('filter-audit-' + s);
+                if (btn) {
+                    if (s === status) {
+                        btn.className = "px-3 py-1.5 rounded-lg bg-dark-800 text-white border border-dark-600 transition";
+                    } else {
+                        btn.className = "px-3 py-1.5 rounded-lg text-gray-400 hover:text-white transition";
+                    }
+                }
+            });
+            loadAuditLogs();
+        }
+
+        function setAuditFilter(filter) {
+            setStatusFilter(filter);
+        }
+
+        async function loadAuditStats() {
+            try {
+                const res = await fetch('/api/v1/admin/detections/stats');
+                if (res.ok) {
+                    auditStats = await res.json();
+                    const pendingEl = document.getElementById('stat-pending');
+                    const correctEl = document.getElementById('stat-correct');
+                    const incorrectEl = document.getElementById('stat-incorrect');
+                    const totalEl = document.getElementById('stat-total');
+
+                    const badgePending = document.getElementById('badge-review-pending');
+                    const badgeReviewed = document.getElementById('badge-review-reviewed');
+                    const badgeAll = document.getElementById('badge-review-all');
+
+                    if (pendingEl) pendingEl.textContent = auditStats.pending;
+                    if (correctEl) correctEl.textContent = auditStats.correct;
+                    if (incorrectEl) incorrectEl.textContent = auditStats.incorrect;
+                    if (totalEl) totalEl.textContent = auditStats.total;
+
+                    if (badgePending) badgePending.textContent = auditStats.pending;
+                    if (badgeReviewed) badgeReviewed.textContent = auditStats.reviewed;
+                    if (badgeAll) badgeAll.textContent = auditStats.total;
+                }
+            } catch (e) {
+                console.error('Error fetching audit stats:', e);
+            }
+        }
+
         async function loadAuditLogs() {
             const tbody = document.getElementById('inspector-table-body');
-            tbody.innerHTML = '<tr><td colspan="8" class="p-4 text-center text-gray-500">Laden van 250 records...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" class="p-6 text-center text-gray-500">Laden van inspectielogs...</td></tr>';
+            loadAuditStats();
+
             try {
                 let url = '/api/v1/admin/detections?limit=250';
-                if (currentAuditFilter !== 'ALL') {
-                    url += `&status=${currentAuditFilter}`;
+                if (currentReviewFilter === 'pending') {
+                    url += '&reviewed=false';
+                } else if (currentReviewFilter === 'reviewed') {
+                    url += '&reviewed=true';
                 }
+
+                if (currentStatusFilter !== 'ALL') {
+                    url += `&status=${currentStatusFilter}`;
+                }
+
                 const res = await fetch(url);
-                if (!res.ok) return;
-                const logs = await res.json();
-                if (logs.length === 0) {
-                    const msg = currentAuditFilter === 'APPROVED' 
-                        ? 'Geen goedgekeurde evaluaties gevonden.' 
-                        : currentAuditFilter === 'REJECTED' 
-                            ? 'Geen afgewezen evaluaties gevonden.' 
-                            : 'Nog geen evaluaties geregistreerd.';
-                    tbody.innerHTML = `<tr><td colspan="8" class="p-6 text-center text-gray-500">${msg}</td></tr>`;
+                if (!res.ok) {
+                    tbody.innerHTML = '<tr><td colspan="8" class="p-6 text-center text-red-400">Fout bij laden van logs.</td></tr>';
                     return;
                 }
-                tbody.innerHTML = '';
+
+                const logs = await res.json();
                 // Newest first
                 logs.sort((a, b) => (b.id || 0) - (a.id || 0));
-                logs.forEach(item => {
+                currentAuditLogs = logs;
+
+                if (currentAuditLogs.length === 0) {
+                    const emptyMsg = currentReviewFilter === 'pending'
+                        ? '🎉 Geweldig! Alle opnames zijn beoordeeld. Er zijn momenteel geen openstaande evaluaties.'
+                        : (currentReviewFilter === 'reviewed'
+                            ? 'Nog geen beoordeelde evaluaties aanwezig.'
+                            : 'Geen evaluaties gevonden voor dit filter.');
+                    tbody.innerHTML = `<tr><td colspan="8" class="p-8 text-center text-gray-400 font-medium">${emptyMsg}</td></tr>`;
+                    return;
+                }
+
+                tbody.innerHTML = '';
+                currentAuditLogs.forEach((item, index) => {
                     const tr = document.createElement('tr');
+                    tr.id = `audit-row-${item.id}`;
+                    tr.className = "hover:bg-dark-850/60 transition";
+
                     const isApproved = item.status === 'APPROVED';
                     const badgeClass = isApproved 
                         ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
@@ -1016,22 +1290,18 @@
                     let feedbackHtml = '';
                     if (userFb === 'CORRECT') {
                         feedbackHtml = `
-                            <div class="flex items-center gap-1.5">
-                                <span class="px-2 py-0.5 rounded-lg text-[11px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                            <div class="flex items-center gap-1.5" id="fb-box-${item.id}">
+                                <span class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                                     ✅ Besluit klopt
                                 </span>
                                 <button onclick="toggleIncorrectMenu(${item.id})" class="text-gray-400 hover:text-white text-xs px-1" title="Wijzigen">✏️</button>
                             </div>
                         `;
                     } else if (userFb === 'INCORRECT') {
-                        const r = item.feedback_reason || '';
-                        const rLabel = r === 'PARKED_CAR' ? '🚗 Geparkeerd'
-                            : r === 'MISSED_OBJECT' ? '👤 Gemist'
-                            : r === 'WRONG_CLASS' ? '🏷️ Type fout'
-                            : '❌ Onjuist';
+                        const rLabel = getReasonLabel(item.feedback_reason);
                         feedbackHtml = `
-                            <div class="flex items-center gap-1.5">
-                                <span class="px-2 py-0.5 rounded-lg text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30" title="Geleerd door AI">
+                            <div class="flex items-center gap-1.5" id="fb-box-${item.id}">
+                                <span class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30" title="Geleerd door AI">
                                     ${rLabel}
                                 </span>
                                 <button onclick="toggleIncorrectMenu(${item.id})" class="text-gray-400 hover:text-white text-xs px-1" title="Wijzigen">✏️</button>
@@ -1039,33 +1309,48 @@
                         `;
                     } else {
                         feedbackHtml = `
-                            <div class="flex items-center gap-1" id="fb-box-${item.id}">
-                                <button onclick="submitAuditFeedback(${item.id}, 'CORRECT', 'VALID')" class="px-2 py-1 rounded-lg bg-emerald-950/60 hover:bg-emerald-800 border border-emerald-700/50 text-emerald-300 font-semibold text-[11px] transition" title="Besluit van AI was goed">
+                            <div class="flex items-center gap-1.5" id="fb-box-${item.id}">
+                                <button onclick="submitAuditFeedback(${item.id}, 'CORRECT', 'VALID')" class="px-2.5 py-1 rounded-lg bg-emerald-950/70 hover:bg-emerald-800 border border-emerald-700/50 text-emerald-300 font-semibold text-xs transition" title="Besluit van AI was goed">
                                     👍 Goed
                                 </button>
                                 <div class="relative inline-block text-left">
-                                    <button onclick="toggleIncorrectMenu(${item.id})" class="px-2 py-1 rounded-lg bg-red-950/60 hover:bg-red-800 border border-red-700/50 text-red-300 font-semibold text-[11px] transition" title="Besluit van AI was fout">
-                                        👎 Fout ▾
+                                    <button onclick="toggleIncorrectMenu(${item.id})" class="px-2.5 py-1 rounded-lg bg-red-950/70 hover:bg-red-800 border border-red-700/50 text-red-300 font-semibold text-xs transition" title="Besluit van AI was fout">
+                                        👎 Onjuist ▾
                                     </button>
                                 </div>
                             </div>
                         `;
                     }
 
-                    // Append inline dropdown menu container
+                    // Granular Dropdown Menu for incorrect detections
                     feedbackHtml += `
-                        <div id="incorrect-menu-${item.id}" class="hidden absolute z-30 mt-1 w-56 rounded-xl bg-dark-900 border border-dark-700 shadow-2xl p-1.5 text-xs space-y-1">
-                            <div class="text-[10px] text-gray-400 px-2 py-0.5 uppercase font-bold border-b border-dark-800">Kies correctie:</div>
-                            <button onclick="submitAuditFeedback(${item.id}, 'INCORRECT', 'PARKED_CAR')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-amber-300 transition flex items-center gap-1.5">
-                                <span>🚗</span> <span>Geparkeerde auto (Onterecht)</span>
+                        <div id="incorrect-menu-${item.id}" class="hidden absolute right-3 z-30 mt-1 w-64 rounded-xl bg-dark-900 border border-dark-700 shadow-2xl p-2 text-xs space-y-1">
+                            <div class="text-[10px] text-gray-400 px-2 py-0.5 uppercase font-bold border-b border-dark-800">Kies reden correctie:</div>
+                            <button onclick="submitAuditFeedback(${item.id}, 'INCORRECT', 'PERSON_NEAR_PARKED_CAR')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-indigo-300 transition flex items-center gap-2">
+                                <span>🚶‍♂️</span> <span>Persoon liep langs geparkeerde auto</span>
                             </button>
-                            <button onclick="submitAuditFeedback(${item.id}, 'INCORRECT', 'MISSED_OBJECT')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-cyan-300 transition flex items-center gap-1.5">
+                            <button onclick="submitAuditFeedback(${item.id}, 'INCORRECT', 'PARKED_CAR')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-amber-300 transition flex items-center gap-2">
+                                <span>🚗</span> <span>Geparkeerde auto bewoog niet</span>
+                            </button>
+                            <button onclick="submitAuditFeedback(${item.id}, 'INCORRECT', 'TREE_SHADOW')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-emerald-300 transition flex items-center gap-2">
+                                <span>🌿</span> <span>Boom, takken of struiken</span>
+                            </button>
+                            <button onclick="submitAuditFeedback(${item.id}, 'INCORRECT', 'MISSED_OBJECT')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-cyan-300 transition flex items-center gap-2">
                                 <span>👤</span> <span>Gemist object (Had gemeld)</span>
                             </button>
-                            <button onclick="submitAuditFeedback(${item.id}, 'INCORRECT', 'WRONG_CLASS')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-purple-300 transition flex items-center gap-1.5">
+                            <button onclick="submitAuditFeedback(${item.id}, 'INCORRECT', 'WRONG_CLASS')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-purple-300 transition flex items-center gap-2">
                                 <span>🏷️</span> <span>Verkeerd object-type</span>
                             </button>
-                            <button onclick="submitAuditFeedback(${item.id}, 'CORRECT', 'VALID')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-emerald-400 transition flex items-center gap-1.5 border-t border-dark-800">
+                            <button onclick="submitAuditFeedback(${item.id}, 'INCORRECT', 'CAT_OR_DOG')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-yellow-300 transition flex items-center gap-2">
+                                <span>🐈</span> <span>Dier (kat/hond/vogel)</span>
+                            </button>
+                            <button onclick="submitAuditFeedback(${item.id}, 'INCORRECT', 'CYCLIST_OR_SCOOTER')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-teal-300 transition flex items-center gap-2">
+                                <span>🚴</span> <span>Fietser / scooter</span>
+                            </button>
+                            <button onclick="submitAuditFeedback(${item.id}, 'INCORRECT', 'FALSE_MOTION_GLITCH')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-rose-300 transition flex items-center gap-2">
+                                <span>💡</span> <span>Lichtflits / koplamp reflectie</span>
+                            </button>
+                            <button onclick="submitAuditFeedback(${item.id}, 'CORRECT', 'VALID')" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-dark-800 text-emerald-400 transition flex items-center gap-2 border-t border-dark-800">
                                 <span>✅</span> <span>Besluit was toch goed</span>
                             </button>
                         </div>
@@ -1079,45 +1364,286 @@
                         <td class="p-3 font-mono font-bold ${item.displacement_pct >= 6 ? 'text-emerald-400' : 'text-red-400'}">${item.displacement_pct}%</td>
                         <td class="p-3 text-gray-300 max-w-xs truncate" title="${item.reason}">${item.reason}</td>
                         <td class="p-3">
-                            <img src="${snapUrl}" class="w-20 h-15 object-cover rounded cursor-pointer border border-dark-700 hover:opacity-80 transition" onclick="openSnapModal('${snapUrl}')" alt="Snap" onerror="this.onerror=null; this.src='/api/v1/live/instant.jpg';" />
+                            <div class="relative group cursor-pointer inline-block" onclick="openSnapModalById(${item.id})">
+                                <img src="${snapUrl}" class="w-20 h-15 object-cover rounded border border-dark-700 group-hover:border-emerald-500 transition shadow" alt="Snap" onerror="this.onerror=null; this.src='/api/v1/live/instant.jpg';" />
+                                <span class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white text-[10px] font-bold rounded transition">
+                                    🔍 Bekijk
+                                </span>
+                            </div>
                         </td>
                         <td class="p-3 relative">${feedbackHtml}</td>
                     `;
                     tbody.appendChild(tr);
                 });
             } catch (e) {
-                tbody.innerHTML = '<tr><td colspan="8" class="p-4 text-center text-red-400">Fout bij laden van inspectielogs.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="8" class="p-6 text-center text-red-400">Fout bij laden van inspectielogs.</td></tr>';
             }
         }
 
-        async function submitAuditFeedback(logId, feedback, reason = '') {
+        // Fast AJAX submission without page reload
+        async function submitAuditFeedback(logId, feedback, reason = '', notes = '') {
             try {
-                // Close any open menus
                 toggleIncorrectMenu(logId, true);
+                const row = document.getElementById(`audit-row-${logId}`);
+                if (row) {
+                    row.classList.add(feedback === 'CORRECT' ? 'bg-emerald-950/40' : 'bg-amber-950/40');
+                }
+
+                // Fire async request
                 const res = await fetch(`/api/v1/admin/detections/${logId}/feedback`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ feedback, reason }),
+                    body: JSON.stringify({ feedback, reason, notes }),
                 });
+
                 if (!res.ok) {
                     alert('Fout bij opslaan van beoordeling.');
                     return;
                 }
-                const data = await res.json();
-                loadAuditLogs();
+
+                // Update in-memory data
+                const item = currentAuditLogs.find(i => i.id === logId);
+                if (item) {
+                    item.user_feedback = feedback;
+                    item.feedback_reason = reason;
+                    item.notes = notes;
+                }
+
+                // Update local stats
+                if (auditStats.pending > 0) auditStats.pending--;
+                auditStats.reviewed++;
+                if (feedback === 'CORRECT') auditStats.correct++;
+                else auditStats.incorrect++;
+                updateCountersLocally();
+
+                // If in 'pending' mode, smoothly animate and remove row from DOM
+                if (currentReviewFilter === 'pending' && row) {
+                    setTimeout(() => {
+                        row.style.transition = 'opacity 0.2s ease-out, transform 0.2s ease-out';
+                        row.style.opacity = '0';
+                        row.style.transform = 'translateX(20px)';
+                        setTimeout(() => {
+                            row.remove();
+                            const idx = currentAuditLogs.findIndex(i => i.id === logId);
+                            if (idx !== -1) currentAuditLogs.splice(idx, 1);
+                            if (currentAuditLogs.length === 0) {
+                                const tbody = document.getElementById('inspector-table-body');
+                                if (tbody) {
+                                    tbody.innerHTML = '<tr><td colspan="8" class="p-8 text-center text-gray-400 font-medium">🎉 Geweldig! Alle opnames zijn beoordeeld. Er zijn momenteel geen openstaande evaluaties.</td></tr>';
+                                }
+                            }
+                        }, 200);
+                    }, 150);
+                } else if (row) {
+                    // Update feedback cell in place
+                    const fbBox = document.getElementById(`fb-box-${logId}`);
+                    if (fbBox) {
+                        const rLabel = feedback === 'CORRECT' ? '✅ Besluit klopt' : getReasonLabel(reason);
+                        const bClass = feedback === 'CORRECT' 
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' 
+                            : 'bg-amber-500/20 text-amber-300 border border-amber-500/30';
+                        fbBox.innerHTML = `
+                            <span class="px-2.5 py-1 rounded-lg text-[11px] font-bold ${bClass}">
+                                ${rLabel}
+                            </span>
+                            <button onclick="toggleIncorrectMenu(${logId})" class="text-gray-400 hover:text-white text-xs px-1" title="Wijzigen">✏️</button>
+                        `;
+                    }
+                }
             } catch (e) {
                 alert('Netwerkfout bij opslaan beoordeling: ' + e);
             }
         }
 
+        function updateCountersLocally() {
+            const pendingEl = document.getElementById('stat-pending');
+            const correctEl = document.getElementById('stat-correct');
+            const incorrectEl = document.getElementById('stat-incorrect');
+            const totalEl = document.getElementById('stat-total');
+
+            const badgePending = document.getElementById('badge-review-pending');
+            const badgeReviewed = document.getElementById('badge-review-reviewed');
+            const badgeAll = document.getElementById('badge-review-all');
+
+            if (pendingEl) pendingEl.textContent = auditStats.pending;
+            if (correctEl) correctEl.textContent = auditStats.correct;
+            if (incorrectEl) incorrectEl.textContent = auditStats.incorrect;
+            if (totalEl) totalEl.textContent = auditStats.total;
+
+            if (badgePending) badgePending.textContent = auditStats.pending;
+            if (badgeReviewed) badgeReviewed.textContent = auditStats.reviewed;
+            if (badgeAll) badgeAll.textContent = auditStats.total;
+        }
+
         function toggleIncorrectMenu(logId, forceClose = false) {
             const menu = document.getElementById(`incorrect-menu-${logId}`);
-            // Close all other menus
             document.querySelectorAll('[id^="incorrect-menu-"]').forEach(m => {
                 if (m !== menu || forceClose) m.classList.add('hidden');
             });
             if (menu && !forceClose) {
                 menu.classList.toggle('hidden');
+            }
+        }
+
+        // ==============================================================
+        // Modal Snapshot Review Station & Carousel
+        // ==============================================================
+        function openSnapModalById(logId) {
+            currentModalIndex = currentAuditLogs.findIndex(i => i.id === logId);
+            if (currentModalIndex < 0 && currentAuditLogs.length > 0) {
+                currentModalIndex = 0;
+            }
+            document.getElementById('snap-modal').classList.remove('hidden');
+            window.addEventListener('keydown', handleModalKeyDown);
+            renderModalContent();
+        }
+
+        function startQuickReview() {
+            if (currentAuditLogs.length === 0) {
+                alert('Geen opnames om te beoordelen in de huidige selectie.');
+                return;
+            }
+            openSnapModalById(currentAuditLogs[0].id);
+        }
+
+        function renderModalContent() {
+            const container = document.getElementById('modal-content-container');
+            if (currentModalIndex < 0 || currentModalIndex >= currentAuditLogs.length) {
+                container.innerHTML = `
+                    <div class="p-10 text-center space-y-4">
+                        <div class="text-4xl">🎉</div>
+                        <h3 class="text-lg font-bold text-white">Geen opnames meer te beoordelen!</h3>
+                        <p class="text-xs text-gray-400">Alle openstaande opnames in deze selectie zijn succesvol beoordeeld.</p>
+                        <button onclick="closeSnapModal()" class="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-semibold text-white text-xs transition">
+                            Terug naar Overzicht
+                        </button>
+                    </div>
+                `;
+                return;
+            }
+
+            const item = currentAuditLogs[currentModalIndex];
+            const snapUrl = `/api/v1/admin/inspector-snapshot/${item.id}`;
+
+            const modalImg = document.getElementById('modal-img');
+            if (modalImg) modalImg.src = snapUrl;
+
+            document.getElementById('modal-curr-idx').textContent = (currentModalIndex + 1);
+            document.getElementById('modal-total-count').textContent = currentAuditLogs.length;
+
+            const isApproved = item.status === 'APPROVED';
+            const statusBadge = document.getElementById('modal-status-badge');
+            statusBadge.textContent = item.status;
+            statusBadge.className = isApproved
+                ? 'px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                : 'px-2.5 py-0.5 rounded-full text-xs font-bold bg-red-500/10 text-red-400 border border-red-500/20';
+
+            document.getElementById('modal-category-badge').textContent = (item.label || item.category);
+            document.getElementById('modal-timestamp').textContent = formatLocalTime(item.timestamp);
+
+            document.getElementById('modal-conf').textContent = Math.round(item.confidence * 100) + '%';
+            document.getElementById('modal-disp').textContent = item.displacement_pct + '%';
+            document.getElementById('modal-reason').textContent = item.reason || '-';
+
+            const notesInput = document.getElementById('modal-notes');
+            if (notesInput) notesInput.value = item.notes || '';
+
+            const toast = document.getElementById('modal-feedback-toast');
+            if (toast) toast.classList.add('hidden');
+        }
+
+        function navigateModal(direction) {
+            if (currentAuditLogs.length === 0) return;
+            currentModalIndex += direction;
+            if (currentModalIndex < 0) currentModalIndex = currentAuditLogs.length - 1;
+            if (currentModalIndex >= currentAuditLogs.length) currentModalIndex = 0;
+            renderModalContent();
+        }
+
+        function toggleModalReasonGrid() {
+            const grid = document.getElementById('modal-reason-grid');
+            if (grid) grid.classList.toggle('hidden');
+        }
+
+        async function submitModalFeedback(feedback, reason = '') {
+            if (currentModalIndex < 0 || currentModalIndex >= currentAuditLogs.length) return;
+            const item = currentAuditLogs[currentModalIndex];
+            const notes = document.getElementById('modal-notes')?.value || '';
+
+            // Instant visual toast
+            const toast = document.getElementById('modal-feedback-toast');
+            if (toast) {
+                const label = feedback === 'CORRECT' ? '✅ Besluit Klopt' : getReasonLabel(reason);
+                toast.textContent = `Opgeslagen: ${label}`;
+                toast.classList.remove('hidden');
+            }
+
+            // Async background call
+            fetch(`/api/v1/admin/detections/${item.id}/feedback`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ feedback, reason, notes }),
+            }).catch(e => console.error('Error saving modal feedback:', e));
+
+            // Update in-memory item
+            item.user_feedback = feedback;
+            item.feedback_reason = reason;
+            item.notes = notes;
+
+            // Stats
+            if (auditStats.pending > 0) auditStats.pending--;
+            auditStats.reviewed++;
+            if (feedback === 'CORRECT') auditStats.correct++;
+            else auditStats.incorrect++;
+            updateCountersLocally();
+
+            // If in pending mode: remove from background table and current array
+            if (currentReviewFilter === 'pending') {
+                const row = document.getElementById(`audit-row-${item.id}`);
+                if (row) row.remove();
+                currentAuditLogs.splice(currentModalIndex, 1);
+                // currentModalIndex now points to the next item automatically
+            } else {
+                currentModalIndex++;
+            }
+
+            // Smooth transition to next recording
+            setTimeout(() => {
+                renderModalContent();
+            }, 180);
+        }
+
+        function openSnapModal(url) {
+            // Backward-compat for direct calls
+            document.getElementById('modal-img').src = url;
+            document.getElementById('snap-modal').classList.remove('hidden');
+            window.addEventListener('keydown', handleModalKeyDown);
+        }
+
+        function closeSnapModal() {
+            document.getElementById('snap-modal').classList.add('hidden');
+            window.removeEventListener('keydown', handleModalKeyDown);
+        }
+
+        function handleModalKeyDown(e) {
+            // Ignore arrow keys if typing in notes input
+            if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) {
+                if (e.key === 'Escape') closeSnapModal();
+                return;
+            }
+
+            if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                navigateModal(1);
+            } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                navigateModal(-1);
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                closeSnapModal();
+            } else if (e.key === '1') {
+                e.preventDefault();
+                submitModalFeedback('CORRECT', 'VALID');
             }
         }
 
@@ -1134,15 +1660,6 @@
                     loadDualTriggerTiming();
                 }
             }, 5000);
-        }
-
-        // Modal Helpers
-        function openSnapModal(url) {
-            document.getElementById('modal-img').src = url;
-            document.getElementById('snap-modal').classList.remove('hidden');
-        }
-        function closeSnapModal() {
-            document.getElementById('snap-modal').classList.add('hidden');
         }
 
         // Backend & Crash Logs
