@@ -39,7 +39,7 @@ class RingCoordinator:
         self.cooldown_sec = cooldown_sec
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         self._last_ring_ts: float = 0.0
         self._active_window: Optional[Dict[str, Any]] = None
