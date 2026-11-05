@@ -114,8 +114,8 @@ class RingCoordinator:
 
             if not matching_cand:
                 try:
-                    from app.ring_detector import chime_detector
-                    live_ncc, live_det = chime_detector.get_recent_acoustic_energy(window_sec=1.5)
+                    from app.ring_detector import ring_detector
+                    live_ncc, live_det = ring_detector.get_recent_acoustic_energy(window_sec=1.5)
                     if live_ncc >= 0.48:
                         matching_cand = {"ts": now, "ncc": live_ncc, "details": live_det}
                 except Exception:
@@ -225,13 +225,22 @@ class RingCoordinator:
 
     def _dispatch_ring_to_state_machine(self, source: str) -> None:
         """Invokes call_sm.ring(trigger_source=source) immediately."""
+        if self._on_ring_callback:
+            try:
+                res = self._on_ring_callback(source, {})
+                if asyncio.iscoroutine(res):
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(res)
+                    except RuntimeError:
+                        asyncio.run(res)
+                return
+            except Exception as e:
+                logger.error("[RingCoordinator] Callback error: %s", e)
+                return
+
         async def _async_trigger():
             try:
-                if self._on_ring_callback:
-                    res = self._on_ring_callback(source, {})
-                    if asyncio.iscoroutine(res):
-                        await res
-                    return
                 from app.main import call_sm
                 await call_sm.ring(trigger_source=source)
             except Exception as e:

@@ -1,7 +1,7 @@
-# Foxway Smart Doorbell System Specification (v3.5.0)
+# Foxway Smart Doorbell System Specification (v3.6.0)
 
-**Versie:** `v3.5.0` (`versionCode = 32`)  
-**Datum:** 1 November 2026  
+**Versie:** `v3.6.0` (`versionCode = 39`)  
+**Datum:** 5 November 2026  
 **Productie-omgeving:** `foxway` (`192.168.2.1`), WAN: `https://deurbel.foxway.nl`  
 **Camera:** EZVIZ DB1 Pro (`192.168.2.31`), native **4:3 aspect ratio** (`768x576` / `960x720`)
 
