@@ -438,15 +438,13 @@ async def test_v356_ring_coordinator_coincidence_tiers():
         _, kwargs = mock_ring.call_args
         assert kwargs["trigger_source"] == "SHAZAM + SNIFF"
 
-        # Test Case 3: Tier 3 Motion Context Emergency Fallback (Microphone offline + Cloud Burst + Doorstep Activity)
+        # Test Case 3: Anti-Motion Protection: Cloud Burst + Doorstep Activity MUST NOT trigger ring (zero phantom rings on motion)
         ring_coordinator.reset()
         mock_ring.reset_mock()
         smart_detector._last_person_seen = time.time()  # Person seen 0s ago
         ring_coordinator.register_cloud_burst({"dst_port": 8820, "packet_count": 3, "total_bytes": 693})
         await asyncio.sleep(0.05)
-        assert mock_ring.call_count == 1
-        _, kwargs = mock_ring.call_args
-        assert kwargs["trigger_source"] == "MOTION + SNIFF"
+        assert mock_ring.call_count == 0, "Motion + Cloud Burst must NOT trigger ring without chime candidate!"
 
         # Test Case 4: Anti-Phantom Protection (Standalone Cloud Burst with no acoustics and no motion)
         ring_coordinator.reset()

@@ -1,21 +1,17 @@
 """
-Foxway Smart Doorbell — Central Ring Coordinator & 3-Tier Multi-Sensor Coincidence Engine (v3.5.6).
+Foxway Smart Doorbell — Central Ring Coordinator & Coincidence Engine (v3.6.0).
 
 Architecture:
 1. Tier 1: Zero-Latency Immediate Trigger (SHAZAM_CHIME only):
-   When Shazam Cross-Correlation is >= 0.72 with prominent 728 Hz / 570 Hz peaks,
+   When Shazam Cross-Correlation verifies the 2-tone Ding-Dong melody (728 Hz -> 570 Hz),
    dispatches call_sm.ring(...) immediately at millisecond 0 (trigger_source="SHAZAM_CHIME").
-2. Tier 2: Degraded Acoustic + EZVIZ Cloud Burst Coincidence (Night AGC / Wind Fallback):
-   When Shazam detects deurbel frequencies with reduced amplitude (NCC >= 0.48) AND
-   the Cloud Sniffer detects an EZVIZ Cloud Burst (Pattern B >= 3 TCP pkts, >690B)
-   within a [-1.5s, +1.5s] coincidence window, dispatches call_sm.ring(trigger_source="SHAZAM + SNIFF").
-3. Tier 3: Visual / Doorstep Motion + Cloud Burst Emergency Fallback:
-   When Cloud Burst occurs but audio stream is degraded/offline, verifies if camera motion
-   (0x4000 dwAlarmType==3) or AI person detection occurred at the doorstep within the last 12.0s.
-   If confirmed, dispatches call_sm.ring(trigger_source="MOTION + SNIFF").
-4. Anti-Phantom Protection:
-   Standalone cloud bursts (reconnects at 03:00 without acoustics or motion) and isolated
-   keepalives are strictly blocked (0% false alarms).
+2. Tier 2: Degraded Acoustic + EZVIZ Cloud Burst Coincidence:
+   When Shazam detects deurbel frequencies with candidate correlation (NCC >= 0.48) AND
+   the Cloud Sniffer detects an EZVIZ Cloud Burst within a [-1.5s, +1.5s] coincidence window,
+   dispatches call_sm.ring(trigger_source="SHAZAM + SNIFF").
+3. Anti-Motion / Anti-Phantom Protection:
+   Network sniffer cloud bursts NEVER trigger a ring on motion or camera activity alone
+   (Tier 3 MOTION + SNIFF is permanently eliminated). Sniffer runs in passive shadow mode.
 """
 
 from __future__ import annotations
@@ -133,40 +129,12 @@ class RingCoordinator:
                 )
                 return
 
-            # ── Tier 3: Visual / Doorstep Motion Context Fallback ──
-            recent_motion = False
-            motion_reason = ""
-            try:
-                from app.ai_detector import smart_detector
-                if (now - getattr(smart_detector, "_last_person_seen", 0.0)) < 12.0:
-                    recent_motion = True
-                    motion_reason = f"Persoon gezien {(now - smart_detector._last_person_seen):.1f}s geleden"
-                elif (now - getattr(smart_detector, "_last_hardware_motion_time", 0.0)) < 12.0:
-                    recent_motion = True
-                    motion_reason = f"Camera beweging 0x4000 {(now - smart_detector._last_hardware_motion_time):.1f}s geleden"
-                elif (now - getattr(smart_detector, "_last_verified_object_seen", 0.0)) < 12.0:
-                    recent_motion = True
-                    motion_reason = f"Geverifieerde beweging {(now - smart_detector._last_verified_object_seen):.1f}s geleden"
-            except Exception as me:
-                logger.debug("Failed checking motion context for Tier 3: %s", me)
-
-            if recent_motion:
-                logger.info(
-                    "🚨 [RingCoordinator] Tier 3 MATCH: Cloud Burst + %s (Microfoon offline/gedempt). Triggering ring...",
-                    motion_reason,
-                )
-                self._fire_ring_locked(
-                    source="MOTION + SNIFF",
-                    details={"motion_reason": motion_reason, "burst": burst_details},
-                    status="COINCIDENCE_TIER3",
-                )
-                return
-
-            # ── Standalone burst rejected (Anti-Phantom Protection) ──
+            # ── Motion & Standalone Burst Rejection (Zero Phantom Rings on Motion) ──
+            # In accordance with AGENTS.md, cloud packet bursts alone or during motion
+            # MUST NEVER trigger a ring without an acoustic chime candidate (Tier 3 eliminated).
             logger.debug(
-                "🛡️ [RingCoordinator] Cloud Burst rejected: No acoustic chime (NCC < 0.48) and no physical doorstep activity within 12s."
+                "🛡️ [RingCoordinator] Cloud Burst rejected: No acoustic chime candidate within 1.5s (0% phantom rings on motion)."
             )
-            # Standalone sniffer burst without corroboration is silently dropped (0% phantom rings)
 
     def register_signal(self, source: str, details: Optional[Dict[str, Any]] = None) -> None:
         """
