@@ -1511,3 +1511,25 @@ async def sweep_stuck_recordings(max_age_seconds: float = 40.0) -> int:
     return fixed_count
 
 
+async def start_object_recording(clip_id: str, category: str, label: str) -> None:
+    """
+    Public entry point for AI object detection recordings (v3.6.1).
+    Finalizes background video recording, linking pre-roll and updating clip status to READY.
+    """
+    try:
+        from app.ai_detector import smart_detector
+        day_dir = get_day_clip_dir()
+        clip_path = str(day_dir / f"{clip_id}.mp4")
+        thumb_path = str(day_dir / f"thumb_{clip_id}.jpg")
+        await smart_detector._finalize_clip_recording(
+            clip_id=clip_id,
+            clip_path=clip_path,
+            category=category,
+            label=label,
+            clean_snapshot_path=thumb_path,
+        )
+    except Exception as e:
+        logger.error("Error in start_object_recording for %s: %s", clip_id, e)
+
+
+

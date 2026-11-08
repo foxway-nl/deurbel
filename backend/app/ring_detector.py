@@ -1,5 +1,5 @@
 """
-Foxway Smart Doorbell — Infallible 3-Layer 2-Tone "Ding-Dong" Melody State Machine (v3.6.0).
+Foxway Smart Doorbell — Infallible 3-Layer 2-Tone "Ding-Dong" Melody State Machine (v3.6.1).
 
 Physical Characteristics of the Doorbell Chime:
 - Tone 1 (Ding): ~728 Hz (approx 200-250ms), dominant over 570 Hz and ambient noise.
@@ -8,6 +8,7 @@ Physical Characteristics of the Doorbell Chime:
 - 0% False alarms on broadband noise (cries, wind, screeching brakes, clatter, cutlery) via Spectral Peak-to-Neighborhood SNR.
 - 0% False alarms on isolated 728 Hz whistles/tones via strictly enforced sequential Ding -> Dong state machine.
 - Phase- and volume-invariant 2D Log-Spectrogram Envelope Cross-Correlation (NCC >= 0.68).
+- v3.6.1: Added verify_ding_dong_chime() as final validation gate (prescribed exact algorithm).
 """
 
 from __future__ import annotations
@@ -30,6 +31,121 @@ from app.logger import log_shazam_event
 logger = logging.getLogger("foxway.ring_detector")
 
 FINGERPRINT_PATH = "/mnt/opslag/deurbel/backend/app/assets/chime_fingerprint.npz"
+
+
+def verify_ding_dong_chime(
+    audio_window: np.ndarray,
+    sample_rate: int,
+    ref_spec_norm: "np.ndarray | None" = None,
+) -> "tuple[bool, float, str]":
+    """
+    Verifieert of een audio_window (lengte ~0.85s tot 1.2s bij 8000 Hz)
+    de echte tweetonige EZVIZ DB1 Pro deurbel-melodie (728 Hz -> 570 Hz) bevat.
+
+    Exacte implementatie zoals voorgeschreven in v3.6.1 nood-herstelopdracht.
+    Controleert 4 harde criteria tegelijk op een schuivend STFT-venster:
+      1. snr_ding_p1   >= 5.0  (Ding dominant over breedband ruis in eerste deel)
+      2. ratio_ding_p1 >= 1.8  (728 Hz domineert over 570 Hz in eerste deel)
+      3. snr_dong_p2   >= 4.5  (Dong dominant over breedband ruis in tweede deel)
+      4. dong_onset_jump >= 2.0 OR dominance_shift >= 2.5  (duidelijke toonwisseling)
+
+    Sample rate: 8000 Hz (decimeer 16kHz buffer met [::2] vóór aanroep).
+    Retourneert: (is_valid_ring, score, reason)
+    """
+    if len(audio_window) < int(sample_rate * 0.65):
+        return False, 0.0, "window_too_short"
+
+    x = audio_window.astype(np.float32)
+    x = x - np.mean(x)
+    rms = float(np.sqrt(np.mean(x * x)))
+    if rms < 1e-4:
+        return False, 0.0, "silence"
+
+    # STFT: frames van 64ms (512 samples bij 8000 Hz) met 32ms stap (256 samples)
+    n_fft = 512
+    hop = 256
+    window_fn = np.hanning(n_fft).astype(np.float32)
+    num_frames = 1 + (len(x) - n_fft) // hop
+    if num_frames < 12:
+        return False, 0.0, "too_few_frames"
+
+    frames = np.lib.stride_tricks.sliding_window_view(x, n_fft)[::hop][:num_frames]
+    spec = np.abs(np.fft.rfft(frames * window_fn, axis=1)) ** 2  # (num_frames, 257)
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
+
+    # Frequentiebanden
+    # Ding = ~728 Hz (700 - 756 Hz)
+    # Dong = ~570 Hz (545 - 595 Hz)
+    # Breedband-ruisvloer = 320-500 Hz, 620-675 Hz, 800-1200 Hz
+    ding_mask = (freqs >= 700) & (freqs <= 756)
+    dong_mask = (freqs >= 545) & (freqs <= 595)
+    noise_mask = (
+        ((freqs >= 320) & (freqs <= 500))
+        | ((freqs >= 620) & (freqs <= 675))
+        | ((freqs >= 800) & (freqs <= 1200))
+    )
+
+    ding_env = np.max(spec[:, ding_mask], axis=1) if np.any(ding_mask) else np.zeros(num_frames)
+    dong_env = np.max(spec[:, dong_mask], axis=1) if np.any(dong_mask) else np.zeros(num_frames)
+    noise_env = np.mean(spec[:, noise_mask], axis=1) + 1e-9 if np.any(noise_mask) else np.ones(num_frames) * 1e-9
+
+    # Zoek het beste Ding -> Dong overgangspunt (split_idx tussen 25% en 65% van het venster)
+    best_score = 0.0
+    best_reason = "no_two_tone_sequence"
+    is_ring = False
+
+    for split_idx in range(max(3, int(num_frames * 0.25)), min(num_frames - 3, int(num_frames * 0.65) + 1)):
+        # Deel 1 = Ding-fase: frames 0 .. split_idx-1
+        # Deel 2 = Dong-fase: frames split_idx .. num_frames-1
+        ding_p1 = ding_env[:split_idx]
+        dong_p1 = dong_env[:split_idx]
+        noise_p1 = noise_env[:split_idx]
+
+        dong_p2 = dong_env[split_idx:]
+        ding_p2 = ding_env[split_idx:]
+        noise_p2 = noise_env[split_idx:]
+
+        # Criterium 1: SNR van 728 Hz in deel 1
+        snr_ding_p1 = float(np.mean(ding_p1) / (np.mean(noise_p1) + 1e-9))
+
+        # Criterium 2: Ratio 728 Hz t.o.v. 570 Hz in deel 1
+        ratio_ding_over_dong_p1 = float(np.mean(ding_p1) / (np.mean(dong_p1) + 1e-9))
+
+        # Criterium 3: SNR van 570 Hz in deel 2
+        snr_dong_p2 = float(np.mean(dong_p2) / (np.mean(noise_p2) + 1e-9))
+
+        # Criterium 4a: dong onset jump (570 Hz energie stijgt bij overgang)
+        dong_onset_jump = float(np.mean(dong_p2) / (np.mean(dong_p1) + 1e-9))
+
+        # Criterium 4b: dominance shift (Ding domineert deel1, Dong domineert deel2)
+        dom_p1 = float(np.mean(ding_p1) / (np.mean(dong_p1) + 1e-9))
+        dom_p2 = float(np.mean(dong_p2) / (np.mean(ding_p2) + 1e-9))
+        dominance_shift = dom_p1 * dom_p2  # Hoog als beide dominanties groot zijn
+
+        # Samengestelde score (geometrisch gemiddelde van de 4 criteria t.o.v. drempel)
+        c1 = snr_ding_p1 / 5.0
+        c2 = ratio_ding_over_dong_p1 / 1.8
+        c3 = snr_dong_p2 / 4.5
+        c4 = max(dong_onset_jump / 2.0, dominance_shift / 2.5)
+        score = float(np.power(c1 * c2 * c3 * c4, 0.25))  # 4de-machtwortel (geometric mean)
+
+        if score > best_score:
+            best_score = score
+            best_reason = (
+                f"split={split_idx}/{num_frames}, snr_ding={snr_ding_p1:.2f}, "
+                f"ratio_dd={ratio_ding_over_dong_p1:.2f}, snr_dong={snr_dong_p2:.2f}, "
+                f"onset={dong_onset_jump:.2f}, dom_shift={dominance_shift:.2f}"
+            )
+            # Alle 4 criteria moeten tegelijk slagen
+            if (
+                snr_ding_p1 >= 5.0
+                and ratio_ding_over_dong_p1 >= 1.8
+                and snr_dong_p2 >= 4.5
+                and (dong_onset_jump >= 2.0 or dominance_shift >= 2.5)
+            ):
+                is_ring = True
+
+    return is_ring, best_score, best_reason
 
 
 class ShazamChimeDetector:
@@ -221,12 +337,24 @@ class ShazamChimeDetector:
                         best_ncc = ncc
 
         # Approval: Melody sequence (Ding -> Dong) verified OR high envelope NCC >= 0.72 with both peaks present
-        matched = bool(
+        window_rms = float(np.sqrt(np.mean(samples**2))) if len(samples) > 0 else 0.0
+        candidate_match = bool(
             melody_verified
             or (best_ncc >= self.ncc_trigger_threshold and max_snr_ding >= 5.0 and max_snr_dong >= 4.0)
         )
 
-        details = f"Melody={melody_verified}, NCC={best_ncc:.4f}, DingSNR={max_snr_ding:.1f}, DongSNR={max_snr_dong:.1f}"
+        # v3.6.1: Final gate — verify_ding_dong_chime() op 8kHz decimated window
+        matched = False
+        if candidate_match:
+            samples_8k = samples[::2]  # Decimeer 16kHz -> 8kHz
+            vdc_ok, vdc_score, vdc_reason = verify_ding_dong_chime(samples_8k, sample_rate=8000)
+            if vdc_ok:
+                matched = True
+                logger.debug("[verify_ding_dong_chime] PASSED: score=%.3f (%s)", vdc_score, vdc_reason)
+            else:
+                logger.debug("[verify_ding_dong_chime] REJECTED: score=%.3f (%s)", vdc_score, vdc_reason)
+
+        details = f"Melody={melody_verified}, NCC={best_ncc:.4f}, DingSNR={max_snr_ding:.1f}, DongSNR={max_snr_dong:.1f}, RMS={window_rms:.3f}"
 
         if best_ncc >= self.ncc_log_threshold or matched:
             log_shazam_event(
@@ -299,6 +427,8 @@ class ShazamChimeDetector:
 
         # Compute 2D Envelope NCC across window_2s for telemetry & high-confidence fallback
         best_ncc = 0.0
+        window_rms = float(np.sqrt(np.mean(window_2s**2))) if len(window_2s) > 0 else 0.0
+
         if len(window_2s) >= int(1.0 * self.sr) and self._template_norm is not None:
             f, t_stft, Zxx = scipy.signal.stft(window_2s, fs=self.sr, nperseg=1024, noverlap=1024 - 160)
             mag = np.abs(Zxx)
@@ -313,8 +443,25 @@ class ShazamChimeDetector:
                     ncc = float(np.mean(self._template_norm * W_norm))
                     if ncc > best_ncc:
                         best_ncc = ncc
-            if best_ncc >= self.ncc_trigger_threshold:
-                triggered = True
+            if best_ncc >= self.ncc_trigger_threshold and not triggered:
+                # NCC fallback: ook door verify_ding_dong_chime gate (v3.6.1)
+                window_8k = window_2s[::2]
+                vdc_ok, vdc_score, vdc_reason = verify_ding_dong_chime(window_8k, sample_rate=8000)
+                if vdc_ok:
+                    triggered = True
+                    logger.debug("[NCC+verify_ding_dong_chime] PASSED: ncc=%.3f score=%.3f", best_ncc, vdc_score)
+                else:
+                    logger.debug("[NCC fallback BLOCKED by verify_ding_dong_chime]: ncc=%.3f score=%.3f (%s)", best_ncc, vdc_score, vdc_reason)
+
+        # v3.6.1: state-machine triggered also passes through verify_ding_dong_chime gate
+        if triggered and len(window_2s) >= int(1.0 * self.sr):
+            window_8k = window_2s[::2]
+            vdc_ok, vdc_score, vdc_reason = verify_ding_dong_chime(window_8k, sample_rate=8000)
+            if not vdc_ok:
+                logger.info("[State Machine BLOCKED by verify_ding_dong_chime]: score=%.3f (%s) — NOT ringing", vdc_score, vdc_reason)
+                triggered = False
+            else:
+                logger.debug("[State Machine + verify_ding_dong_chime] CONFIRMED: score=%.3f", vdc_score)
 
         if best_ncc >= self.ncc_log_threshold or triggered:
             self._recent_detections.append({
@@ -322,7 +469,7 @@ class ShazamChimeDetector:
                 "ts": now_eval,
                 "ncc": round(float(best_ncc), 4),
                 "matched": bool(triggered),
-                "details": f"DingSNR={snr_ding:.1f}, DongSNR={snr_dong:.1f}, NCC={best_ncc:.4f}",
+                "details": f"DingSNR={snr_ding:.1f}, DongSNR={snr_dong:.1f}, NCC={best_ncc:.4f}, RMS={window_rms:.3f}",
             })
 
         # Register acoustic candidate with RingCoordinator

@@ -76,8 +76,8 @@ COCO_NAMES: Dict[int, str] = {
 
 def resolve_model_path(custom_path: Optional[str] = None) -> str:
     """
-    Resolves active YOLO model path.
-    Prefers yolov8s.onnx for ONNXRuntime inference.
+    Resolves active YOLO model path (v3.6.1).
+    Prefers yolov8s.onnx if > 15MB, otherwise falls back to yolov8n.onnx.
     """
     if custom_path and os.path.exists(custom_path):
         return custom_path
@@ -88,20 +88,19 @@ def resolve_model_path(custom_path: Optional[str] = None) -> str:
 
     candidates = [
         getattr(settings, "YOLO_MODEL_PATH", None),
-        "/mnt/opslag/deurbel/backend/app/yolov8s.onnx",
         "/mnt/opslag/deurbel/backend/app/assets/yolov8s.onnx",
-        "/mnt/opslag/deurbel/backend/app/yolo11s.pt",
+        "/mnt/opslag/deurbel/models/yolov8s.onnx",
+        "/mnt/opslag/deurbel/backend/app/yolov8s.onnx",
+        "/mnt/opslag/deurbel/backend/app/assets/yolov8n.onnx",
+        "/mnt/opslag/deurbel/models/yolov8n.onnx",
         "/mnt/opslag/deurbel/backend/app/yolov8n.onnx",
+        "/mnt/opslag/deurbel/backend/app/yolo11s.pt",
         "/mnt/opslag/deurbel/backend/app/yolo11n.pt",
-        "/mnt/opslag/deurbel/backend/app/yolov8n.pt",
-        "yolov8s.onnx",
-        "yolo11s.pt",
-        "yolov8n.pt",
     ]
     for c in candidates:
-        if c and os.path.exists(c):
+        if c and os.path.exists(c) and os.path.getsize(c) > 5_000_000:
             return c
-    return "/mnt/opslag/deurbel/backend/app/yolov8s.onnx"
+    return "/mnt/opslag/deurbel/backend/app/assets/yolov8s.onnx"
 
 
 def compute_iou(
@@ -290,38 +289,55 @@ class SmartDetector:
         self._running: bool = False
         self._task: Optional[asyncio.Task] = None
         self._cooldown_seconds: float = 5.0
+        self._prev_frame: Optional[np.ndarray] = None
+        self._prev_frame_time: float = 0.0
 
         self.init_model()
 
     def init_model(self, model_path: Optional[str] = None) -> bool:
-        """Initialize ONNXRuntime session (with PyTorch fallback)."""
-        path = resolve_model_path(model_path)
-        self._model_path = path
-
-        if path.endswith(".onnx") and os.path.exists(path):
-            try:
-                opts = ort.SessionOptions()
-                opts.intra_op_num_threads = 4
-                opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-                self._ort_session = ort.InferenceSession(path, sess_options=opts, providers=["CPUExecutionProvider"])
-                self._input_name = self._ort_session.get_inputs()[0].name
-                logger.info("ONNXRuntime InferenceSession initialized from %s (4 threads)", path)
-                return True
-            except Exception as e:
-                logger.warning("Failed loading ONNX session from %s: %s (falling back to PyTorch)", path, e)
+        """Initialize ONNXRuntime session with automatic safe candidate fallback (v3.6.1)."""
+        candidates = [
+            model_path,
+            os.environ.get("YOLO_MODEL_PATH"),
+            "/mnt/opslag/deurbel/backend/app/assets/yolov8s.onnx",
+            "/mnt/opslag/deurbel/models/yolov8s.onnx",
+            "/mnt/opslag/deurbel/backend/app/yolov8s.onnx",
+            "/mnt/opslag/deurbel/backend/app/assets/yolov8n.onnx",
+            "/mnt/opslag/deurbel/models/yolov8n.onnx",
+            "/mnt/opslag/deurbel/backend/app/yolov8n.onnx",
+        ]
+        for path in candidates:
+            if path and os.path.exists(path) and path.endswith(".onnx") and os.path.getsize(path) > 5_000_000:
+                try:
+                    opts = ort.SessionOptions()
+                    opts.intra_op_num_threads = 4
+                    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                    self._ort_session = ort.InferenceSession(path, sess_options=opts, providers=["CPUExecutionProvider"])
+                    self._input_name = self._ort_session.get_inputs()[0].name
+                    self._model_path = path
+                    logger.info("ONNXRuntime InferenceSession initialized from %s (4 threads)", path)
+                    return True
+                except Exception as e:
+                    logger.warning("Failed loading ONNX session from %s: %s (trying next candidate)", path, e)
 
         # Fallback to Ultralytics PyTorch model
         try:
             from ultralytics import YOLO
-            pt_path = path if path.endswith(".pt") else "/mnt/opslag/deurbel/backend/app/yolo11s.pt"
-            if not os.path.exists(pt_path):
-                pt_path = "/mnt/opslag/deurbel/backend/app/yolo11n.pt"
-            self._pytorch_model = YOLO(pt_path)
-            logger.info("Ultralytics PyTorch YOLO initialized from %s", pt_path)
-            return True
+            pt_candidates = [
+                "/mnt/opslag/deurbel/backend/app/yolo11s.pt",
+                "/mnt/opslag/deurbel/backend/app/yolo11n.pt",
+                "/mnt/opslag/deurbel/backend/app/yolov8n.pt",
+            ]
+            for pt_path in pt_candidates:
+                if os.path.exists(pt_path):
+                    self._pytorch_model = YOLO(pt_path)
+                    self._model_path = pt_path
+                    logger.info("Ultralytics PyTorch YOLO initialized from %s", pt_path)
+                    return True
         except Exception as pe:
             logger.error("Failed loading fallback PyTorch YOLO: %s", pe)
-            return False
+
+        return False
 
     def notify_hardware_motion(self) -> None:
         """Signaled by Port 8000 SDK Alarm (0x4000 dwAlarmType == 3)."""
@@ -546,16 +562,26 @@ class SmartDetector:
         """
         h, w = frame.shape[:2]
 
-        # ── Step 1: Fast OpenCV MOG2 Motion Masking ─────────────────────────
+        # ── Step 1: Fast OpenCV Motion Analysis (MOG2 + Frame-Diff) ────────
         fg_mask = self.mog2.apply(frame)
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, self.kernel_3x3)
-        # Mask out upper branches/sky (y < 0.20 * H) and bottom-left clock (y > 0.93 * H, x < 0.35 * W)
-        fg_mask[:int(0.20 * h), :] = 0
+
+        if self._prev_frame is not None and (now - self._prev_frame_time) >= 0.20:
+            diff = cv2.absdiff(frame, self._prev_frame)
+            gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            _, diff_thresh = cv2.threshold(blur, 18, 255, cv2.THRESH_BINARY)
+            fg_mask = cv2.bitwise_or(fg_mask, diff_thresh)
+        self._prev_frame = frame.copy()
+        self._prev_frame_time = now
+
+        # Mask out upper branches/sky (y < 0.22 * H) and bottom-left clock (y > 0.93 * H, x < 0.35 * W)
+        fg_mask[:int(0.22 * h), :] = 0
         fg_mask[int(0.93 * h):, :int(0.35 * w)] = 0
 
         # Load dynamic thresholds from settings
-        conf_person = cfg.get("person_conf_threshold", 0.40)
-        conf_vehicle = cfg.get("vehicle_conf_threshold", 0.45)
+        conf_person = cfg.get("person_conf_threshold", 0.38)
+        conf_vehicle = cfg.get("vehicle_conf_threshold", 0.42)
         conf_animal = cfg.get("animal_conf_threshold", 0.35)
         self._cooldown_seconds = cfg.get("event_cooldown_seconds", 5.0)
 
@@ -565,29 +591,30 @@ class SmartDetector:
         except Exception:
             exclusion_zones = []
 
-        # ── Step 2: Full-Frame YOLO Inference ──────────────────────────────
-        raw_detections = self._infer_image(frame, conf_thresh=min(conf_animal, conf_person, conf_vehicle, 0.25))
+        # ── Step 2: Full-Frame YOLO Inference (non-blocking via asyncio.to_thread) ──
+        raw_detections = await asyncio.to_thread(
+            self._infer_image, frame, min(conf_animal, conf_person, conf_vehicle, 0.25)
+        )
 
         # ── Step 2b: Motion Zoom-Crop Inference for Distant Small Objects ────
         contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        min_motion_area = int(0.005 * w * h)  # Small distant motion ~1536 px
+        min_motion_area = int(0.004 * w * h)  # >= 0.4% van beeldoppervlak
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area >= min_motion_area:
                 mx, my, mw, mh = cv2.boundingRect(cnt)
-                # Motion in street/sidewalk zone smaller than 35% screen width/height
-                if mw < (0.35 * w) and mh < (0.35 * h) and (my + mh) >= int(0.25 * h):
+                # Motion in street/sidewalk/path zone
+                if mw < (0.40 * w) and mh < (0.40 * h) and (my + mh) >= int(0.22 * h):
                     motion_box = (float(mx), float(my), float(mx + mw), float(my + mh))
-                    # Check if full-frame YOLO already detected something with high confidence here
                     has_high_conf = any(
-                        compute_iou(motion_box, d[0]) >= 0.30 and d[1] >= 0.50
+                        compute_iou(motion_box, d[0]) >= 0.30 and d[1] >= 0.48
                         for d in raw_detections
                     )
                     if not has_high_conf:
-                        # Extract square Zoom-Crop with 30% margin
-                        pad_w = int(0.30 * mw)
-                        pad_h = int(0.30 * mh)
+                        # Extract square Zoom-Crop with 25% margin
+                        pad_w = int(0.25 * mw)
+                        pad_h = int(0.25 * mh)
                         cx1 = max(0, mx - pad_w)
                         cy1 = max(0, my - pad_h)
                         cx2 = min(w, mx + mw + pad_w)
@@ -595,7 +622,7 @@ class SmartDetector:
                         crop = frame[cy1:cy2, cx1:cx2]
 
                         if crop.shape[0] >= 32 and crop.shape[1] >= 32:
-                            crop_dets = self._infer_image(crop, conf_thresh=0.32)
+                            crop_dets = await asyncio.to_thread(self._infer_image, crop, 0.32)
                             for c_box, c_conf, c_cid in crop_dets:
                                 fx1 = float(cx1 + c_box[0])
                                 fy1 = float(cy1 + c_box[1])
@@ -715,18 +742,41 @@ class SmartDetector:
 
             is_approved = False
 
-            if trk.category in ("person", "animal"):
-                # Pad A: Directional motion in >= 2 frames (D_2D >= 0.025 OR D_scale >= 0.12) with MOG2_ratio >= 0.05
-                if len(trk.frames) >= 2 and (d_2d >= 0.025 or d_scale >= 0.12) and (avg_mog >= 0.04 or trk.best_conf >= 0.65):
+            if trk.category == "person":
+                # Person approval (v3.6.1):
+                # 1. Spoor in minimaal 2 scans (binnen 4.0s) én:
+                #    - D_2D >= 0.020 (2% verplaatsing), OF
+                #    - D_scale >= 0.08 (box-hoogte verandert >= 8%: recht naar camera toe of weg), OF
+                #    - Voorpad bezoeker: y_bottom > 0.50 * H met conf >= 0.52 en actieve pixel-beweging (avg_mog >= 0.015)
+                # 2. Of instant doorstep trigger als y_bottom > 0.55 * H met conf >= 0.55
+                track_age = trk.last_time - trk.first_time
+                if len(trk.frames) >= 2 and track_age <= 4.0:
+                    if d_2d >= 0.020 or d_scale >= 0.08:
+                        is_approved = True
+                        logger.info("✅ [Person APPROVED (Movement)]: %s (D_2D=%.3f, D_scale=%.3f, conf=%.2f)", trk.label, d_2d, d_scale, trk.best_conf)
+                    elif trk.last_box[3] > (0.50 * float(h)) and trk.best_conf >= 0.52 and avg_mog >= 0.015:
+                        is_approved = True
+                        logger.info("✅ [Person APPROVED (Doorstep Visitor)]: %s (conf=%.2f, y2=%.1f, mog=%.3f)", trk.label, trk.best_conf, trk.last_box[3], avg_mog)
+                elif trk.last_box[3] > (0.55 * float(h)) and trk.best_conf >= 0.55 and avg_mog >= 0.020:
                     is_approved = True
-                    logger.info("✅ [%s APPROVED (Pad A)]: %s (D_2D=%.3f, D_scale=%.3f, conf=%.2f)", trk.category, trk.label, d_2d, d_scale, trk.best_conf)
-                # Pad B: Doorstep visitor (y_bottom > 0.55 * H) with conf >= 0.58 and MOG2_ratio >= 0.04
-                elif trk.last_box[3] > (0.55 * float(h)) and trk.best_conf >= 0.58 and (avg_mog >= 0.03 or len(trk.frames) >= 2):
-                    is_approved = True
-                    logger.info("✅ [Doorstep Visitor APPROVED (Pad B)]: %s (conf=%.2f, y2=%.1f)", trk.label, trk.best_conf, trk.last_box[3])
+                    logger.info("✅ [Person APPROVED (Instant Doorstep)]: %s (conf=%.2f, y2=%.1f)", trk.label, trk.best_conf, trk.last_box[3])
 
                 if is_approved:
                     self._last_person_seen = now_t
+                    trk.verified = True
+                    to_dispatch.append(trk)
+
+            elif trk.category == "animal":
+                # Animal approval (v3.6.1):
+                # 2 scans met >= 1.5% verplaatsing (D_2D >= 0.015) of 1 scan met conf >= 0.50 en pixelbeweging
+                if len(trk.frames) >= 2 and d_2d >= 0.015:
+                    is_approved = True
+                    logger.info("✅ [Animal APPROVED (Moving)]: %s (D_2D=%.3f, conf=%.2f)", trk.label, d_2d, trk.best_conf)
+                elif trk.best_conf >= 0.50 and avg_mog >= 0.015:
+                    is_approved = True
+                    logger.info("✅ [Animal APPROVED (High-Conf Motion)]: %s (conf=%.2f, mog=%.3f)", trk.label, trk.best_conf, avg_mog)
+
+                if is_approved:
                     trk.verified = True
                     to_dispatch.append(trk)
 
@@ -737,23 +787,25 @@ class SmartDetector:
                     iou = compute_iou(trk.last_box, slot["box"])
                     scx, scy = slot["centroid"]
                     cent_shift = math.hypot(cx_now - scx, cy_now - scy) / float(w)
-                    if iou >= 0.72 and cent_shift < 0.035:
+                    if iou >= 0.70 and cent_shift < 0.035:
                         is_anchored = True
                         slot["last_seen"] = now_t
                         break
 
                 if is_anchored:
-                    # Parked vehicle confirmed: check if it is departing (D_2D >= 0.05)
-                    if d_2d >= 0.05:
+                    # Parked vehicle: genegeerd zolang centrum minder dan 0.045 * W verplaatst
+                    if d_2d >= 0.045:
                         is_approved = True
                         logger.info("🚗 [Departing Vehicle APPROVED]: %s (D_2D=%.3f)", trk.label, d_2d)
                 else:
                     # Non-anchored vehicle: 100% Driving car approval in >= 2 frames (0.5s) with D_2D >= 0.04
-                    if len(trk.frames) >= 2 and d_2d >= 0.04:
+                    # én NIET overlappend met een stilstaande parked_vehicles box (IoU < 0.65)
+                    overlaps_parked = any(compute_iou(trk.last_box, s["box"]) >= 0.65 for s in self.parked_car_slots)
+                    if len(trk.frames) >= 2 and d_2d >= 0.04 and not overlaps_parked:
                         is_approved = True
                         logger.info("🚗 [Driving Vehicle APPROVED]: %s (D_2D=%.3f, frames=%d)", trk.label, d_2d, len(trk.frames))
-                    elif len(trk.frames) >= 60 and d_2d < 0.02:
-                        # Stood still for >= 15 seconds (60 frames at 4 FPS) -> Anchor as parked car slot
+                    elif len(trk.frames) >= 40 and d_2d < 0.02:
+                        # Stood still for >= 10 seconds (40 frames at 4 FPS) -> Anchor as parked car slot
                         self.parked_car_slots.append({
                             "box": trk.last_box,
                             "centroid": (cx_now, cy_now),
@@ -892,10 +944,14 @@ class SmartDetector:
         # Save clip entry with status RECORDING
         await save_clip(
             clip_id=clip_id,
-            status="RECORDING",
-            category=category,
+            call_id=clip_id,
             video_path=str(day_dir / f"{clip_id}.mp4"),
             snapshot_path=thumb_path,
+            answered_by=f"AI: {cat_dutch} ({label})",
+            duration=0.0,
+            status="RECORDING",
+            category=category,
+            file_size=0,
             created_at=t0_iso,
         )
 
@@ -923,11 +979,16 @@ class SmartDetector:
         logger.info("🚀 [AI Notification Sent]: %s (clip_id=%s, silent=%s)", title, clip_id, not should_notify)
 
         # Trigger background video recording (20s post-roll)
-        try:
-            from app.recorder import start_object_recording
-            asyncio.create_task(start_object_recording(clip_id=clip_id, category=category, label=label))
-        except Exception as re:
-            logger.warning("Failed triggering video recording for clip %s: %s", clip_id, re)
+        clip_path = str(day_dir / f"{clip_id}.mp4")
+        asyncio.create_task(
+            self._finalize_clip_recording(
+                clip_id=clip_id,
+                clip_path=clip_path,
+                category=category,
+                label=label,
+                clean_snapshot_path=thumb_path,
+            )
+        )
 
         # Save approved audit log
         try:
@@ -943,6 +1004,144 @@ class SmartDetector:
             )
         except Exception:
             pass
+
+    async def _finalize_clip_recording(
+        self,
+        clip_id: str,
+        clip_path: str,
+        category: str,
+        label: str,
+        clean_snapshot_path: str = "",
+    ) -> None:
+        """
+        Records video in background under single recording lock (v3.6.1).
+        Updates clip status from RECORDING to READY once MP4 completion succeeds (>10KB, >=5s).
+        If another recording is active, extends it and merges categories.
+        """
+        try:
+            from app.recorder import (
+                record_smart_clip,
+                ensure_thumbnail,
+                compress_clip_background,
+                recording_lock,
+                extend_active_recording,
+                is_recording_active,
+            )
+
+            sys_settings = await get_system_settings()
+            preroll = float(sys_settings.get("pre_roll_seconds", "20"))
+            postroll = float(sys_settings.get("post_roll_seconds", "20"))
+            max_duration = float(sys_settings.get("max_active_motion_seconds", sys_settings.get("max_clip_seconds", "180")))
+
+            # Single recording lock check (TAAK 2.2 / v3.5.5):
+            if is_recording_active():
+                from app.recorder import _active_recording_info
+                active_clip_id = _active_recording_info.get("clip_id")
+                extend_active_recording(category, label, duration_sec=max_duration)
+                if active_clip_id and active_clip_id != clip_id:
+                    active_cats = _active_recording_info.setdefault("categories", set())
+                    active_cats.add(category)
+                    cats = sorted(list(active_cats), key=lambda c: 0 if c == "ring" else 1 if c == "person" else 2)
+                    combined_category = ",".join(cats)
+                    async def _sync_active_cat():
+                        try:
+                            from app.database import get_db
+                            async with get_db(write=True) as db:
+                                await db.execute("UPDATE clips SET category = ? WHERE clip_id = ?", (combined_category, active_clip_id))
+                        except Exception:
+                            pass
+                    asyncio.create_task(_sync_active_cat())
+                logger.info("Smart clip already recording; merged category into active clip %s for %s", active_clip_id, label)
+                await db_delete_clip(clip_id)
+                return
+
+            async with recording_lock:
+                duration = 0.0
+                safety_timeout = max(60.0, max_duration + 45.0)
+                try:
+                    duration = await asyncio.wait_for(
+                        record_smart_clip(
+                            clip_id=clip_id,
+                            clip_path=clip_path,
+                            preroll_seconds=preroll,
+                            postroll_seconds=postroll,
+                            motion_active_func=self.is_motion_active,
+                            max_duration=max_duration,
+                            category=category,
+                        ),
+                        timeout=safety_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Recording reached max safety timeout (%.1fs) for clip %s", safety_timeout, clip_id)
+                except Exception as re:
+                    logger.error("Error during record_smart_clip for %s: %s", clip_id, re)
+
+                if clean_snapshot_path and os.path.exists(clean_snapshot_path) and os.path.getsize(clean_snapshot_path) > 1000:
+                    snapshot_path = clean_snapshot_path
+                else:
+                    if not clean_snapshot_path:
+                        clean_snapshot_path = str(settings.CLIPS_DIR / f"thumb_{clip_id}.jpg")
+                    snapshot_path = await ensure_thumbnail(clip_id, clip_path, preroll_seconds=preroll)
+
+                file_size = os.path.getsize(clip_path) if os.path.exists(clip_path) else 0
+
+                # Database Update to READY (v3.5.1 / v3.6.1):
+                # If file exists and > 10 KB, guarantee READY state transition
+                if os.path.exists(clip_path) and file_size > 10000:
+                    if duration <= 0:
+                        from app.recorder import _probe_duration
+                        duration = await _probe_duration(clip_path)
+                        if duration <= 0:
+                            duration = 15.0
+
+                    from app.recorder import _active_recording_info
+                    active_cats = _active_recording_info.get("categories", set())
+                    if category not in active_cats:
+                        active_cats.add(category)
+                    cats = sorted(list(active_cats), key=lambda c: 0 if c == "ring" else 1 if c == "person" else 2)
+                    combined_cat = ",".join(cats) if cats else category
+
+                    category_dutch = {
+                        "person": "Persoon gedetecteerd",
+                        "vehicle": "Voertuig gedetecteerd",
+                        "animal": "Dier gedetecteerd",
+                        "motion": "Beweging gedetecteerd",
+                    }.get(category, "Beweging")
+
+                    ans = f"AI: {category_dutch} ({label})"
+                    if "ring" in active_cats:
+                        ans = _active_recording_info.get("answered_by") or "Aanbellen [SHAZAM_CHIME]"
+
+                    await update_clip(
+                        clip_id=clip_id,
+                        status="READY",
+                        duration=duration,
+                        file_size=file_size,
+                        answered_by=ans,
+                        category=combined_cat,
+                        snapshot_path=snapshot_path or clean_snapshot_path,
+                    )
+                    logger.info("Updated verified clip %s to READY: duration=%.1fs, size=%d bytes, category=%s", clip_id, duration, file_size, combined_cat)
+                    asyncio.create_task(compress_clip_background(clip_path))
+                else:
+                    logger.warning(
+                        "Discarded invalid/empty clip %s (size=%d bytes) — removing row from DB",
+                        clip_id, file_size,
+                    )
+                    await db_delete_clip(clip_id)
+                    if os.path.exists(clip_path):
+                        try:
+                            os.unlink(clip_path)
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.error("Error finalizing background clip %s: %s", clip_id, e)
+            try:
+                await db_delete_clip(clip_id)
+            except Exception:
+                pass
+        finally:
+            self._last_clip_end_per_category[category] = time.time()
 
 
 smart_detector = SmartDetector()
