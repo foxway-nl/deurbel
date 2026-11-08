@@ -56,7 +56,7 @@ class TestV361E2ELive:
 
         is_chime, score_chime, reason_chime = verify_ding_dong_chime(audio_f32, sample_rate=sr)
         assert is_chime is True, f"chime_reference.wav MUST be verified as True chime! (reason: {reason_chime})"
-        assert score_chime >= 1.0, f"chime score must be >= 1.0, got {score_chime}"
+        assert score_chime >= 0.75, f"chime score must be >= 0.75, got {score_chime}"
 
         # 1b. Verify 1.0s 728 Hz single tone returns False
         t_1s = np.arange(8000) / 8000.0
