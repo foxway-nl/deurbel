@@ -1,36 +1,30 @@
 """
-Foxway Smart Doorbell — High-Precision 3D-Trajectory & Multi-Scale Vision AI Engine (v3.6.0).
+Foxway Smart Doorbell — High-Precision 3D-Trajectory & True Dual-Scale Vision AI Engine (v3.6.3).
 
-Architecture:
-1. Fast OpenCV MOG2 Motion Analysis (4 FPS / 0.25s cadence):
-   - cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=25, detectShadows=False)
-   - Morphological 3x3 opening.
-   - Masks upper tree canopy / sky (y < 0.20 * H) and bottom-left clock (y > 0.93 * H, x < 0.35 * W).
-2. Dual-Scale Inference (Full-Frame + Motion Zoom-Crop):
-   - Fast full-frame ONNXRuntime inference (yolov8s.onnx / yolov8n.onnx with intra_op_num_threads=4).
-   - Motion Zoom-Crop (ROI with 30% margin) for small distant motion (<35% screen) to catch pedestrians,
-     cyclists, and pets at 8-15m with 2x-3x higher clarity.
-3. Pure Object Class Mapping:
-   - 'person': COCO 0 (person), prioritizing rider over bicycle (1) or motorcycle (3).
-   - 'vehicle': COCO 2 (car), 5 (bus), 7 (truck), and 1/3 when unaccompanied.
-   - 'animal': COCO 14 (bird), 15 (cat), 16 (dog), 17 (horse), 18 (sheep), 19 (cow).
-4. True 3D Motion Tracker:
-   - 2D Euclidean displacement: D_2D = sqrt((dx/W)^2 + (dy/H)^2).
-   - Depth/Scale change: D_scale = max(h_now, h_start) / min(h_now, h_start) - 1.0 (approaching/leaving).
-   - MOG2 foreground ratio inside bounding box.
-   - Path A (Directional motion over >=2 frames): D_2D >= 0.025 OR D_scale >= 0.12 with MOG2_ratio >= 0.05.
-   - Path B (Doorstep visitor): y_bottom > 0.55 * H with conf >= 0.58 and MOG2_ratio >= 0.04 -> Instant trigger!
-5. Stationary Parked-Car Baseline Memory:
-   - Vehicles stationary for >= 15s (D_2D < 0.02) are anchored.
-   - Filtered ONLY if IoU >= 0.72 AND centroid shift < 0.035 * W.
-   - 100% Driving Cars captured: D_2D >= 0.04 over 2 frames (0.5s) triggers immediately.
-   - Parked anchors NEVER suppress persons, bicycles, or animals.
+Fixes in v3.6.3:
+1. Ongoing Motion Keep-Alive for Verified Tracks:
+   Verified tracks that continue moving in front of the camera continuously update
+   `_last_verified_object_seen` and call `extend_active_recording()` so clips NEVER stop while
+   someone is still moving in frame.
+2. Native High-Res Motion Zoom-Crop + Cross-Scale NMS:
+   Slices the Motion ROI directly from the full-resolution camera frame (`raw_frame`) before
+   resizing to 640x640 for YOLO, and deduplicates overlapping boxes between full-frame and crop.
+3. Sliding-Window Trajectory Evaluation (No 4.0s Track-Death Bug):
+   Evaluates displacement over a sliding window of the track's history rather than permanently
+   ignoring tracks older than 4.0s.
+4. Cross-Category Rider/Pedestrian Continuity:
+   Associates person <-> bicycle/motorcycle tracks smoothly so cyclists or people carrying bags
+   never reset their frame counter mid-path.
+5. Fast Parked-Car Anchoring (3.0s / 12 frames) + Directional Consistency:
+   Anchors stationary cars within 3 seconds and requires consistent directional movement for
+   vehicles so headlight glare or shadows on parked cars never trigger false clips.
+6. Clean Active-Recording Merge:
+   Merges new categories directly into an active recording without creating/deleting ghost DB rows.
 """
 
 from __future__ import annotations
 
 import asyncio
-import collections
 import json
 import logging
 import math
@@ -38,8 +32,7 @@ import os
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -47,17 +40,14 @@ import onnxruntime as ort
 
 from app.config import settings
 from app.models import (
-    get_setting,
-    set_setting,
-    get_system_setting,
-    get_system_settings,
-    save_clip,
-    update_clip,
     delete_clip as db_delete_clip,
-    save_event,
+    get_system_settings,
     save_ai_audit_log,
+    save_clip,
+    save_event,
+    update_clip,
 )
-from app.push_service import push_event, ws_manager
+from app.push_service import push_event
 
 logger = logging.getLogger("foxway.ai_detector")
 
@@ -68,15 +58,23 @@ ANIMAL_CLASSES: Set[int] = {14, 15, 16, 17, 18, 19}  # bird, cat, dog, horse, sh
 
 COCO_NAMES: Dict[int, str] = {
     0: "Persoon",
-    1: "Fiets", 2: "Auto", 3: "Motor", 5: "Bus", 7: "Vrachtwagen",
-    14: "Vogel", 15: "Kat", 16: "Hond",
-    17: "Paard", 18: "Schaap", 19: "Koe",
+    1: "Fiets",
+    2: "Auto",
+    3: "Motor",
+    5: "Bus",
+    7: "Vrachtwagen",
+    14: "Vogel",
+    15: "Kat",
+    16: "Hond",
+    17: "Paard",
+    18: "Schaap",
+    19: "Koe",
 }
 
 
 def resolve_model_path(custom_path: Optional[str] = None) -> str:
     """
-    Resolves active YOLO model path (v3.6.1).
+    Resolves active YOLO model path (v3.6.3).
     Prefers yolov8s.onnx if > 15MB, otherwise falls back to yolov8n.onnx.
     """
     if custom_path and os.path.exists(custom_path):
@@ -147,14 +145,22 @@ async def get_mainstream_rtsp() -> str:
 
 
 class DetectionSettings:
-    """Helper to load system detection configuration from SQLite."""
+    """Helper to load system detection configuration from SQLite (respecting all /admin & app keys)."""
 
     @staticmethod
     async def load() -> Dict[str, Any]:
         try:
             raw = await get_system_settings()
+            det_enabled_raw = raw.get("detection_enabled", raw.get("smart_ai_enabled", "true"))
+            p_conf = raw.get("person_conf_threshold", raw.get("conf_person", "0.38"))
+            v_conf = raw.get("vehicle_conf_threshold", raw.get("conf_vehicle", "0.42"))
+            a_conf = raw.get("animal_conf_threshold", raw.get("conf_animal", "0.35"))
+            cooldown = raw.get("event_cooldown_seconds", raw.get("cooldown_seconds", "5.0"))
+            min_disp_v = raw.get("min_displacement_vehicle", raw.get("vehicle_min_displacement", "0.045"))
+            min_disp_p = raw.get("min_displacement_person", raw.get("person_min_displacement", "0.020"))
+
             return {
-                "detection_enabled": str(raw.get("detection_enabled", "true")).lower() in ("true", "1"),
+                "detection_enabled": str(det_enabled_raw).lower() in ("true", "1"),
                 "record_person": str(raw.get("record_person", "true")).lower() in ("true", "1"),
                 "notify_person": str(raw.get("notify_person", "true")).lower() in ("true", "1"),
                 "record_vehicle": str(raw.get("record_vehicle", "true")).lower() in ("true", "1"),
@@ -166,10 +172,12 @@ class DetectionSettings:
                 "quiet_hours_enabled": str(raw.get("quiet_hours_enabled", "true")).lower() in ("true", "1"),
                 "quiet_hours_start": raw.get("quiet_hours_start", "23:30"),
                 "quiet_hours_end": raw.get("quiet_hours_end", "07:30"),
-                "person_conf_threshold": float(raw.get("person_conf_threshold", "0.40")),
-                "vehicle_conf_threshold": float(raw.get("vehicle_conf_threshold", "0.45")),
-                "animal_conf_threshold": float(raw.get("animal_conf_threshold", "0.35")),
-                "event_cooldown_seconds": float(raw.get("event_cooldown_seconds", "5.0")),
+                "person_conf_threshold": float(p_conf),
+                "vehicle_conf_threshold": float(v_conf),
+                "animal_conf_threshold": float(a_conf),
+                "event_cooldown_seconds": float(cooldown),
+                "min_displacement_vehicle": float(min_disp_v),
+                "min_displacement_person": float(min_disp_p),
                 "exclusion_zones": raw.get("exclusion_zones", "[]"),
             }
         except Exception:
@@ -186,10 +194,12 @@ class DetectionSettings:
                 "quiet_hours_enabled": True,
                 "quiet_hours_start": "23:30",
                 "quiet_hours_end": "07:30",
-                "person_conf_threshold": 0.40,
-                "vehicle_conf_threshold": 0.45,
+                "person_conf_threshold": 0.38,
+                "vehicle_conf_threshold": 0.42,
                 "animal_conf_threshold": 0.35,
                 "event_cooldown_seconds": 5.0,
+                "min_displacement_vehicle": 0.045,
+                "min_displacement_person": 0.020,
                 "exclusion_zones": "[]",
             }
 
@@ -247,12 +257,13 @@ class TrackedTrajectory:
         self.frames: List[Tuple[float, Tuple[float, float, float, float], float]] = [(timestamp, box, confidence)]
         self.mog2_ratios: List[float] = [mog2_ratio]
         self.verified = False
+        self.disp_pct: float = 0.0
 
 
 class SmartDetector:
     """
-    High-Precision 3D-Trajectory & Multi-Scale Vision AI Engine (v3.6.0).
-    Runs at 4 FPS (0.25s cadence) with MOG2 + Full-Frame + Motion Zoom-Crop Inference.
+    High-Precision 3D-Trajectory & Multi-Scale Vision AI Engine (v3.6.3).
+    Runs at 4 FPS with MOG2 + Full-Frame + High-Res Motion Zoom-Crop Inference.
     """
 
     def __init__(self):
@@ -262,10 +273,10 @@ class SmartDetector:
         self._pytorch_model = None
 
         # Background Subtractor MOG2 for motion analysis
-        self.mog2 = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=25, detectShadows=False)
+        self.mog2 = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=22, detectShadows=False)
         self.kernel_3x3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 
-        # Parked Car Baseline Memory (slots stationary for >= 15s)
+        # Parked Car Baseline Memory
         # Format: {"box": (x1, y1, x2, y2), "centroid": (cx, cy), "anchored_since": ts, "last_seen": ts}
         self.parked_car_slots: List[Dict[str, Any]] = []
         self.stationary_vehicles: List[Dict[str, Any]] = []
@@ -295,7 +306,7 @@ class SmartDetector:
         self.init_model()
 
     def init_model(self, model_path: Optional[str] = None) -> bool:
-        """Initialize ONNXRuntime session with automatic safe candidate fallback (v3.6.1)."""
+        """Initialize ONNXRuntime session with automatic safe candidate fallback."""
         candidates = [
             model_path,
             os.environ.get("YOLO_MODEL_PATH"),
@@ -320,7 +331,6 @@ class SmartDetector:
                 except Exception as e:
                     logger.warning("Failed loading ONNX session from %s: %s (trying next candidate)", path, e)
 
-        # Fallback to Ultralytics PyTorch model
         try:
             from ultralytics import YOLO
             pt_candidates = [
@@ -342,32 +352,32 @@ class SmartDetector:
     def notify_hardware_motion(self) -> None:
         """Signaled by Port 8000 SDK Alarm (0x4000 dwAlarmType == 3)."""
         self._last_hardware_motion_time = time.time()
-        logger.debug("Port 8000 hardware motion received")
         try:
-            from app.recorder import notify_ongoing_motion
-            notify_ongoing_motion(category="motion", label="Beweging")
+            from app.recorder import is_recording_active, notify_ongoing_motion
+            if is_recording_active():
+                notify_ongoing_motion(category="motion", label="Beweging")
         except Exception:
             pass
 
     def is_motion_active(self) -> bool:
-        """Check if verified object motion or camera hardware motion was detected within last 3.0s."""
+        """Check if verified object motion or camera hardware motion was detected within last 3.5s."""
         now = time.time()
-        return (now - self._last_verified_object_seen) < 3.0 or (now - self._last_hardware_motion_time) < 3.0
+        return (now - self._last_verified_object_seen) < 3.5 or (now - self._last_hardware_motion_time) < 3.5
 
-    def _infer_image(self, img_bgr: np.ndarray, conf_thresh: float = 0.25) -> List[Tuple[Tuple[float, float, float, float], float, int]]:
+    def _infer_image(
+        self, img_bgr: np.ndarray, conf_thresh: float = 0.25
+    ) -> List[Tuple[Tuple[float, float, float, float], float, int]]:
         """
         Runs YOLO inference on an image (BGR).
-        Returns list of ((x1, y1, x2, y2), confidence, class_id).
+        Returns list of ((x1, y1, x2, y2), confidence, class_id) in `img_bgr` coordinates.
         """
         h_orig, w_orig = img_bgr.shape[:2]
         if self._ort_session is not None:
             try:
-                # Preprocess: direct resize to 640x640, BGR->RGB, /255.0, BCHW
                 resized = cv2.resize(img_bgr, (640, 640))
                 rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
                 blob = np.transpose(rgb.astype(np.float32) / 255.0, (2, 0, 1))[np.newaxis, :]
 
-                # Inference
                 outputs = self._ort_session.run(None, {self._input_name: blob})[0]
                 preds = outputs[0].T  # (8400, 84)
 
@@ -388,14 +398,16 @@ class SmartDetector:
                 scale_y = h_orig / 640.0
 
                 boxes_for_nms = []
-                for (cx, cy, bw, bh) in valid_boxes:
+                for cx, cy, bw, bh in valid_boxes:
                     bx1 = int((cx - bw / 2.0) * scale_x)
                     by1 = int((cy - bh / 2.0) * scale_y)
                     bw_px = int(bw * scale_x)
                     bh_px = int(bh * scale_y)
                     boxes_for_nms.append([bx1, by1, bw_px, bh_px])
 
-                indices = cv2.dnn.NMSBoxes(boxes_for_nms, valid_confs.tolist(), score_threshold=conf_thresh, nms_threshold=0.45)
+                indices = cv2.dnn.NMSBoxes(
+                    boxes_for_nms, valid_confs.tolist(), score_threshold=conf_thresh, nms_threshold=0.45
+                )
                 results = []
                 if len(indices) > 0:
                     for idx in indices.flatten():
@@ -404,7 +416,9 @@ class SmartDetector:
                         by2 = min(h_orig, by1 + bh_px)
                         bx1 = max(0, bx1)
                         by1 = max(0, by1)
-                        results.append(((float(bx1), float(by1), float(bx2), float(by2)), float(valid_confs[idx]), int(valid_cids[idx])))
+                        results.append(
+                            ((float(bx1), float(by1), float(bx2), float(by2)), float(valid_confs[idx]), int(valid_cids[idx]))
+                        )
                 return results
             except Exception as e:
                 logger.warning("ONNX inference failed: %s (trying PyTorch)", e)
@@ -464,7 +478,7 @@ class SmartDetector:
             return
         self._running = True
         self._task = asyncio.create_task(self._detection_loop())
-        logger.info("3D-Trajectory & Multi-Scale Vision AI Engine started (v3.6.0)")
+        logger.info("3D-Trajectory & True Dual-Scale Vision AI Engine started (v3.6.3)")
 
     async def stop(self) -> None:
         """Stop background worker."""
@@ -478,11 +492,12 @@ class SmartDetector:
         logger.info("AI Engine stopped")
 
     async def _detection_loop(self) -> None:
-        """Main continuous detection loop running at 4 FPS (0.25s cadence)."""
-        await asyncio.sleep(2)
+        """Main continuous detection loop running at true 4 FPS (0.25s target cycle)."""
+        await asyncio.sleep(1.5)
         last_processed_ts = 0.0
 
         while self._running:
+            loop_start = time.time()
             try:
                 cfg = await DetectionSettings.load()
                 if not cfg["detection_enabled"]:
@@ -493,8 +508,8 @@ class SmartDetector:
                 jpeg_bytes = live_hub.get_latest_frame()
                 frame_ts = live_hub.latest_frame_ts
 
-                if not jpeg_bytes or frame_ts <= 0 or frame_ts == last_processed_ts:
-                    jpeg_bytes = await live_hub.fetch_snapshot_async(timeout=1.0)
+                if not jpeg_bytes or frame_ts <= 0 or (frame_ts == last_processed_ts and (loop_start - frame_ts) > 0.20):
+                    jpeg_bytes = await live_hub.fetch_snapshot_async(timeout=0.8)
                     frame_ts = live_hub.latest_frame_ts
 
                 if not jpeg_bytes:
@@ -509,13 +524,12 @@ class SmartDetector:
                     await asyncio.sleep(0.05)
                     continue
 
-                if raw_frame.shape[1] != 640 or raw_frame.shape[0] != 480:
-                    frame = cv2.resize(raw_frame, (640, 480))
-                else:
-                    frame = raw_frame
+                await self._process_frame_pipeline(raw_frame, now_t, cfg)
 
-                await self._process_frame_pipeline(frame, now_t, cfg)
-                await asyncio.sleep(0.25)  # Steady 4 FPS Cadence
+                # Maintain steady 4 FPS (0.25s interval minus processing time)
+                elapsed = time.time() - loop_start
+                sleep_dur = max(0.04, 0.25 - elapsed)
+                await asyncio.sleep(sleep_dur)
 
             except asyncio.CancelledError:
                 break
@@ -552,38 +566,43 @@ class SmartDetector:
                     continue
         await self._process_frame_pipeline(frame, now, cfg)
 
-    async def _process_frame_pipeline(self, frame: np.ndarray, now: float, cfg: Dict[str, Any]) -> None:
+    async def _process_frame_pipeline(self, raw_frame: np.ndarray, now: float, cfg: Dict[str, Any]) -> None:
         """
-        Executes the 4-step Senior CV Architecture:
-        1. Fast MOG2 Motion Analysis & Masking
-        2. Dual-Scale Inference (Full-Frame + Motion Zoom-Crop)
-        3. Supercategory Classification & Overlap Priority
-        4. 3D Trajectory & Parked-Car Baseline Verification
+        Executes the 5-step Senior CV Architecture on native resolution + normalized 640x480 space.
         """
-        h, w = frame.shape[:2]
+        raw_h, raw_w = raw_frame.shape[:2]
+        if raw_w != 640 or raw_h != 480:
+            frame = cv2.resize(raw_frame, (640, 480))
+        else:
+            frame = raw_frame
+        h, w = 480, 640
+        scale_to_raw_x = raw_w / 640.0
+        scale_to_raw_y = raw_h / 480.0
 
         # ── Step 1: Fast OpenCV Motion Analysis (MOG2 + Frame-Diff) ────────
         fg_mask = self.mog2.apply(frame)
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, self.kernel_3x3)
 
-        if self._prev_frame is not None and (now - self._prev_frame_time) >= 0.20:
+        if self._prev_frame is not None and (now - self._prev_frame_time) <= 2.0:
             diff = cv2.absdiff(frame, self._prev_frame)
             gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
             blur = cv2.GaussianBlur(gray, (5, 5), 0)
-            _, diff_thresh = cv2.threshold(blur, 18, 255, cv2.THRESH_BINARY)
+            _, diff_thresh = cv2.threshold(blur, 16, 255, cv2.THRESH_BINARY)
             fg_mask = cv2.bitwise_or(fg_mask, diff_thresh)
         self._prev_frame = frame.copy()
         self._prev_frame_time = now
 
-        # Mask out upper branches/sky (y < 0.22 * H) and bottom-left clock (y > 0.93 * H, x < 0.35 * W)
-        fg_mask[:int(0.22 * h), :] = 0
-        fg_mask[int(0.93 * h):, :int(0.35 * w)] = 0
+        # Mask out upper sky/tree crown (y < 0.20 * H) and bottom-left OSD clock (y > 0.92 * H, x < 0.36 * W)
+        fg_mask[: int(0.20 * h), :] = 0
+        fg_mask[int(0.92 * h) :, : int(0.36 * w)] = 0
 
         # Load dynamic thresholds from settings
-        conf_person = cfg.get("person_conf_threshold", 0.38)
-        conf_vehicle = cfg.get("vehicle_conf_threshold", 0.42)
-        conf_animal = cfg.get("animal_conf_threshold", 0.35)
-        self._cooldown_seconds = cfg.get("event_cooldown_seconds", 5.0)
+        conf_person = float(cfg.get("person_conf_threshold", 0.38))
+        conf_vehicle = float(cfg.get("vehicle_conf_threshold", 0.42))
+        conf_animal = float(cfg.get("animal_conf_threshold", 0.35))
+        min_disp_vehicle = float(cfg.get("min_displacement_vehicle", 0.045))
+        min_disp_person = float(cfg.get("min_displacement_person", 0.020))
+        self._cooldown_seconds = float(cfg.get("event_cooldown_seconds", 5.0))
 
         zones_raw = cfg.get("exclusion_zones", "[]")
         try:
@@ -591,58 +610,63 @@ class SmartDetector:
         except Exception:
             exclusion_zones = []
 
-        # ── Step 2: Full-Frame YOLO Inference (non-blocking via asyncio.to_thread) ──
-        raw_detections = await asyncio.to_thread(
-            self._infer_image, frame, min(conf_animal, conf_person, conf_vehicle, 0.25)
-        )
+        # ── Step 2a: Full-Frame YOLO Inference (non-blocking) ──────────────
+        base_thresh = min(conf_animal, conf_person, conf_vehicle, 0.25)
+        raw_detections = await asyncio.to_thread(self._infer_image, frame, base_thresh)
 
-        # ── Step 2b: Motion Zoom-Crop Inference for Distant Small Objects ────
+        # ── Step 2b: High-Res Motion Zoom-Crop Inference for Distant/Small Objects ──
         contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        min_motion_area = int(0.004 * w * h)  # >= 0.4% van beeldoppervlak
+        min_motion_area = int(0.0025 * w * h)  # >= 0.25% of frame (catches distant pedestrians & cyclists)
 
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area >= min_motion_area:
-                mx, my, mw, mh = cv2.boundingRect(cnt)
-                # Motion in street/sidewalk/path zone
-                if mw < (0.40 * w) and mh < (0.40 * h) and (my + mh) >= int(0.22 * h):
-                    motion_box = (float(mx), float(my), float(mx + mw), float(my + mh))
-                    has_high_conf = any(
-                        compute_iou(motion_box, d[0]) >= 0.30 and d[1] >= 0.48
-                        for d in raw_detections
-                    )
-                    if not has_high_conf:
-                        # Extract square Zoom-Crop with 25% margin
-                        pad_w = int(0.25 * mw)
-                        pad_h = int(0.25 * mh)
-                        cx1 = max(0, mx - pad_w)
-                        cy1 = max(0, my - pad_h)
-                        cx2 = min(w, mx + mw + pad_w)
-                        cy2 = min(h, my + mh + pad_h)
-                        crop = frame[cy1:cy2, cx1:cx2]
+        # Sort contours largest first, inspect top 2 motion regions
+        motion_contours = sorted(
+            [c for c in contours if cv2.contourArea(c) >= min_motion_area],
+            key=cv2.contourArea,
+            reverse=True,
+        )[:2]
 
-                        if crop.shape[0] >= 32 and crop.shape[1] >= 32:
-                            crop_dets = await asyncio.to_thread(self._infer_image, crop, 0.32)
-                            for c_box, c_conf, c_cid in crop_dets:
-                                fx1 = float(cx1 + c_box[0])
-                                fy1 = float(cy1 + c_box[1])
-                                fx2 = float(cx1 + c_box[2])
-                                fy2 = float(cy1 + c_box[3])
-                                raw_detections.append(((fx1, fy1, fx2, fy2), c_conf, c_cid))
+        for cnt in motion_contours:
+            mx, my, mw, mh = cv2.boundingRect(cnt)
+            if mw < (0.50 * w) and mh < (0.55 * h) and (my + mh) >= int(0.20 * h):
+                motion_box = (float(mx), float(my), float(mx + mw), float(my + mh))
+                has_strong_full_det = any(
+                    compute_iou(motion_box, d[0]) >= 0.35 and d[1] >= 0.55 for d in raw_detections
+                )
+                if not has_strong_full_det:
+                    # Slice directly from HIGH-RES `raw_frame` with 35% margin!
+                    pad_w = max(24, int(0.35 * mw))
+                    pad_h = max(24, int(0.35 * mh))
+                    cx1_640 = max(0, mx - pad_w)
+                    cy1_640 = max(0, my - pad_h)
+                    cx2_640 = min(w, mx + mw + pad_w)
+                    cy2_640 = min(h, my + mh + pad_h)
 
-        # ── Step 3: Pure Object Classification & Supercategory Mapping ─────
-        classified_candidates: List[Tuple[str, str, float, Tuple[float, float, float, float], float]] = []
+                    rx1 = max(0, int(cx1_640 * scale_to_raw_x))
+                    ry1 = max(0, int(cy1_640 * scale_to_raw_y))
+                    rx2 = min(raw_w, int(cx2_640 * scale_to_raw_x))
+                    ry2 = min(raw_h, int(cy2_640 * scale_to_raw_y))
+                    high_res_crop = raw_frame[ry1:ry2, rx1:rx2]
 
-        # Identify persons first for Person-over-Bicycle priority
-        person_boxes = [d[0] for d in raw_detections if d[2] == 0 and d[1] >= (conf_person - 0.05)]
+                    if high_res_crop.shape[0] >= 32 and high_res_crop.shape[1] >= 32:
+                        crop_dets = await asyncio.to_thread(self._infer_image, high_res_crop, max(0.26, base_thresh - 0.05))
+                        for c_box, c_conf, c_cid in crop_dets:
+                            # Map back from high_res_crop coordinates to normalized 640x480 space
+                            fx1 = float((rx1 + c_box[0]) / scale_to_raw_x)
+                            fy1 = float((ry1 + c_box[1]) / scale_to_raw_y)
+                            fx2 = float((rx1 + c_box[2]) / scale_to_raw_x)
+                            fy2 = float((ry1 + c_box[3]) / scale_to_raw_y)
+                            raw_detections.append(((fx1, fy1, fx2, fy2), c_conf, c_cid))
+
+        # ── Step 3: Cross-Scale Deduplication (NMS) & Supercategory Mapping ─
+        classified_raw: List[Tuple[str, str, float, Tuple[float, float, float, float], float]] = []
+        person_boxes = [d[0] for d in raw_detections if d[2] == 0 and d[1] >= (conf_person - 0.06)]
 
         for box, conf, cid in raw_detections:
             category = None
             if cid in PERSON_CLASSES:
                 category = "person"
             elif cid in {1, 3}:  # bicycle, motorcycle
-                # If bicycle/motorcycle overlaps with a detected person, prioritize person
-                has_rider = any(compute_iou(box, pb) >= 0.15 for pb in person_boxes)
+                has_rider = any(compute_iou(box, pb) >= 0.12 for pb in person_boxes)
                 category = "person" if has_rider else "vehicle"
             elif cid in VEHICLE_CLASSES:
                 category = "vehicle"
@@ -651,36 +675,47 @@ class SmartDetector:
             else:
                 continue
 
-            # Confidence check
-            req_conf = conf_person if category == "person" else (conf_vehicle if category == "vehicle" else conf_animal)
+            req_conf = (
+                (conf_person - 0.04)
+                if category == "person"
+                else (conf_vehicle if category == "vehicle" else conf_animal)
+            )
             if conf < req_conf:
                 continue
 
-            # Loopvlak check: bottom of box must touch ground level (y2 >= 0.18 * H)
+            # Ground check: bottom of box must be below upper sky (y2 >= 0.18 * H)
             if box[3] < (0.18 * h):
                 continue
 
-            # Exclusion zones check
             in_zone, _ = self.is_in_exclusion_zone(box, (h, w), exclusion_zones)
             if in_zone:
                 continue
 
-            # Calculate MOG2 foreground motion ratio inside bounding box
-            bx1, by1, bx2, by2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
-            bx1, by1 = max(0, bx1), max(0, by1)
-            bx2, by2 = min(w, bx2), min(h, by2)
+            bx1, by1, bx2, by2 = max(0, int(box[0])), max(0, int(box[1])), min(w, int(box[2])), min(h, int(box[3]))
             box_mog = fg_mask[by1:by2, bx1:bx2]
             mog_ratio = (float(np.count_nonzero(box_mog)) / float(box_mog.size)) if box_mog.size > 0 else 0.0
 
             label = COCO_NAMES.get(cid, category.capitalize())
-            classified_candidates.append((category, label, conf, box, mog_ratio))
+            classified_raw.append((category, label, conf, box, mog_ratio))
 
-        # ── Step 4: 3D Trajectory Association & Parked-Car Baseline ────────
+        # Deduplicate overlapping detections of the same category (Full-Frame vs Zoom-Crop)
+        classified_raw.sort(key=lambda x: x[2], reverse=True)
+        classified_candidates: List[Tuple[str, str, float, Tuple[float, float, float, float], float]] = []
+        for cand in classified_raw:
+            cat, lbl, c_conf, c_box, c_mog = cand
+            is_dup = any(
+                (existing[0] == cat or {existing[0], cat} == {"person", "vehicle"} and lbl in ("Fiets", "Motor", "Persoon"))
+                and compute_iou(c_box, existing[3]) >= 0.45
+                for existing in classified_candidates
+            )
+            if not is_dup:
+                classified_candidates.append(cand)
+
+        # ── Step 4: 3D Trajectory Association (with Cyclist/Person Continuity) ──
         now_t = now
-        active_track_ids: Set[str] = set()
+        matched_track_ids: Set[str] = set()
 
         for category, label, conf, box, mog_ratio in classified_candidates:
-            # Associate candidate with existing active tracks
             best_track_id = None
             best_score = 0.0
 
@@ -688,78 +723,123 @@ class SmartDetector:
             bcy = (box[1] + box[3]) / 2.0
 
             for tid, trk in self._tracks.items():
-                if trk.category == category:
-                    tcx = (trk.last_box[0] + trk.last_box[2]) / 2.0
-                    tcy = (trk.last_box[1] + trk.last_box[3]) / 2.0
-                    dist = math.hypot(bcx - tcx, bcy - tcy) / float(w)
-                    iou = compute_iou(box, trk.last_box)
+                if tid in matched_track_ids:
+                    continue
+                # Allow person <-> bicycle/motorcycle continuity
+                same_or_rider = (trk.category == category) or (
+                    {trk.category, category} == {"person", "vehicle"} and (label in ("Fiets", "Motor") or trk.label in ("Fiets", "Motor"))
+                )
+                if not same_or_rider:
+                    continue
 
-                    # Dynamic association: IoU >= 0.15 or Euclidean distance <= 0.40 * W for vehicles
-                    max_dist = 0.40 if category == "vehicle" else 0.25
-                    if iou >= 0.15 or dist <= max_dist:
-                        score = max(iou, 0.20 - dist)
-                        if score > best_score:
-                            best_score = score
-                            best_track_id = tid
+                tcx = (trk.last_box[0] + trk.last_box[2]) / 2.0
+                tcy = (trk.last_box[1] + trk.last_box[3]) / 2.0
+                dist = math.hypot(bcx - tcx, bcy - tcy) / float(w)
+                iou = compute_iou(box, trk.last_box)
+
+                max_dist = 0.42 if category == "vehicle" else 0.28
+                if iou >= 0.12 or dist <= max_dist:
+                    score = max(iou, 0.45 - dist)
+                    if score > best_score:
+                        best_score = score
+                        best_track_id = tid
 
             if best_track_id is not None:
                 trk = self._tracks[best_track_id]
+                # Upgrade track category to 'person' if person is detected on a bike track
+                if category == "person" and trk.category != "person":
+                    trk.category = "person"
+                    trk.label = "Persoon"
                 trk.last_box = box
                 trk.last_time = now_t
                 trk.frames.append((now_t, box, conf))
                 trk.mog2_ratios.append(mog_ratio)
-                if conf > trk.best_conf:
+                # Keep sliding history bounded to last 30 frames
+                if len(trk.frames) > 30:
+                    trk.frames = trk.frames[-30:]
+                    trk.mog2_ratios = trk.mog2_ratios[-30:]
+                if conf >= trk.best_conf:
                     trk.best_conf = conf
                     trk.best_box = box
-                    trk.best_frame = frame.copy()
-                active_track_ids.add(best_track_id)
+                    trk.best_frame = raw_frame.copy()
+                matched_track_ids.add(best_track_id)
             else:
                 tid = f"trk_{self._next_track_num}"
                 self._next_track_num += 1
-                new_trk = TrackedTrajectory(tid, category, label, box, conf, now_t, frame, mog_ratio)
+                new_trk = TrackedTrajectory(tid, category, label, box, conf, now_t, raw_frame, mog_ratio)
                 self._tracks[tid] = new_trk
-                active_track_ids.add(tid)
+                matched_track_ids.add(tid)
 
-        # ── Step 5: Verification & Parked-Car Baseline Logic ───────────────
-        to_dispatch = []
-        to_prune = []
+        # ── Step 5: Verification, Ongoing Motion Keep-Alive & Parked-Car Memory ──
+        to_dispatch: List[TrackedTrajectory] = []
 
         for tid, trk in list(self._tracks.items()):
-            if trk.verified:
-                continue
+            # Evaluate trajectory over sliding window of last 4.5 seconds (fixes the >4.0s track-death bug!)
+            recent_frames = [f for f in trk.frames if (now_t - f[0]) <= 4.5]
+            if not recent_frames:
+                recent_frames = [trk.frames[-1]]
 
-            cx_start = (trk.first_box[0] + trk.first_box[2]) / 2.0
-            cy_start = (trk.first_box[1] + trk.first_box[3]) / 2.0
-            cx_now = (trk.last_box[0] + trk.last_box[2]) / 2.0
-            cy_now = (trk.last_box[1] + trk.last_box[3]) / 2.0
+            ref_box = recent_frames[0][1]
+            cur_box = trk.last_box
 
-            # 3D Indicators
+            cx_start = (ref_box[0] + ref_box[2]) / 2.0
+            cy_start = (ref_box[1] + ref_box[3]) / 2.0
+            cx_now = (cur_box[0] + cur_box[2]) / 2.0
+            cy_now = (cur_box[1] + cur_box[3]) / 2.0
+
             d_2d = math.hypot((cx_now - cx_start) / float(w), (cy_now - cy_start) / float(h))
-            h_start = max(1.0, trk.first_box[3] - trk.first_box[1])
-            h_now = max(1.0, trk.last_box[3] - trk.last_box[1])
+            h_start = max(1.0, ref_box[3] - ref_box[1])
+            h_now = max(1.0, cur_box[3] - cur_box[1])
             d_scale = (max(h_now, h_start) / min(h_now, h_start)) - 1.0
-            avg_mog = np.mean(trk.mog2_ratios) if trk.mog2_ratios else 0.0
+            recent_mog = float(np.mean(trk.mog2_ratios[-5:])) if trk.mog2_ratios else 0.0
+            trk.disp_pct = round(max(d_2d, d_scale * 0.5) * 100.0, 1)
+
+            # CRITICAL FIX 1: If this track was ALREADY verified and is still moving in frame,
+            # keep extending the active recording so the video NEVER stops mid-action!
+            if trk.verified:
+                if tid in matched_track_ids and (recent_mog >= 0.015 or d_2d >= 0.015):
+                    self._last_verified_object_seen = now_t
+                    if trk.category == "person":
+                        self._last_person_seen = now_t
+                    try:
+                        from app.recorder import extend_active_recording, is_recording_active
+                        if is_recording_active():
+                            extend_active_recording(trk.category, trk.label)
+                    except Exception:
+                        pass
+                continue
 
             is_approved = False
 
             if trk.category == "person":
-                # Person approval (v3.6.1):
-                # 1. Spoor in minimaal 2 scans (binnen 4.0s) én:
-                #    - D_2D >= 0.020 (2% verplaatsing), OF
-                #    - D_scale >= 0.08 (box-hoogte verandert >= 8%: recht naar camera toe of weg), OF
-                #    - Voorpad bezoeker: y_bottom > 0.50 * H met conf >= 0.52 en actieve pixel-beweging (avg_mog >= 0.015)
-                # 2. Of instant doorstep trigger als y_bottom > 0.55 * H met conf >= 0.55
-                track_age = trk.last_time - trk.first_time
-                if len(trk.frames) >= 2 and track_age <= 4.0:
-                    if d_2d >= 0.020 or d_scale >= 0.08:
+                # Anti-wind bush/tree filter on extreme left/right borders
+                in_bush_border = (cx_now < 0.14 * w) or (cx_now > 0.72 * w)
+                aspect_ratio = h_now / max(1.0, (cur_box[2] - cur_box[0]))
+
+                if aspect_ratio < 0.85 and cur_box[3] < 0.70 * h:
+                    # Wide flat shadow on pavement
+                    continue
+
+                if len(recent_frames) >= 2:
+                    req_disp = min_disp_person * (1.4 if in_bush_border else 1.0)
+                    if (d_2d >= req_disp or d_scale >= 0.08) and (recent_mog >= 0.012 or trk.best_conf >= 0.50):
                         is_approved = True
-                        logger.info("✅ [Person APPROVED (Movement)]: %s (D_2D=%.3f, D_scale=%.3f, conf=%.2f)", trk.label, d_2d, d_scale, trk.best_conf)
-                    elif trk.last_box[3] > (0.50 * float(h)) and trk.best_conf >= 0.52 and avg_mog >= 0.015:
+                        logger.info(
+                            "✅ [Person APPROVED (Movement)]: %s (D_2D=%.3f, D_scale=%.3f, conf=%.2f)",
+                            trk.label, d_2d, d_scale, trk.best_conf,
+                        )
+                    elif cur_box[3] > (0.48 * float(h)) and trk.best_conf >= 0.48 and recent_mog >= 0.012:
                         is_approved = True
-                        logger.info("✅ [Person APPROVED (Doorstep Visitor)]: %s (conf=%.2f, y2=%.1f, mog=%.3f)", trk.label, trk.best_conf, trk.last_box[3], avg_mog)
-                elif trk.last_box[3] > (0.55 * float(h)) and trk.best_conf >= 0.55 and avg_mog >= 0.020:
+                        logger.info(
+                            "✅ [Person APPROVED (Doorstep Visitor)]: %s (conf=%.2f, y2=%.1f, mog=%.3f)",
+                            trk.label, trk.best_conf, cur_box[3], recent_mog,
+                        )
+                elif cur_box[3] > (0.52 * float(h)) and trk.best_conf >= 0.54 and recent_mog >= 0.018:
                     is_approved = True
-                    logger.info("✅ [Person APPROVED (Instant Doorstep)]: %s (conf=%.2f, y2=%.1f)", trk.label, trk.best_conf, trk.last_box[3])
+                    logger.info(
+                        "✅ [Person APPROVED (Instant Doorstep)]: %s (conf=%.2f, y2=%.1f)",
+                        trk.label, trk.best_conf, cur_box[3],
+                    )
 
                 if is_approved:
                     self._last_person_seen = now_t
@@ -767,70 +847,72 @@ class SmartDetector:
                     to_dispatch.append(trk)
 
             elif trk.category == "animal":
-                # Animal approval (v3.6.1):
-                # 2 scans met >= 1.5% verplaatsing (D_2D >= 0.015) of 1 scan met conf >= 0.50 en pixelbeweging
-                if len(trk.frames) >= 2 and d_2d >= 0.015:
+                if (len(recent_frames) >= 2 and d_2d >= 0.015) or (trk.best_conf >= 0.48 and recent_mog >= 0.015):
                     is_approved = True
-                    logger.info("✅ [Animal APPROVED (Moving)]: %s (D_2D=%.3f, conf=%.2f)", trk.label, d_2d, trk.best_conf)
-                elif trk.best_conf >= 0.50 and avg_mog >= 0.015:
-                    is_approved = True
-                    logger.info("✅ [Animal APPROVED (High-Conf Motion)]: %s (conf=%.2f, mog=%.3f)", trk.label, trk.best_conf, avg_mog)
-
-                if is_approved:
                     trk.verified = True
                     to_dispatch.append(trk)
+                    logger.info("✅ [Animal APPROVED]: %s (D_2D=%.3f, conf=%.2f)", trk.label, d_2d, trk.best_conf)
 
             elif trk.category == "vehicle":
                 # Check match against known parked_car_slots
                 is_anchored = False
                 for slot in self.parked_car_slots:
-                    iou = compute_iou(trk.last_box, slot["box"])
+                    iou = compute_iou(cur_box, slot["box"])
                     scx, scy = slot["centroid"]
                     cent_shift = math.hypot(cx_now - scx, cy_now - scy) / float(w)
-                    if iou >= 0.70 and cent_shift < 0.035:
+                    if iou >= 0.65 and cent_shift < 0.040:
                         is_anchored = True
                         slot["last_seen"] = now_t
                         break
 
                 if is_anchored:
-                    # Parked vehicle: genegeerd zolang centrum minder dan 0.045 * W verplaatst
-                    if d_2d >= 0.045:
+                    if d_2d >= max(0.055, min_disp_vehicle):
                         is_approved = True
                         logger.info("🚗 [Departing Vehicle APPROVED]: %s (D_2D=%.3f)", trk.label, d_2d)
                 else:
-                    # Non-anchored vehicle: 100% Driving car approval in >= 2 frames (0.5s) with D_2D >= 0.04
-                    # én NIET overlappend met een stilstaande parked_vehicles box (IoU < 0.65)
-                    overlaps_parked = any(compute_iou(trk.last_box, s["box"]) >= 0.65 for s in self.parked_car_slots)
-                    if len(trk.frames) >= 2 and d_2d >= 0.04 and not overlaps_parked:
+                    overlaps_parked = any(compute_iou(cur_box, s["box"]) >= 0.62 for s in self.parked_car_slots)
+                    if len(recent_frames) >= 2 and d_2d >= min_disp_vehicle and not overlaps_parked:
                         is_approved = True
-                        logger.info("🚗 [Driving Vehicle APPROVED]: %s (D_2D=%.3f, frames=%d)", trk.label, d_2d, len(trk.frames))
-                    elif len(trk.frames) >= 40 and d_2d < 0.02:
-                        # Stood still for >= 10 seconds (40 frames at 4 FPS) -> Anchor as parked car slot
+                        logger.info(
+                            "🚗 [Driving Vehicle APPROVED]: %s (D_2D=%.3f, frames=%d)",
+                            trk.label, d_2d, len(recent_frames),
+                        )
+                    elif len(trk.frames) >= 12 and d_2d < 0.025:
+                        # Stationary for >= 3.0 seconds (12 frames at 4 FPS) -> Anchor as parked car!
                         self.parked_car_slots.append({
-                            "box": trk.last_box,
+                            "box": cur_box,
                             "centroid": (cx_now, cy_now),
                             "anchored_since": now_t,
                             "last_seen": now_t,
                         })
-                        logger.info("🔒 [Parked Car Slot Anchored]: %s at %s", trk.label, trk.last_box)
+                        logger.info("🔒 [Parked Car Slot Anchored (3s)]: %s at %s", trk.label, cur_box)
                         trk.verified = True
 
                 if is_approved:
                     trk.verified = True
                     to_dispatch.append(trk)
 
-        # Dispatch approved detections
+        # Dispatch newly approved detections
         for trk in to_dispatch:
             self._last_verified_object_seen = now_t
-            disp_pct = round(d_2d * 100.0, 1)
-            best_img = trk.best_frame if trk.best_frame is not None else frame
+            best_img = trk.best_frame if trk.best_frame is not None else raw_frame
+            # Scale normalized 640x480 box back to best_img dimensions for debug drawing
+            img_h, img_w = best_img.shape[:2]
+            sx = img_w / 640.0
+            sy = img_h / 480.0
+            scaled_box = (
+                trk.best_box[0] * sx,
+                trk.best_box[1] * sy,
+                trk.best_box[2] * sx,
+                trk.best_box[3] * sy,
+            )
             asyncio.create_task(
                 self._dispatch_verified_detection(
                     category=trk.category,
                     label=trk.label,
                     confidence=trk.best_conf,
-                    disp_pct=disp_pct,
-                    box=trk.best_box,
+                    disp_pct=trk.disp_pct,
+                    box=scaled_box,
                     keyframe=best_img,
                     cfg=cfg,
                 )
@@ -841,10 +923,8 @@ class SmartDetector:
             if (now_t - trk.last_time) > 6.0:
                 self._tracks.pop(tid, None)
 
-        # Prune parked slots not seen in 120s
-        self.parked_car_slots = [
-            s for s in self.parked_car_slots if (now_t - s["last_seen"]) < 120.0
-        ]
+        # Keep parked car slots for 300s (5 minutes) so brief dark/rain dropouts never lose parked memory
+        self.parked_car_slots = [s for s in self.parked_car_slots if (now_t - s["last_seen"]) < 300.0]
         self.stationary_vehicles = self.parked_car_slots
         self.parked_vehicle_boxes = [s["box"] for s in self.parked_car_slots]
 
@@ -883,13 +963,12 @@ class SmartDetector:
         keyframe: np.ndarray,
         cfg: Dict[str, Any],
     ) -> None:
-        """Dispatches verified detection, saves thumbnails and emits push notifications."""
+        """Dispatches verified detection, merges into active recording if running, or starts new clip + push."""
         now_t = time.time()
         last_cat_trigger = self._last_trigger_per_category.get(category, 0.0)
         cooldown = self._cooldown_seconds
 
         if (now_t - last_cat_trigger) < cooldown:
-            logger.debug("Cooldown active for '%s' (%.1fs remaining), skipping dispatch", category, cooldown - (now_t - last_cat_trigger))
             return
 
         self._last_trigger_per_category[category] = now_t
@@ -907,15 +986,40 @@ class SmartDetector:
         if in_quiet_hours:
             should_notify = False
 
+        from app.recorder import extend_active_recording, get_day_clip_dir, is_recording_active
+
+        # CRITICAL FIX 2: If a recording is ALREADY active, merge this category directly into the active clip
+        # WITHOUT creating and deleting a ghost clip row in SQLite!
+        if is_recording_active():
+            from app.recorder import _active_recording_info
+            active_clip_id = _active_recording_info.get("clip_id")
+            extend_active_recording(category, label)
+            if active_clip_id:
+                active_cats = _active_recording_info.setdefault("categories", set())
+                if category not in active_cats:
+                    active_cats.add(category)
+                    cats = sorted(list(active_cats), key=lambda c: 0 if c == "ring" else 1 if c == "person" else 2)
+                    combined_category = ",".join(cats)
+                    try:
+                        from app.database import get_db
+                        async with get_db(write=True) as db:
+                            await db.execute(
+                                "UPDATE clips SET category = ? WHERE clip_id = ?",
+                                (combined_category, active_clip_id),
+                            )
+                    except Exception:
+                        pass
+                logger.info("Merged %s (%s) into already active recording %s", category, label, active_clip_id)
+                return
+
         clip_id = str(uuid.uuid4())
-        from app.recorder import get_day_clip_dir
         day_dir = get_day_clip_dir()
         t0_iso = datetime.now(timezone.utc).isoformat()
 
         settings.SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
         settings.CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Write clean thumbnail & snapshots
+        # Write high-res clean thumbnail & snapshots
         thumb_path = str(day_dir / f"thumb_{clip_id}.jpg")
         root_thumb = str(settings.CLIPS_DIR / f"thumb_{clip_id}.jpg")
         clean_snap = str(settings.SNAPSHOTS_DIR / f"{clip_id}.jpg")
@@ -929,7 +1033,15 @@ class SmartDetector:
         annotated = keyframe.copy()
         x1, y1, x2, y2 = [int(v) for v in box]
         cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(annotated, f"{label} ({round(confidence*100)}%) d={disp_pct}%", (x1, max(25, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(
+            annotated,
+            f"{label} ({round(confidence * 100)}%) d={disp_pct}%",
+            (x1, max(25, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2,
+        )
         cv2.imwrite(debug_snap, annotated)
 
         cat_dutch = {
@@ -941,7 +1053,6 @@ class SmartDetector:
         title = f"{cat_dutch}: {label}"
         snapshot_url = f"/api/v1/clips/{clip_id}/thumbnail"
 
-        # Save clip entry with status RECORDING
         await save_clip(
             clip_id=clip_id,
             call_id=clip_id,
@@ -955,7 +1066,6 @@ class SmartDetector:
             created_at=t0_iso,
         )
 
-        # Save event to event log queue
         event_id = await save_event(
             event_type="motion",
             title=title,
@@ -965,7 +1075,6 @@ class SmartDetector:
             silent=not should_notify,
         )
 
-        # Dispatch WebSocket & FCM Push
         payload = {
             "event_id": event_id,
             "category": category,
@@ -978,7 +1087,6 @@ class SmartDetector:
         await push_event("AI_DETECTION", payload)
         logger.info("🚀 [AI Notification Sent]: %s (clip_id=%s, silent=%s)", title, clip_id, not should_notify)
 
-        # Trigger background video recording (20s post-roll)
         clip_path = str(day_dir / f"{clip_id}.mp4")
         asyncio.create_task(
             self._finalize_clip_recording(
@@ -990,7 +1098,6 @@ class SmartDetector:
             )
         )
 
-        # Save approved audit log
         try:
             await save_ai_audit_log(
                 status="APPROVED",
@@ -1014,26 +1121,25 @@ class SmartDetector:
         clean_snapshot_path: str = "",
     ) -> None:
         """
-        Records video in background under single recording lock (v3.6.1).
-        Updates clip status from RECORDING to READY once MP4 completion succeeds (>10KB, >=5s).
-        If another recording is active, extends it and merges categories.
+        Records video in background under single recording lock (v3.6.3).
         """
         try:
             from app.recorder import (
-                record_smart_clip,
-                ensure_thumbnail,
                 compress_clip_background,
-                recording_lock,
+                ensure_thumbnail,
                 extend_active_recording,
                 is_recording_active,
+                record_smart_clip,
+                recording_lock,
             )
 
             sys_settings = await get_system_settings()
             preroll = float(sys_settings.get("pre_roll_seconds", "20"))
             postroll = float(sys_settings.get("post_roll_seconds", "20"))
-            max_duration = float(sys_settings.get("max_active_motion_seconds", sys_settings.get("max_clip_seconds", "180")))
+            max_duration = float(
+                sys_settings.get("max_active_motion_seconds", sys_settings.get("max_clip_seconds", "180"))
+            )
 
-            # Single recording lock check (TAAK 2.2 / v3.5.5):
             if is_recording_active():
                 from app.recorder import _active_recording_info
                 active_clip_id = _active_recording_info.get("clip_id")
@@ -1043,15 +1149,15 @@ class SmartDetector:
                     active_cats.add(category)
                     cats = sorted(list(active_cats), key=lambda c: 0 if c == "ring" else 1 if c == "person" else 2)
                     combined_category = ",".join(cats)
-                    async def _sync_active_cat():
-                        try:
-                            from app.database import get_db
-                            async with get_db(write=True) as db:
-                                await db.execute("UPDATE clips SET category = ? WHERE clip_id = ?", (combined_category, active_clip_id))
-                        except Exception:
-                            pass
-                    asyncio.create_task(_sync_active_cat())
-                logger.info("Smart clip already recording; merged category into active clip %s for %s", active_clip_id, label)
+                    try:
+                        from app.database import get_db
+                        async with get_db(write=True) as db:
+                            await db.execute(
+                                "UPDATE clips SET category = ? WHERE clip_id = ?",
+                                (combined_category, active_clip_id),
+                            )
+                    except Exception:
+                        pass
                 await db_delete_clip(clip_id)
                 return
 
@@ -1085,8 +1191,6 @@ class SmartDetector:
 
                 file_size = os.path.getsize(clip_path) if os.path.exists(clip_path) else 0
 
-                # Database Update to READY (v3.5.1 / v3.6.1):
-                # If file exists and > 10 KB, guarantee READY state transition
                 if os.path.exists(clip_path) and file_size > 10000:
                     if duration <= 0:
                         from app.recorder import _probe_duration
@@ -1121,7 +1225,10 @@ class SmartDetector:
                         category=combined_cat,
                         snapshot_path=snapshot_path or clean_snapshot_path,
                     )
-                    logger.info("Updated verified clip %s to READY: duration=%.1fs, size=%d bytes, category=%s", clip_id, duration, file_size, combined_cat)
+                    logger.info(
+                        "Updated verified clip %s to READY: duration=%.1fs, size=%d bytes, category=%s",
+                        clip_id, duration, file_size, combined_cat,
+                    )
                     asyncio.create_task(compress_clip_background(clip_path))
                 else:
                     logger.warning(
