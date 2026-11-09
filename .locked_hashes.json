@@ -1,8 +1,8 @@
 {
   "backend/app/ai_detector.py": "91e26e49f1eaf7b54d06017462a18c459333a16f578ea4103884d281e1a39183",
-  "backend/app/ring_detector.py": "b1883d24810cae0e1c98d6b00cd2240dfc888c82651ac34db7fc9c08dbbc8703",
+  "backend/app/ring_detector.py": "4a1378f02758fed72e7449f7626caeeaf7db8e49adc1c4b9df34bdd734cf651e",
   "backend/app/audio_bridge.py": "b136233cf061d337a02086aa20eb890fc740c06f8ff6a56b63549d1432fab473",
   "android-app/app/src/main/java/nl/foxway/deurbel/network/WebSocketForegroundService.kt": "3318ccda458a6757d2b66e0ac5ba45a0925064398dd4cd554e139d608d8c7903",
   "android-app/app/src/main/java/nl/foxway/deurbel/ui/call/CallActivity.kt": "8ee4a4c03d5b29b9d58badc102b4dbadc0b98928db32f936844d539ddf5f432e",
-  "_updated": "2026-11-09T11:48:31.920429"
+  "_updated": "2026-11-09T19:24:34.425813"
 }

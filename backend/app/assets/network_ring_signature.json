@@ -1,12 +1,13 @@
 {
   "enabled": true,
-  "dst_port": 45486,
+  "dst_port": 57730,
   "protocol": "TCP",
-  "min_packet_count": 1,
-  "min_bytes": 224,
-  "max_bytes": 800,
-  "last_calibrated": "2026-11-09T11:48:15.123096",
+  "min_packet_count": 2,
+  "min_bytes": 266,
+  "max_bytes": 950,
+  "last_calibrated": "2026-11-09T19:19:17.705114",
   "sample_payload_sizes": [
+    8,
     108,
     108
   ],
