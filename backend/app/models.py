@@ -294,6 +294,26 @@ CREATE TABLE IF NOT EXISTS sdk_alarm_logs (
     payload_ascii  TEXT DEFAULT '',
     action_taken   TEXT DEFAULT 'Logged'
 );
+
+CREATE TABLE IF NOT EXISTS ring_comparison_trials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trial_number INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    shazam_triggered INTEGER DEFAULT 0,
+    shazam_ts REAL DEFAULT 0.0,
+    shazam_score REAL DEFAULT 0.0,
+    shazam_details TEXT DEFAULT '',
+    sniffer_triggered INTEGER DEFAULT 0,
+    sniffer_ts REAL DEFAULT 0.0,
+    sniffer_sig TEXT DEFAULT '',
+    sniffer_topic TEXT DEFAULT '',
+    sniffer_plen INTEGER DEFAULT 0,
+    sniffer_hex TEXT DEFAULT '',
+    delta_ms REAL DEFAULT 0.0,
+    faster_method TEXT DEFAULT '',
+    active_mode TEXT DEFAULT 'SHAZAM_PRIMARY'
+);
 """
 
 
@@ -383,6 +403,7 @@ async def init_db() -> None:
             ("quiet_hours_enabled", "true", "Stille uren inschakelen (geen pushmeldingen voor beweging)"),
             ("quiet_hours_start", "23:30", "Begintijd stille uren (HH:MM)"),
             ("quiet_hours_end", "07:30", "Eindtijd stille uren (HH:MM)"),
+            ("ring_trigger_mode", "SHAZAM_PRIMARY", "Aanbel trigger modus: SHAZAM_PRIMARY (standaard), SNIFFER_PRIMARY, of DUAL_CONFIRM"),
         ]
         for k, v, desc in default_settings:
             try:
@@ -1342,3 +1363,136 @@ async def get_recent_crash_logs(limit: int = 50) -> list[dict]:
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+
+
+# ── Ring Comparison Trials (v3.6.6: Shazam vs. Sniffer 50-Triggers Benchmark) ─
+
+async def save_ring_comparison_trial(
+    event_type: str,
+    shazam_triggered: int = 0,
+    shazam_ts: float = 0.0,
+    shazam_score: float = 0.0,
+    shazam_details: str = "",
+    sniffer_triggered: int = 0,
+    sniffer_ts: float = 0.0,
+    sniffer_sig: str = "",
+    sniffer_topic: str = "",
+    sniffer_plen: int = 0,
+    sniffer_hex: str = "",
+    delta_ms: float = 0.0,
+    faster_method: str = "",
+    active_mode: str = "SHAZAM_PRIMARY",
+) -> int:
+    """Saves a comparison trial between Shazam and Sniffer."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    async with get_db(write=True) as db:
+        c = await db.execute("SELECT COALESCE(MAX(trial_number), 0) + 1 FROM ring_comparison_trials")
+        row = await c.fetchone()
+        trial_num = row[0] if row else 1
+
+        cursor = await db.execute(
+            """
+            INSERT INTO ring_comparison_trials (
+                trial_number, created_at, event_type,
+                shazam_triggered, shazam_ts, shazam_score, shazam_details,
+                sniffer_triggered, sniffer_ts, sniffer_sig, sniffer_topic,
+                sniffer_plen, sniffer_hex, delta_ms, faster_method, active_mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                trial_num, now_iso, event_type,
+                shazam_triggered, shazam_ts, shazam_score, shazam_details,
+                sniffer_triggered, sniffer_ts, sniffer_sig, sniffer_topic,
+                sniffer_plen, sniffer_hex, delta_ms, faster_method, active_mode
+            ),
+        )
+        return cursor.lastrowid or 0
+
+
+async def get_ring_comparison_summary() -> dict:
+    """Aggregates metrics for the 50-triggers Shazam vs Sniffer benchmark."""
+    async with get_db(write=False) as db:
+        c_both = await db.execute("SELECT COUNT(*) FROM ring_comparison_trials WHERE event_type = 'BOTH_MATCHED'")
+        row = await c_both.fetchone()
+        joint_matches_count = row[0] if row else 0
+
+        c_shazam = await db.execute("SELECT COUNT(*) FROM ring_comparison_trials WHERE shazam_triggered = 1")
+        row = await c_shazam.fetchone()
+        shazam_total = row[0] if row else 0
+
+        c_sniff = await db.execute("SELECT COUNT(*) FROM ring_comparison_trials WHERE sniffer_triggered = 1")
+        row = await c_sniff.fetchone()
+        sniffer_total = row[0] if row else 0
+
+        c_unconf = await db.execute("SELECT COUNT(*) FROM ring_comparison_trials WHERE event_type = 'SNIFFER_ONLY'")
+        row = await c_unconf.fetchone()
+        sniffer_unconf = row[0] if row else 0
+
+        c_avg = await db.execute("SELECT AVG(delta_ms) FROM ring_comparison_trials WHERE event_type = 'BOTH_MATCHED'")
+        row = await c_avg.fetchone()
+        avg_delta = row[0] if row else None
+        avg_delta_ms = round(float(avg_delta), 1) if avg_delta is not None else 0.0
+
+        c_sniff_fast = await db.execute("SELECT COUNT(*) FROM ring_comparison_trials WHERE event_type = 'BOTH_MATCHED' AND faster_method = 'SNIFFER'")
+        row = await c_sniff_fast.fetchone()
+        sniffer_faster = row[0] if row else 0
+
+        c_shaz_fast = await db.execute("SELECT COUNT(*) FROM ring_comparison_trials WHERE event_type = 'BOTH_MATCHED' AND faster_method = 'SHAZAM'")
+        row = await c_shaz_fast.fetchone()
+        shazam_faster = row[0] if row else 0
+
+    active_mode = await get_system_setting("ring_trigger_mode", "SHAZAM_PRIMARY")
+
+    if joint_matches_count >= 50:
+        if sniffer_unconf == 0 and sniffer_faster >= shazam_faster:
+            rec = "SNIFFER_PRIMARY (Sniffer heeft 50/50 bewezen sneller en 100% foutloos te zijn!)"
+        elif sniffer_unconf > 0:
+            rec = f"SHAZAM_PRIMARY (Sniffer had {sniffer_unconf} onbevestigde triggers; Shazam is betrouwbaarder)"
+        else:
+            rec = "SHAZAM_PRIMARY (Shazam chime was gemiddeld sneller of consistenter)"
+    elif joint_matches_count >= 5:
+        if sniffer_unconf == 0 and sniffer_faster >= shazam_faster:
+            rec = f"Voorlopig: Sniffer sneller ({sniffer_faster} vs {shazam_faster}), test door tot 50"
+        elif sniffer_unconf > 0:
+            rec = f"Voorlopig: Shazam aanbevolen ({sniffer_unconf} valse sniffs gezien)"
+        else:
+            rec = "Voorlopig: Shazam sneller/stabieler, test door tot 50"
+    else:
+        rec = f"Verzamelen van aanbel-data ({joint_matches_count}/50 matches geregistreerd)"
+
+    return {
+        "joint_matches": joint_matches_count,
+        "joint_matches_count": joint_matches_count,
+        "target": 50,
+        "target_matches": 50,
+        "total_trials": shazam_total + sniffer_unconf,
+        "progress_percent": round(min(100.0, (joint_matches_count / 50.0) * 100.0), 1),
+        "shazam_total_triggers": shazam_total,
+        "sniffer_total_triggers": sniffer_total,
+        "sniffer_unconfirmed_count": sniffer_unconf,
+        "avg_delta_ms": avg_delta_ms,
+        "sniffer_faster_count": sniffer_faster,
+        "shazam_faster_count": shazam_faster,
+        "active_mode": active_mode,
+        "recommended_primary": rec,
+        "recommendation": rec,
+    }
+
+
+async def get_recent_comparison_trials(limit: int = 50) -> list[dict]:
+    """Retrieve recent ring comparison benchmark trials."""
+    async with get_db(write=False) as db:
+        cursor = await db.execute(
+            "SELECT * FROM ring_comparison_trials ORDER BY id DESC LIMIT ?",
+            (max(1, min(limit, 100)),),
+        )
+        rows = await cursor.fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["result"] = d.get("event_type", "")
+            d["sniffer_bytes_len"] = d.get("sniffer_plen", 0)
+            d["sniffer_hex_preview"] = d.get("sniffer_hex", "")
+            result.append(d)
+        return result
+

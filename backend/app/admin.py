@@ -544,6 +544,45 @@ async def admin_test_push(request: Request):
     return {"status": "ok", "message": "🔔 Foxway Test Melding: Push-verbinding werkt 100%!"}
 
 
+# ── 50-Triggers Benchmark & Mode Switcher (v3.6.6) ──────────────────────────
+
+class RingTriggerModeRequest(BaseModel):
+    mode: str
+
+
+@router.get("/api/v1/admin/ring-comparison-benchmark")
+async def get_ring_comparison_benchmark(request: Request):
+    """Returns the 50-triggers benchmark summary and recent trials."""
+    require_admin(request)
+    from app.models import get_ring_comparison_summary, get_recent_comparison_trials
+    from app.ring_coordinator import ring_coordinator
+    summary = await get_ring_comparison_summary()
+    trials = await get_recent_comparison_trials(limit=50)
+    return {
+        "status": "ok",
+        "current_mode": ring_coordinator.mode,
+        "summary": summary,
+        "trials": trials,
+    }
+
+
+@router.post("/api/v1/admin/ring-trigger-mode")
+async def set_ring_trigger_mode(req: RingTriggerModeRequest, request: Request):
+    """Sets the ring trigger mode: SHAZAM_PRIMARY, SNIFFER_PRIMARY, or DUAL_CONFIRM."""
+    require_admin(request)
+    valid_modes = {"SHAZAM_PRIMARY", "SNIFFER_PRIMARY", "DUAL_CONFIRM"}
+    if req.mode not in valid_modes:
+        raise HTTPException(status_code=400, detail=f"Invalid mode. Must be one of: {valid_modes}")
+
+    from app.models import set_system_setting
+    from app.ring_coordinator import ring_coordinator
+    await set_system_setting("ring_trigger_mode", req.mode)
+    ring_coordinator.set_mode(req.mode)
+    logger.info("🔧 Ring trigger mode set to %s by admin", req.mode)
+    return {"status": "ok", "mode": req.mode, "message": f"Aanbelmodus ingesteld op {req.mode}"}
+
+
+
 @router.get("/api/v1/admin/inspector-snapshot/{log_id}")
 async def get_inspector_snapshot_endpoint(log_id: int, request: Request):
     """Serve debug/inspector snapshot for AI audit log entry (v3.5.0)."""

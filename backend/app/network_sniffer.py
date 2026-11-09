@@ -72,6 +72,72 @@ def _build_arp_packet(hwsrc: str, psrc: str, hwdst: str, pdst: str, op: int = 2)
     return eth_header + arp_header
 
 
+def decode_doorbell_packet(proto: str, sport: int, dport: int, payload: bytes) -> dict:
+    """
+    Decodes an inbound/outbound packet from/to the doorbell.
+    Parses MQTT 3.1.1 on port 8820 or Hikvision LAN alarm on port 8000.
+    """
+    plen = len(payload)
+    full_hex = payload.hex()
+    mqtt_header_hex = full_hex[:6]
+    mqtt_topic = ""
+    cmd_bytes_hex = ""
+    is_ring_payload = False
+    sig_name = "ROUTINE"
+
+    is_mqtt = False
+
+    if proto == "TCP" and dport == 8820 and plen >= 15:
+        b0 = payload[0]
+        if (b0 & 0xF0) == 0x30:  # MQTT PUBLISH (bijv. 0x31)
+            is_mqtt = True
+            idx = 1
+            rem_len = 0
+            mult = 1
+            while idx < min(5, plen):
+                b = payload[idx]
+                rem_len += (b & 0x7F) * mult
+                mult *= 128
+                idx += 1
+                if (b & 0x80) == 0:
+                    break
+            if idx + 2 <= plen:
+                tlen = (payload[idx] << 8) | payload[idx + 1]
+                t_start = idx + 2
+                t_end = min(plen, t_start + tlen)
+                mqtt_topic = payload[t_start:t_end].decode("ascii", errors="replace")
+                cmd_bytes_hex = payload[t_end : min(plen, t_end + 16)].hex()
+
+            # Signature A: Specifieke aanbel-pakketgrootte (195B, 205B, 208B, 336B) of afwijkend MQTT-topic
+            if (194 <= plen <= 240) or (300 <= plen <= 420) or (mqtt_topic and mqtt_topic != "/2000/4103"):
+                is_ring_payload = True
+                sig_name = "SIG_A_MQTT_EVENT"
+
+    elif proto == "TCP" and (sport == 8000 or dport == 8000) and plen >= 32:
+        # Hikvision LAN SDK port 8000 alarm upload check
+        if b"\x00\x00\x11\x00" in payload[:16] or b"\x00\x00\x50\x02" in payload[:16]:
+            is_ring_payload = True
+            cmd_bytes_hex = full_hex[:32]
+            sig_name = "LAN_8000_ALARM"
+
+    return {
+        "proto": proto,
+        "sport": sport,
+        "dport": dport,
+        "plen": plen,
+        "bytes_len": plen,
+        "full_hex": full_hex,
+        "mqtt_header_hex": mqtt_header_hex,
+        "mqtt_topic": mqtt_topic,
+        "topic": mqtt_topic,
+        "cmd_bytes_hex": cmd_bytes_hex,
+        "is_ring_payload": is_ring_payload,
+        "sig_name": sig_name,
+        "signature": sig_name,
+        "is_mqtt_publish": is_mqtt,
+    }
+
+
 class NetworkSniffer:
     """Active ARP-Redirect and EZVIZ Cloud Packet Sniffer."""
 
@@ -95,6 +161,12 @@ class NetworkSniffer:
         self._current_window_packets: List[dict] = []
         self._current_window_start: float = time.time()
         self._window_lock = threading.Lock()
+
+        # v3.6.6: Raw packets buffer (last 15s) and MQTT publish 1.6s burst window
+        self._recent_raw_packets: Deque[dict] = collections.deque(maxlen=500)
+        self._mqtt_publish_window: Deque[tuple] = collections.deque(maxlen=100)
+        self.learned_ring_cmd_hashes: set[str] = set()
+        self._last_packet_8820_seen_ts: float = time.time()
 
         # Passive Differential Byte Learner (v3.5.1)
         self._payload_buffer: Deque[dict] = collections.deque(maxlen=2000)
@@ -203,7 +275,7 @@ class NetworkSniffer:
             logger.debug("ARP restore exception: %s", e)
 
     def _arp_redirect_loop(self) -> None:
-        """Sends targeted ARP reply to doorbell every 2.0s."""
+        """Sends targeted ARP reply to doorbell every 1.5s with watchdog."""
         logger.info("🚀 Starting targeted ARP redirect for %s via %s (%s)", self.doorbell_ip, self.server_ip, self.server_mac)
         arp_pkt = _build_arp_packet(
             hwsrc=self.server_mac,
@@ -211,6 +283,13 @@ class NetworkSniffer:
             hwdst=self.doorbell_mac,
             pdst=self.doorbell_ip,
             op=2,
+        )
+        arp_who_has = _build_arp_packet(
+            hwsrc=self.server_mac,
+            psrc=self.server_ip,
+            hwdst="ff:ff:ff:ff:ff:ff",
+            pdst=self.doorbell_ip,
+            op=1,
         )
 
         try:
@@ -221,11 +300,20 @@ class NetworkSniffer:
             return
 
         while not self._stop_event.is_set():
+            now_t = time.time()
             try:
+                # 1. Targeted ARP reply (1.5s interval)
                 sock.send(arp_pkt)
+
+                # 2. ARP Watchdog: if > 60s without :8820 packet, send who-has + gratuitous update
+                if (now_t - self._last_packet_8820_seen_ts) > 60.0:
+                    sock.send(arp_who_has)
+                    sock.send(arp_pkt)
+                    self._last_packet_8820_seen_ts = now_t - 30.0  # throttle watchdog to every 30s
+                    logger.debug("ARP-Watchdog: >60s no :8820 traffic -> sent ARP probe & gratuitous update to %s", self.doorbell_ip)
             except Exception as se:
                 logger.debug("ARP send error: %s", se)
-            time.sleep(2.0)
+            time.sleep(1.5)
 
         try:
             sock.close()
@@ -279,10 +367,7 @@ class NetworkSniffer:
             if src_ip != self.doorbell_ip:
                 continue
 
-            # Ignore local LAN and multicast/broadcast
-            if dst_ip.startswith("192.168.") or dst_ip.startswith("224.") or dst_ip.startswith("255."):
-                continue
-
+            # Parse IP header protocol and lengths
             proto_num = ip_header[9]
             total_ip_len = struct.unpack("!H", ip_header[2:4])[0]
             payload_len = max(0, total_ip_len - ihl)
@@ -309,11 +394,37 @@ class NetworkSniffer:
                 raw_payload = raw_data[transport_offset + 8:]
                 payload_len = len(raw_payload)
 
+            # Allow LAN port 8000 SDK alarm packets through; otherwise ignore local LAN and multicast/broadcast
+            is_lan_sdk = (sport == 8000 or dport == 8000)
+            if not is_lan_sdk and (dst_ip.startswith("192.168.") or dst_ip.startswith("224.") or dst_ip.startswith("255.")):
+                continue
+
             payload_hex = raw_payload.hex() if raw_payload else ""
             pkt_now_t = time.time()
 
-            pkt_record = {
+            if dport == 8820 or sport == 8820:
+                self._last_packet_8820_seen_ts = pkt_now_t
+
+            # v3.6.6: Decode doorbell packet (MQTT 3.1.1 on :8820 or LAN :8000)
+            decoded = decode_doorbell_packet(proto_name, sport, dport, raw_payload)
+
+            raw_item = {
                 "timestamp": datetime.datetime.now(AMSTERDAM_TZ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                "ts_float": pkt_now_t,
+                "proto": proto_name,
+                "sport": sport,
+                "dport": dport,
+                "dst_ip": dst_ip,
+                "plen": payload_len,
+                "hex": payload_hex,
+                "topic": decoded.get("mqtt_topic", ""),
+                "cmd": decoded.get("cmd_bytes_hex", ""),
+                "is_ring": decoded.get("is_ring_payload", False),
+                "sig_name": decoded.get("sig_name", ""),
+            }
+
+            pkt_record = {
+                "timestamp": raw_item["timestamp"],
                 "ts_float": pkt_now_t,
                 "src_ip": src_ip,
                 "src_port": sport,
@@ -327,12 +438,50 @@ class NetworkSniffer:
             }
 
             with self._window_lock:
+                self._recent_raw_packets.append(raw_item)
                 self._current_window_packets.append(pkt_record)
                 self.recent_packets.append(pkt_record)
                 self._payload_buffer.append(pkt_record)
                 # If no chime occurred in last 5 seconds, register hex into background baseline noise
                 if (pkt_now_t - self._last_shazam_ring_time) > 5.0 and payload_hex:
                     self.background_noise_hashes.add(payload_hex)
+
+            # Rolling 1.6s window for MQTT PUBLISH on port 8820
+            if proto_name == "TCP" and dport == 8820 and raw_payload and ((raw_payload[0] & 0xF0) == 0x30):
+                self._mqtt_publish_window.append((pkt_now_t, payload_len, decoded))
+            while self._mqtt_publish_window and (pkt_now_t - self._mqtt_publish_window[0][0]) > 1.6:
+                self._mqtt_publish_window.popleft()
+
+            # Evaluate 3 Signatures:
+            # Sig A: Specific ring payload length (195, 205, 208, 336) or non-default topic, or LAN 8000
+            is_sig_a = decoded.get("is_ring_payload", False)
+            # Sig B: >= 3 MQTT PUBLISH packets of >= 190 B within 1.6s
+            is_sig_b = len([p for p in self._mqtt_publish_window if p[1] >= 190]) >= 3
+            # Sig C: Learned command-bytes
+            cmd_hex_prefix = decoded.get("cmd_bytes_hex", "")[:16]
+            is_sig_c = bool(cmd_hex_prefix and (cmd_hex_prefix in self.learned_ring_cmd_hashes) and (cmd_hex_prefix not in self.background_noise_hashes))
+
+            if is_sig_a or is_sig_b or is_sig_c:
+                if (pkt_now_t - self._last_sniff_trigger_time) >= 4.0:
+                    self._last_sniff_trigger_time = pkt_now_t
+                    sig_name = decoded.get("sig_name") if is_sig_a else ("SIG_B_MQTT_BURST" if is_sig_b else f"SIG_C_LEARNED_CMD({cmd_hex_prefix})")
+                    logger.info("🚨 [Sniffer Trigger Matched] %s on %s:%d (plen=%dB)", sig_name, dst_ip, dport, payload_len)
+                    event_dict = {
+                        "timestamp": pkt_now_t,
+                        "sig_name": sig_name,
+                        "topic": decoded.get("mqtt_topic", ""),
+                        "plen": payload_len,
+                        "hex": payload_hex,
+                        "proto": proto_name,
+                        "sport": sport,
+                        "dport": dport,
+                        "cmd": cmd_hex_prefix,
+                    }
+                    try:
+                        from app.ring_coordinator import ring_coordinator
+                        ring_coordinator.register_sniffer_trigger(event_dict)
+                    except Exception as e:
+                        logger.debug("Failed notifying coordinator of sniffer trigger: %s", e)
 
         try:
             sock.close()
@@ -534,6 +683,17 @@ class NetworkSniffer:
         if candidates_found == 0:
             logger.info("ℹ️ [Sniffer Learner] No unique differential packets in [-4.5s, +1.5s] window beyond baseline noise.")
 
+        # Learn unique command-bytes from recent packets in [-2.0s, +3.5s] (v3.6.6)
+        with self._window_lock:
+            for p in list(self._recent_raw_packets):
+                if abs(p.get("ts_float", 0.0) - chime_timestamp) <= 3.5:
+                    cmd_hex = p.get("cmd", "")
+                    if cmd_hex and len(cmd_hex) >= 16:
+                        prefix = cmd_hex[:16]
+                        if prefix not in self.background_noise_hashes:
+                            self.learned_ring_cmd_hashes.add(prefix)
+                            logger.info("🧪 [Sniffer Learned Ring Command] Learned command bytes: %s", prefix)
+
         # 2. Look at bursts in recent history within [-4.5s, +1.5s] of chime for shadow diagnostics
         candidates = []
         for b in list(self.recent_bursts):
@@ -726,6 +886,21 @@ class NetworkSniffer:
         """Starts ARP redirect and raw packet sniffer."""
         if self._running:
             return
+
+        # Ensure host IP forwarding is active and redirects disabled
+        try:
+            if os.path.exists("/proc/sys/net/ipv4/ip_forward"):
+                with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
+                    f.write("1")
+        except Exception:
+            pass
+        try:
+            if os.path.exists("/proc/sys/net/ipv4/conf/all/send_redirects"):
+                with open("/proc/sys/net/ipv4/conf/all/send_redirects", "w") as f:
+                    f.write("0")
+        except Exception:
+            pass
+
         self._running = True
         self._loop = asyncio.get_running_loop()
         self._stop_event.clear()
@@ -738,7 +913,7 @@ class NetworkSniffer:
         self._sniff_thread = threading.Thread(target=self._sniff_loop, daemon=True, name="Raw-Packet-Sniffer")
         self._sniff_thread.start()
 
-        logger.info("✅ Network Sniffer & ARP Redirector active on %s", self.iface)
+        logger.info("✅ Network Sniffer & ARP Redirector active on %s (v3.6.6)", self.iface)
 
     async def stop(self) -> None:
         """Stops background threads and restores ARP table."""
