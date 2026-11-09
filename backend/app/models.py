@@ -1490,6 +1490,7 @@ async def get_recent_comparison_trials(limit: int = 50) -> list[dict]:
         result = []
         for r in rows:
             d = dict(r)
+            d["timestamp"] = d.get("created_at", "")
             d["result"] = d.get("event_type", "")
             d["sniffer_bytes_len"] = d.get("sniffer_plen", 0)
             d["sniffer_hex_preview"] = d.get("sniffer_hex", "")

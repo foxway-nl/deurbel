@@ -76,7 +76,7 @@ class TestV365SingleDingDong:
         if os.path.exists(clip_path):
             cmd = [
                 "ffmpeg", "-i", clip_path,
-                "-t", "25",  # First 25 seconds contains the chime event
+                "-t", "30",  # First 30 seconds contains the chime event (starts at 25.05s)
                 "-vn", "-ar", "16000", "-ac", "1",
                 "-f", "s16le", "pipe:1"
             ]
