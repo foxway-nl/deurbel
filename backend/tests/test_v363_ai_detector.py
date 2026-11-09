@@ -241,3 +241,4 @@ class TestV363AiDetector:
                                 # Verify NO ghost save_clip or delete_clip were called!
                                 mock_save.assert_not_called()
                                 mock_delete.assert_not_called()
+

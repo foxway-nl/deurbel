@@ -3,11 +3,10 @@
   "dst_port": 8820,
   "protocol": "TCP",
   "min_packet_count": 1,
-  "min_bytes": 323,
-  "max_bytes": 1155,
-  "last_calibrated": "2026-11-08T13:12:39.120134",
+  "min_bytes": 161,
+  "max_bytes": 577,
+  "last_calibrated": "2026-11-08T17:44:25.130600",
   "sample_payload_sizes": [
-    191,
     191
   ],
   "signature_type": "CALIBRATED_SHAZAM_BURST"

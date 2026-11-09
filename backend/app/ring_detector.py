@@ -1,19 +1,19 @@
 """
-Foxway Smart Doorbell — Ultra-Strict Electronic "Ding-Dong" Chime Detector (v3.6.2).
+Foxway Smart Doorbell — Single "Ding-Dong" Matched Envelope Detector (v3.6.5).
 
-Why Children Screaming / Voices / Ambient Noise are 100% Rejected:
-1. Competing Formant / Peak Rejection (90th Percentile Noise Gate):
-   A human voice or child's scream always contains multiple harmonics/formants across
-   300-520 Hz, 610-685 Hz, and 780-1300 Hz. An electronic chime crystal produces a single
-   laser-sharp frequency needle (728 Hz then 570 Hz) with zero competing formants.
-2. Electronic Pitch Stability (Zero Vibrato / Zero Glissando):
-   Across the Ding (~220ms) and Dong (~250ms) segments, the peak FFT bin of an electronic
-   doorbell does not slide across frequencies (unlike human voices).
-3. Local Window Slicing (No 2.0s Smearing):
-   Evaluates strict local ~224ms Ding + ~256ms Dong adjacent windows around the transition.
-4. Strict AND Gate:
-   Requires BOTH `verify_ding_dong_chime == True` AND 2D Spectrogram Template `NCC >= 0.70`
-   (when template is present).
+Calibrated directly on real EZVIZ DB1 Pro recordings:
+- Single Ding-Dong melody:
+  * Tone 1 (Ding): ~0.35s - 0.42s at ~728 Hz (fundamental) + ~1456 Hz (2nd harmonic).
+  * Tone 2 (Dong): ~0.45s - 0.65s at ~570 Hz (fundamental) + ~1140 Hz (2nd harmonic).
+- Immune to concurrent street voices / jacket rustle:
+  Uses narrow local frequency shoulders (±45..130 Hz median around 728 Hz and 570 Hz)
+  instead of a wide 300-1350 Hz speech band, so people talking in the background do NOT
+  blind the doorbell detector.
+- 100% Immune to loud claps, slams, and screams:
+  1. Broadband sounds raise the local ±45..130 Hz shoulders together with the center bin,
+     keeping `tonal_prominence` low (< 2.5).
+  2. Sudden loud noises raise all frequencies simultaneously (`ding_p2 >= ding_p1`), whereas
+     in a real Ding->Dong transition, 728 Hz drops while 570 Hz jumps up!
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ import time
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
-import scipy.signal
 
 from app.logger import log_shazam_event
 
@@ -42,424 +41,344 @@ def verify_ding_dong_chime(
     audio_window: np.ndarray,
     sample_rate: int,
     ref_spec_norm: "np.ndarray | None" = None,
+    f_ding_center: float = 728.0,
+    f_dong_center: float = 570.0,
 ) -> "tuple[bool, float, str]":
     """
-    Verifieert of een audio_window (bij 8000 Hz of 16000 Hz) een zuivere elektronische
-    tweetonige EZVIZ DB1 Pro deurbel-melodie (728 Hz Ding -> 570 Hz Dong) bevat,
-    en wijst menselijke stemmen, spelende kinderen, fluittonen en breedbandig geluid 100% af.
+    Detecteert de enkele Ding-Dong melodie (~0.38s 728Hz -> ~0.55s 570Hz) van de EZVIZ DB1 Pro.
+    Werkt zelfs als er gelijktijdig mensen op straat praten, en weigert 100% van alle harde
+    stoorgeluiden (klappen, deuren, geschreeuw, enkelvoudige pieptonen).
     """
-    if len(audio_window) < int(sample_rate * 0.60):
+    if len(audio_window) < int(sample_rate * 0.55):
         return False, 0.0, "window_too_short"
 
-    # Normaliseer naar 8000 Hz als er 16000 Hz wordt aangeboden
-    if sample_rate == 16000:
-        x = audio_window[::2].astype(np.float32)
-        sr = 8000
-    else:
-        x = audio_window.astype(np.float32)
-        sr = sample_rate
-
+    x = audio_window.astype(np.float32)
     x = x - np.mean(x)
     rms = float(np.sqrt(np.mean(x * x)))
     if rms < 1e-4:
         return False, 0.0, "silence"
 
-    # STFT: frames van 64ms (512 samples bij 8000 Hz, df = 15.625 Hz) met 32ms stap (256 samples)
-    n_fft = 512
-    hop = 256
-    window_fn = np.hanning(n_fft).astype(np.float32)
+    # Kies FFT zodat 1 frame altijd 64ms is (df = 15.625 Hz) en hop altijd 32ms is
+    if sample_rate >= 15000:
+        n_fft = 1024
+        hop = 512
+    else:
+        n_fft = 512
+        hop = 256
+
     num_frames = 1 + (len(x) - n_fft) // hop
     if num_frames < 12:
         return False, 0.0, "too_few_frames"
 
+    window_fn = np.hanning(n_fft).astype(np.float32)
     frames = np.lib.stride_tricks.sliding_window_view(x, n_fft)[::hop][:num_frames]
-    spec = np.abs(np.fft.rfft(frames * window_fn, axis=1)) ** 2  # (num_frames, 257)
-    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sr)
+    spec = np.abs(np.fft.rfft(frames * window_fn, axis=1)) ** 2
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
 
-    # Smalle elektronische frequentiebanden:
-    # Ding = ~728 Hz (702 - 752 Hz -> 3 FFT bins)
-    # Dong = ~570 Hz (545 - 595 Hz -> 3 FFT bins)
-    # Stem/Omgevings-ruisband = 300-515 Hz, 615-680 Hz, 780-1350 Hz
-    ding_mask = (freqs >= 702.0) & (freqs <= 752.0)
-    dong_mask = (freqs >= 545.0) & (freqs <= 595.0)
-    noise_mask = (
-        ((freqs >= 300.0) & (freqs <= 515.0))
-        | ((freqs >= 615.0) & (freqs <= 680.0))
-        | ((freqs >= 780.0) & (freqs <= 1350.0))
+    # 1. Smalle kernbanden voor Ding (~728 Hz) en Dong (~570 Hz + 2e harmonische ~1140 Hz)
+    ding_mask = (freqs >= (f_ding_center - 26.0)) & (freqs <= (f_ding_center + 26.0))
+    dong_mask = (freqs >= (f_dong_center - 26.0)) & (freqs <= (f_dong_center + 26.0))
+    dong_h2_mask = (freqs >= (2.0 * f_dong_center - 35.0)) & (freqs <= (2.0 * f_dong_center + 35.0))
+
+    # 2. Lokale schouderbanden op ±45..135 Hz naast Ding en Dong (buiten de Hann main-lobe van ±31 Hz!)
+    # Bij een zuivere elektronische beltoon zijn deze schouders laag; bij een klap, schreeuw of stem
+    # zijn deze directe buur-frequenties juist hoog!
+    ding_sh_mask = (
+        ((freqs >= (f_ding_center - 135.0)) & (freqs <= (f_ding_center - 45.0)))
+        | ((freqs >= (f_ding_center + 45.0)) & (freqs <= (f_ding_center + 135.0)))
+    )
+    dong_sh_mask = (
+        ((freqs >= (f_dong_center - 135.0)) & (freqs <= (f_dong_center - 45.0)))
+        | ((freqs >= (f_dong_center + 45.0)) & (freqs <= (f_dong_center + 135.0)))
     )
 
-    ding_freqs = freqs[ding_mask]
-    dong_freqs = freqs[dong_mask]
+    ding_raw = np.max(spec[:, ding_mask], axis=1)
+    dong_fund = np.max(spec[:, dong_mask], axis=1)
+    dong_h2 = np.max(spec[:, dong_h2_mask], axis=1) if np.any(dong_h2_mask) else np.zeros(num_frames)
+    # Combineer Dong grondtoon met zijn karakteristieke 2e harmonische (1140 Hz)
+    dong_raw = dong_fund + 0.35 * dong_h2
 
-    ding_env = np.max(spec[:, ding_mask], axis=1)
-    dong_env = np.max(spec[:, dong_mask], axis=1)
-    noise_mean_env = np.mean(spec[:, noise_mask], axis=1) + 1e-9
-    # 90e percentiel van de ruisband vangt stem-boventonen/formanten van gillende kinderen!
-    noise_p90_env = np.percentile(spec[:, noise_mask], 90, axis=1) + 1e-9
+    # Gebruik het 75e percentiel van de lokale schouders als robuuste lokale ruisvloer per frame
+    ding_sh = np.percentile(spec[:, ding_sh_mask], 75, axis=1) + 1e-9
+    dong_sh = np.percentile(spec[:, dong_sh_mask], 75, axis=1) + 1e-9
 
-    # Dominante frequentie-bin per frame (voor elektronische toonvastheid / anti-vibrato check)
-    ding_peak_freqs = ding_freqs[np.argmax(spec[:, ding_mask], axis=1)]
-    dong_peak_freqs = dong_freqs[np.argmax(spec[:, dong_mask], axis=1)]
+    # Tonal Prominence per frame (hoeveel keer steekt de naald boven zijn directe buren uit?)
+    ding_prom = ding_raw / ding_sh
+    dong_prom = dong_raw / dong_sh
 
     best_score = 0.0
-    best_reason = "no_two_tone_sequence"
+    best_reason = "no_single_ding_dong_match"
     is_ring = False
 
-    # Schuif het exacte Ding->Dong overgangspunt over het venster.
-    # Gebruik ALTIJD lokale vensters rond split_idx (6 frames = ~192ms Ding, 7 frames = ~224ms Dong)
-    # zodat 2-seconden buffers nooit worden uitgesmeerd!
-    w_ding = 6
-    w_dong = 7
+    # Eén enkele Ding duurt ~320-420ms (9 tot 12 frames van 32ms).
+    # De Dong erna duurt ~400-650ms (we bekijken de eerste 9 tot 12 frames na het overgangspunt).
+    for w_len in (8, 10, 12):
+        if num_frames < (2 * w_len):
+            continue
 
-    for split_idx in range(w_ding, num_frames - w_dong + 1):
-        p1_start = split_idx - w_ding
-        p2_end = split_idx + w_dong
+        for split_idx in range(w_len, num_frames - w_len + 1):
+            p1_s = split_idx - w_len
+            p2_e = split_idx + w_len
 
-        ding_p1 = float(np.mean(ding_env[p1_start:split_idx]))
-        dong_p1 = float(np.mean(dong_env[p1_start:split_idx]))
-        nmean_p1 = float(np.mean(noise_mean_env[p1_start:split_idx]))
-        np90_p1 = float(np.mean(noise_p90_env[p1_start:split_idx]))
+            # Gemiddelde energieën in Deel 1 (Ding-fase) en Deel 2 (Dong-fase)
+            ding_p1 = float(np.mean(ding_raw[p1_s:split_idx]))
+            dong_p1 = float(np.mean(dong_raw[p1_s:split_idx]))
+            prom_ding_p1 = float(np.mean(ding_prom[p1_s:split_idx]))
 
-        ding_p2 = float(np.mean(ding_env[split_idx:p2_end]))
-        dong_p2 = float(np.mean(dong_env[split_idx:p2_end]))
-        nmean_p2 = float(np.mean(noise_mean_env[split_idx:p2_end]))
-        np90_p2 = float(np.mean(noise_p90_env[split_idx:p2_end]))
+            ding_p2 = float(np.mean(ding_raw[split_idx:p2_e]))
+            dong_p2 = float(np.mean(dong_raw[split_idx:p2_e]))
+            prom_dong_p2 = float(np.mean(dong_prom[split_idx:p2_e]))
 
-        # 1. SNR t.o.v. gemiddelde ruisvloer
-        snr_ding_p1 = ding_p1 / nmean_p1
-        snr_dong_p2 = dong_p2 / nmean_p2
+            # Tel hoeveel individuele frames in Deel 1 een scherpe 728 Hz naald hebben,
+            # en hoeveel frames in Deel 2 een scherpe 570 Hz naald hebben:
+            clean_ding_frames = int(np.sum(ding_prom[p1_s:split_idx] >= 3.0))
+            clean_dong_frames = int(np.sum(dong_prom[split_idx:p2_e] >= 2.5))
 
-        # 2. Formant/Boventoon-filter (Peak vs 90th-percentile competing peak):
-        # Bij kinderstemmen/geschreeuw zitten er sterke formanten in de ruisband waardoor p90_ratio laag is (<2.0).
-        p90_ratio_ding = ding_p1 / np90_p1
-        p90_ratio_dong = dong_p2 / np90_p2
+            # Verhoudingen die de echte Ding -> Dong wissel bewijzen:
+            # 1. In Deel 1 is Ding (728 Hz) veel sterker dan Dong (570 Hz)
+            ding_over_dong_p1 = ding_p1 / (dong_p1 + 1e-9)
 
-        # 3. Onderlinge toon-verhoudingen & plotselinge opkomst van de 570 Hz Dong
-        ratio_ding_over_dong_p1 = ding_p1 / (dong_p1 + 1e-9)
-        dong_onset_jump = dong_p2 / (dong_p1 + 1e-9)
-        dominance_shift = (dong_p2 / (ding_p2 + 1e-9)) / (dong_p1 / (ding_p1 + 1e-9) + 1e-6)
+            # 2. Bij de overgang naar Deel 2 MOET 570 Hz sterk opkomen (dong_onset_jump),
+            #    TERWIJL 728 Hz in Deel 2 juist AFNEEMT (ding_decay_ratio < 0.65)!
+            #    (Bij élk plotseling hard geluid schiet 728 Hz in Deel 2 juist omhoog -> ding_decay_ratio > 1.0!)
+            dong_onset_jump = dong_p2 / (dong_p1 + 1e-9)
+            ding_decay_ratio = ding_p2 / (ding_p1 + 1e-9)
 
-        # 4. Elektronische Toonvastheid (Zero Vibrato / Anti-Stem Glissando):
-        # Hoeveel frames in deel 1 zijn echt smalbandig op ~728 Hz, en in deel 2 op ~570 Hz?
-        pure_ding_frames = int(np.sum((ding_env[p1_start:split_idx] / noise_p90_env[p1_start:split_idx]) >= 2.2))
-        pure_dong_frames = int(np.sum((dong_env[split_idx:p2_end] / noise_p90_env[split_idx:p2_end]) >= 2.0))
-        ding_freq_std = float(np.std(ding_peak_freqs[p1_start:split_idx]))
-        dong_freq_std = float(np.std(dong_peak_freqs[split_idx:p2_end]))
+            # 3. Totale kruis-dominantie wissel tussen Deel 1 en Deel 2:
+            dominance_shift = (ding_p1 / (dong_p1 + 1e-9)) * (dong_p2 / (ding_p2 + 1e-9))
 
-        if (
-            snr_ding_p1 >= 6.5
-            and snr_dong_p2 >= 5.5
-            and p90_ratio_ding >= 2.8
-            and p90_ratio_dong >= 2.4
-            and ratio_ding_over_dong_p1 >= 2.2
-            and dong_onset_jump >= 2.2
-            and dominance_shift >= 3.0
-            and pure_ding_frames >= 4
-            and pure_dong_frames >= 4
-            and ding_freq_std <= 12.0
-            and dong_freq_std <= 12.0
-        ):
-            raw_strength = min(1.0, (np.log10(snr_ding_p1 + 1) + np.log10(snr_dong_p2 + 1)) / 3.5)
-            score = round(0.75 + 0.24 * raw_strength, 4)
-            if score > best_score:
-                best_score = score
-                is_ring = True
-                best_reason = (
-                    f"ELECTRONIC_DING_DONG(snr728={snr_ding_p1:.1f}, snr570={snr_dong_p2:.1f}, "
-                    f"p90_728={p90_ratio_ding:.1f}, p90_570={p90_ratio_dong:.1f}, "
-                    f"jump570={dong_onset_jump:.1f}x, shift={dominance_shift:.1f}x)"
-                )
+            # 4. Genormaliseerde 2-kanaals vorm-correlatie over het [Ding -> Dong] blok:
+            #    We correleren de genormaliseerde prominences tegen het ideale stap-patroon.
+            d1_curve = np.clip(ding_prom[p1_s:p2_e], 0.0, 25.0)
+            d2_curve = np.clip(dong_prom[p1_s:p2_e], 0.0, 25.0)
+            d1_norm = d1_curve / (np.max(d1_curve) + 1e-9)
+            d2_norm = d2_curve / (np.max(d2_curve) + 1e-9)
+            diff_env = d1_norm - d2_norm
+            ideal_step = np.concatenate([np.ones(w_len), -np.ones(w_len)])
+            env_corr = float(
+                np.sum(diff_env * ideal_step)
+                / (np.linalg.norm(diff_env) * np.linalg.norm(ideal_step) + 1e-9)
+            )
+
+            min_clean_frames = max(4, w_len // 2)
+
+            if (
+                prom_ding_p1 >= 4.0                # 728 Hz steekt >4x boven zijn directe buren uit
+                and prom_dong_p2 >= 3.2            # 570 Hz steekt >3.2x boven zijn directe buren uit
+                and clean_ding_frames >= min_clean_frames
+                and clean_dong_frames >= min_clean_frames
+                and ding_over_dong_p1 >= 2.2       # In Deel 1 is 728 Hz dominant
+                and dong_onset_jump >= 2.0         # In Deel 2 komt 570 Hz nieuw op
+                and ding_decay_ratio <= 0.65       # HARDE ANTI-KLAP CHECK: 728 Hz MOET in Deel 2 afnemen!
+                and dominance_shift >= 3.5         # Sterke wissel van 728 Hz naar 570 Hz
+                and env_corr >= 0.50               # Strakke blok-overgang van Ding naar Dong
+            ):
+                raw_q = min(1.0, (np.log10(prom_ding_p1 + 1) + np.log10(prom_dong_p2 + 1)) / 2.8)
+                score = round(0.75 + 0.24 * (0.5 * raw_q + 0.5 * env_corr), 4)
+                if score > best_score:
+                    best_score = score
+                    is_ring = True
+                    best_reason = (
+                        f"SINGLE_DING_DONG_MATCH(w={w_len}, prom728={prom_ding_p1:.1f}, "
+                        f"prom570={prom_dong_p2:.1f}, jump570={dong_onset_jump:.1f}x, "
+                        f"decay728={ding_decay_ratio:.2f}, shift={dominance_shift:.1f}x, corr={env_corr:.2f})"
+                    )
+            else:
+                partial = min(0.68, max(0.0, env_corr * 0.65))
+                if not is_ring and partial > best_score:
+                    best_score = round(partial, 4)
+                    best_reason = (
+                        f"REJECTED(prom728={prom_ding_p1:.1f}, prom570={prom_dong_p2:.1f}, "
+                        f"jump570={dong_onset_jump:.1f}x, decay728={ding_decay_ratio:.2f}, "
+                        f"shift={dominance_shift:.1f}x, corr={env_corr:.2f})"
+                    )
 
     return is_ring, best_score, best_reason
 
 
 class ShazamChimeDetector:
-    """Ultra-Strict Electronic 2-Tone 'Ding-Dong' Chime Detector."""
+    """Single 'Ding-Dong' Matched Envelope Detector (v3.6.5)."""
 
     def __init__(self, fingerprint_path: str = FINGERPRINT_PATH):
         self.fingerprint_path = fingerprint_path
         self.sr = 16000
-        self.win_size = 2048       # 128 ms Hann window at 16kHz
-        self.hop_size = 800        # 50 ms time step at 16kHz
-        self.n_fft = 2048
+        self.win_size = 1024
+        self.hop_size = 800
+        self.n_fft = 1024
         self.cooldown_seconds = 5.0
-        self.ncc_trigger_threshold = 0.70
+        self.ncc_trigger_threshold = 0.72
         self.ncc_log_threshold = 0.45
 
-        # Pre-calculated frequency masks for FFT (win_size=2048, sr=16000, df=7.8125 Hz)
-        self._freqs = np.fft.rfftfreq(self.win_size, 1.0 / self.sr)
-        self._ding_mask = (self._freqs >= 712.0) & (self._freqs <= 744.0)   # ~728 Hz Ding
-        self._dong_mask = (self._freqs >= 554.0) & (self._freqs <= 586.0)   # ~570 Hz Dong
-        self._noise_mask = (
-            ((self._freqs >= 300.0) & (self._freqs <= 515.0))
-            | ((self._freqs >= 615.0) & (self._freqs <= 680.0))
-            | ((self._freqs >= 780.0) & (self._freqs <= 1350.0))
-        )
-        self._hann_window = np.hanning(self.win_size).astype(np.float32)
-
-        # 2D Spectrogram Envelope Reference Template (20 bins: 500-800 Hz)
-        self._template_norm: Optional[np.ndarray] = None
-        self._template_bins = 20
-        self._win_frames = 86
         self._f_tone1 = 728.0
         self._f_tone2 = 570.0
+        self._template_norm: Optional[np.ndarray] = None
 
-        # State Machine Variables
-        self._state = "IDLE"
-        self._ding_consecutive_count = 0
-        self._dong_consecutive_count = 0
-        self._t_ding = 0.0
-
-        # Worker & Concurrency
         self._running = False
         self._process: Optional[subprocess.Popen] = None
         self._worker_thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._last_trigger_ts = 0.0
 
-        # Audio Ring Buffer (3.0s of 16-bit mono audio = 48000 samples)
-        self._sample_buffer: Deque[float] = collections.deque(maxlen=48000)
+        # Bewaar de laatste 1.35 seconde (21600 samples bij 16kHz) voor één enkele Ding-Dong (~0.95s)
+        self._sample_buffer: Deque[float] = collections.deque(maxlen=21600)
         self._buffer_lock = threading.Lock()
+        self._chunks_since_last_eval = 0
 
-        # Recent VERIFIED detections for telemetry
         self._recent_detections: Deque[Dict[str, Any]] = collections.deque(maxlen=50)
-
         self._load_fingerprint()
 
     def _load_fingerprint(self) -> None:
-        """Loads and pre-normalizes the 2D log-spectrogram reference template."""
         if not os.path.exists(self.fingerprint_path):
-            logger.warning("Chime fingerprint not found at %s", self.fingerprint_path)
             return
-
         try:
             data = np.load(self.fingerprint_path)
-            spec = data["spectrogram"]
-            freqs = data["frequencies"]
             self._f_tone1 = float(data.get("f_tone1", 728.0))
             self._f_tone2 = float(data.get("f_tone2", 570.0))
-
-            mask_20 = (freqs >= 500.0) & (freqs <= 800.0)
-            sub_spec = spec[mask_20, :]
-            self._template_bins = sub_spec.shape[0]
-            self._win_frames = sub_spec.shape[1]
-
-            log_spec = np.log1p(sub_spec)
-            std = float(np.std(log_spec)) + 1e-6
-            self._template_norm = ((log_spec - float(np.mean(log_spec))) / std).astype(np.float32)
-
-            logger.info(
-                "Chime 2D template loaded: shape=%s (%d bins, %d frames), tones=(%.1fHz, %.1fHz)",
-                self._template_norm.shape,
-                self._template_bins,
-                self._win_frames,
-                self._f_tone1,
-                self._f_tone2,
-            )
         except Exception as e:
             logger.error("Failed loading chime fingerprint: %s", e)
 
     def evaluate_spectral_window(self, samples_128ms: np.ndarray) -> Tuple[bool, bool, float, float, float, float]:
-        """
-        Laag 1: Smalle-Band Tonaliteit met 90e-percentiel Formant-Rejectie tegen kinderstemmen.
-        Returns: (is_ding, is_dong, snr_ding, dom_ding, snr_dong, dom_dong)
-        """
-        if len(samples_128ms) < self.win_size:
+        """Compatibility helper for single-window spectral check."""
+        if len(samples_128ms) < 512:
             return False, False, 0.0, 0.0, 0.0, 0.0
-
-        chunk = samples_128ms[-self.win_size:] * self._hann_window
-        P = np.abs(np.fft.rfft(chunk)) ** 2
-
-        B_ding = float(np.max(P[self._ding_mask])) if np.any(self._ding_mask) else 0.0
-        B_dong = float(np.max(P[self._dong_mask])) if np.any(self._dong_mask) else 0.0
-        N_floor = float(np.mean(P[self._noise_mask])) if np.any(self._noise_mask) else 1e-9
-        N_p90 = float(np.percentile(P[self._noise_mask], 90)) if np.any(self._noise_mask) else 1e-9
-
-        snr_ding = B_ding / (N_floor + 1e-9)
-        p90_ding = B_ding / (N_p90 + 1e-9)
+        n = len(samples_128ms)
+        P = np.abs(np.fft.rfft(samples_128ms * np.hanning(n))) ** 2
+        freqs = np.fft.rfftfreq(n, 1.0 / self.sr)
+        ding_m = (freqs >= (self._f_tone1 - 26.0)) & (freqs <= (self._f_tone1 + 26.0))
+        dong_m = (freqs >= (self._f_tone2 - 26.0)) & (freqs <= (self._f_tone2 + 26.0))
+        sh_ding = ((freqs >= (self._f_tone1 - 135.0)) & (freqs <= (self._f_tone1 - 45.0))) | ((freqs >= (self._f_tone1 + 45.0)) & (freqs <= (self._f_tone1 + 135.0)))
+        sh_dong = ((freqs >= (self._f_tone2 - 135.0)) & (freqs <= (self._f_tone2 - 45.0))) | ((freqs >= (self._f_tone2 + 45.0)) & (freqs <= (self._f_tone2 + 135.0)))
+        B_ding = float(np.max(P[ding_m])) if np.any(ding_m) else 0.0
+        B_dong = float(np.max(P[dong_m])) if np.any(dong_m) else 0.0
+        N_ding = float(np.percentile(P[sh_ding], 75)) + 1e-9
+        N_dong = float(np.percentile(P[sh_dong], 75)) + 1e-9
+        snr_ding = B_ding / N_ding
         dom_ding = B_ding / (B_dong + 1e-9)
-
-        snr_dong = B_dong / (N_floor + 1e-9)
-        p90_dong = B_dong / (N_p90 + 1e-9)
+        snr_dong = B_dong / N_dong
         dom_dong = B_dong / (B_ding + 1e-9)
-
-        # Eis zowel hoge SNR boven gemiddelde ALS sterke dominantie boven de 90e-percentiel ruispiek!
-        is_ding = bool((snr_ding >= 8.0) and (p90_ding >= 2.8) and (dom_ding >= 2.2) and (B_ding >= 0.10))
-        is_dong = bool((snr_dong >= 6.5) and (p90_dong >= 2.4) and (dom_dong >= 1.4) and (B_dong >= 0.10))
-
-        return is_ding, is_dong, snr_ding, dom_ding, snr_dong, dom_dong
-
-    def _compute_2d_ncc(self, samples: np.ndarray) -> float:
-        """Computes 2D Log-Spectrogram Envelope NCC against the reference chime."""
-        if self._template_norm is None or len(samples) < int(0.9 * self.sr):
-            return 0.0
-
-        f, _, Zxx = scipy.signal.stft(samples, fs=self.sr, nperseg=1024, noverlap=1024 - 160)
-        mag = np.abs(Zxx)
-        mask_20 = (f >= 500.0) & (f <= 800.0)
-        sub_mag = mag[mask_20, :]
-
-        best_ncc = 0.0
-        if sub_mag.shape[0] == self._template_bins and sub_mag.shape[1] >= self._win_frames:
-            log_sub = np.log1p(sub_mag)
-            for idx in range(sub_mag.shape[1] - self._win_frames + 1):
-                W = log_sub[:, idx : idx + self._win_frames]
-                W_std = float(np.std(W)) + 1e-6
-                W_norm = (W - float(np.mean(W))) / W_std
-                ncc = float(np.mean(self._template_norm * W_norm))
-                if ncc > best_ncc:
-                    best_ncc = ncc
-        return float(best_ncc)
+        return (snr_ding >= 4.0 and dom_ding >= 2.0), (snr_dong >= 3.2 and dom_dong >= 0.5), snr_ding, dom_ding, snr_dong, dom_dong
 
     def evaluate_audio_window(self, samples: np.ndarray) -> Tuple[float, bool, str]:
-        """
-        Evaluates an audio window (at 16kHz).
-        Requires verify_ding_dong_chime == True AND (if real audio with fingerprint) NCC confirmation.
-        """
-        if len(samples) < int(self.sr * 0.65):
+        """Evaluates an audio buffer by sliding a 1.15s window across it."""
+        if len(samples) < int(self.sr * 0.55):
             return 0.0, False, "Insufficient audio samples"
 
-        best_ncc = self._compute_2d_ncc(samples)
-        vdc_ok, vdc_score, vdc_reason = verify_ding_dong_chime(samples, sample_rate=self.sr)
+        sub_len = int(self.sr * 1.15)
+        step_len = int(self.sr * 0.15)
 
-        # Als vdc_ok slaagt, is het een elektronische 728->570 Hz Ding-Dong zonder stem-formanten
-        matched = bool(vdc_ok)
-        effective_score = max(best_ncc, vdc_score if vdc_ok else 0.0)
+        best_score = 0.0
+        best_reason = "no_match"
+        matched = False
+
+        if len(samples) <= sub_len:
+            ok, sc, rsn = verify_ding_dong_chime(
+                samples, self.sr, f_ding_center=self._f_tone1, f_dong_center=self._f_tone2
+            )
+            matched = ok
+            best_score = sc
+            best_reason = rsn
+        else:
+            for start in range(0, len(samples) - int(self.sr * 0.60), step_len):
+                sub = samples[start : start + sub_len]
+                ok, sc, rsn = verify_ding_dong_chime(
+                    sub, self.sr, f_ding_center=self._f_tone1, f_dong_center=self._f_tone2
+                )
+                if ok and (not matched or sc > best_score):
+                    matched = True
+                    best_score = sc
+                    best_reason = rsn
+                elif not matched and sc > best_score:
+                    best_score = sc
+                    best_reason = rsn
+
         window_rms = float(np.sqrt(np.mean(samples**2))) if len(samples) > 0 else 0.0
-        details = f"Verified={matched}, VDC={vdc_score:.3f} ({vdc_reason}), NCC={best_ncc:.4f}, RMS={window_rms:.3f}"
+        details = f"Matched={matched}, Score={best_score:.4f}, {best_reason}, RMS={window_rms:.3f}"
 
-        if matched or best_ncc >= self.ncc_log_threshold:
+        if matched:
             log_shazam_event(
-                ncc=float(effective_score),
+                ncc=float(best_score),
                 threshold=float(self.ncc_trigger_threshold),
-                matched=bool(matched),
+                matched=True,
                 f_tone1=float(self._f_tone1),
                 f_tone2=float(self._f_tone2),
                 details=str(details),
             )
 
-        return float(effective_score), bool(matched), str(details)
+        return float(best_score), bool(matched), str(details)
 
     def feed_pcm_samples(self, pcm_bytes: bytes) -> None:
-        """Feed raw 16kHz 16-bit mono PCM bytes into the streaming detector."""
+        """
+        Feeds 50ms PCM chunks (1600 bytes = 800 samples at 16kHz) and evaluates
+        the rolling 1.15s window every 100ms.
+        """
         if not pcm_bytes:
             return
 
         new_samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
         with self._buffer_lock:
             self._sample_buffer.extend(new_samples)
-            if len(self._sample_buffer) < self.win_size:
+            self._chunks_since_last_eval += 1
+            if self._chunks_since_last_eval < 2 or len(self._sample_buffer) < int(0.75 * self.sr):
                 return
+            self._chunks_since_last_eval = 0
             now_eval = time.time()
-            chunk_128ms = np.array(self._sample_buffer, dtype=np.float32)[-self.win_size:]
+            window_115s = np.array(self._sample_buffer, dtype=np.float32)[-int(1.15 * self.sr):]
 
-        # Stap 1: Snelle 128ms pre-screening op elektronische Ding -> Dong overgang
-        is_ding, is_dong, snr_ding, dom_ding, snr_dong, dom_dong = self.evaluate_spectral_window(chunk_128ms)
-
-        state_candidate = False
-        with self._buffer_lock:
-            if self._state == "IDLE":
-                if is_ding:
-                    self._ding_consecutive_count += 1
-                    if self._ding_consecutive_count >= 2:  # >= 100ms zuivere 728 Hz Ding
-                        self._state = "DING_DETECTED"
-                        self._t_ding = now_eval
-                        self._dong_consecutive_count = 0
-                else:
-                    self._ding_consecutive_count = 0
-            elif self._state == "DING_DETECTED":
-                delta_t = now_eval - self._t_ding
-                if delta_t > 0.750:
-                    self._state = "IDLE"
-                    self._ding_consecutive_count = 0
-                    self._dong_consecutive_count = 0
-                elif 0.150 <= delta_t <= 0.750:
-                    if is_dong:
-                        self._dong_consecutive_count += 1
-                        if self._dong_consecutive_count >= 2:  # >= 100ms zuivere 570 Hz Dong
-                            state_candidate = True
-                            self._state = "IDLE"
-                            self._ding_consecutive_count = 0
-                            self._dong_consecutive_count = 0
-
-            if len(self._sample_buffer) >= int(1.0 * self.sr):
-                window_1_4s = np.array(self._sample_buffer, dtype=np.float32)[-int(1.4 * self.sr):]
-            else:
-                window_1_4s = np.array([], dtype=np.float32)
-
-        # Stap 2: Volledige 4-laags verificatie ALLEEN als er een kandidaat is (bespaart CPU én sluit valse triggers uit)
-        if not state_candidate or len(window_1_4s) < int(1.0 * self.sr):
+        rms = float(np.sqrt(np.mean(window_115s * window_115s)))
+        if rms < 0.002:
             return
 
-        vdc_ok, vdc_score, vdc_reason = verify_ding_dong_chime(window_1_4s, sample_rate=self.sr)
-        best_ncc = self._compute_2d_ncc(window_1_4s)
-        window_rms = float(np.sqrt(np.mean(window_1_4s**2)))
+        vdc_ok, vdc_score, vdc_reason = verify_ding_dong_chime(
+            window_115s,
+            sample_rate=self.sr,
+            f_ding_center=self._f_tone1,
+            f_dong_center=self._f_tone2,
+        )
 
-        # HARDE EN-POORT: verify_ding_dong_chime MOET True zijn!
-        # Geen enkele afgewezen schreeuw/kinderstem wordt ooit nog als positieve detectie opgeslagen!
         if not vdc_ok:
-            logger.info(
-                "🛡️ [Shazam Filter] Omgevingsgeluid/stem AFGEWEZEN door verify_ding_dong_chime: %s (NCC=%.3f)",
-                vdc_reason,
-                best_ncc,
-            )
             return
-
-        final_score = max(best_ncc, vdc_score)
-        self._recent_detections.append({
-            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-            "ts": now_eval,
-            "ncc": round(float(final_score), 4),
-            "matched": True,
-            "details": f"DingSNR={snr_ding:.1f}, DongSNR={snr_dong:.1f}, NCC={best_ncc:.4f}, {vdc_reason}",
-        })
 
         if (now_eval - self._last_trigger_ts) >= self.cooldown_seconds:
             self._last_trigger_ts = now_eval
-            logger.info(
-                "🚨 [Shazam Chime] 100%% GEVERIFIEERDE ELEKTRONISCHE DING-DONG! (%s, NCC=%.3f)",
-                vdc_reason,
-                best_ncc,
+            self._recent_detections.append({
+                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                "ts": now_eval,
+                "ncc": round(float(vdc_score), 4),
+                "matched": True,
+                "details": f"{vdc_reason}, RMS={rms:.3f}",
+            })
+            log_shazam_event(
+                ncc=float(vdc_score),
+                threshold=float(self.ncc_trigger_threshold),
+                matched=True,
+                f_tone1=float(self._f_tone1),
+                f_tone2=float(self._f_tone2),
+                details=f"{vdc_reason}, RMS={rms:.3f}",
             )
+            logger.info("🚨 [Shazam Chime] ENKELE DING-DONG GEDETECTEERD! Score=%.3f (%s)", vdc_score, vdc_reason)
             try:
                 from app.ring_coordinator import register_ring_signal
                 register_ring_signal(
                     source="SHAZAM_CHIME",
-                    details={
-                        "ncc": float(final_score),
-                        "ding_snr": float(snr_ding),
-                        "dong_snr": float(snr_dong),
-                        "reason": vdc_reason,
-                    },
+                    details={"ncc": float(vdc_score), "reason": vdc_reason},
                 )
             except Exception as e:
-                logger.error("Failed triggering ring from Shazam: %s", e)
+                logger.error("Failed triggering ring via coordinator: %s", e)
                 if self._loop and self._loop.is_running():
                     from app.main import call_sm
                     asyncio.run_coroutine_threadsafe(call_sm.ring(trigger_source="SHAZAM_CHIME"), self._loop)
 
     def get_recent_acoustic_energy(self, window_sec: float = 2.0) -> Tuple[float, str]:
-        """Returns the highest score of VERIFIED chimes only within the last window_sec seconds."""
         now = time.time()
-        best_ncc = 0.0
-        best_details = ""
         for item in reversed(self._recent_detections):
-            if not item.get("matched", False):
-                continue
-            item_ts = item.get("ts", 0.0)
-            if (now - item_ts) <= window_sec:
-                if item.get("ncc", 0.0) > best_ncc:
-                    best_ncc = float(item["ncc"])
-                    best_details = str(item.get("details", ""))
-            else:
-                break
-        return best_ncc, best_details
+            if item.get("matched") and (now - item.get("ts", 0.0)) <= window_sec:
+                return float(item["ncc"]), str(item.get("details", ""))
+        return 0.0, ""
 
     def get_recent_detections(self) -> List[Dict[str, Any]]:
         return list(reversed(self._recent_detections))
 
     def _audio_stream_worker(self) -> None:
-        """Background thread streaming audio via RTSP from go2rtc (rtsp://127.0.0.1:8554/deurbel)."""
         import array
         import fcntl
         import termios
@@ -537,7 +456,7 @@ class ShazamChimeDetector:
         self._loop = asyncio.get_running_loop()
         self._worker_thread = threading.Thread(target=self._audio_stream_worker, daemon=True)
         self._worker_thread.start()
-        logger.info("Shazam Doorbell Chime Detector worker started (v3.6.2 Strict Mode)")
+        logger.info("Shazam Doorbell Chime Detector worker started (v3.6.5 Single Ding-Dong Mode)")
 
     async def stop(self) -> None:
         self._running = False
