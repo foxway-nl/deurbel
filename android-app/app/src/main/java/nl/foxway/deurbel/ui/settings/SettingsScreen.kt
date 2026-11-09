@@ -43,6 +43,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import nl.foxway.deurbel.BuildConfig
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import nl.foxway.deurbel.FoxwayApp
@@ -204,7 +205,7 @@ fun SettingsScreen(
                     "model" to android.os.Build.MODEL,
                     "manufacturer" to android.os.Build.MANUFACTURER,
                     "android_sdk" to android.os.Build.VERSION.SDK_INT,
-                    "app_version" to "v3.5.4 (37)",
+                    "app_version" to "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
                     "base_url" to activeBaseUrl,
                     "is_wan_mode" to isWanMode
                 )
@@ -1049,7 +1050,7 @@ fun SettingsScreen(
             val appVersionText = remember {
                 try {
                     val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-                    val vName = pInfo.versionName ?: "3.5.4"
+                    val vName = pInfo.versionName ?: BuildConfig.VERSION_NAME
                     val vCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
                         pInfo.longVersionCode
                     } else {
@@ -1058,7 +1059,7 @@ fun SettingsScreen(
                     }
                     "Foxway Deurbel v$vName (Build $vCode)"
                 } catch (_: Exception) {
-                    "Foxway Deurbel v3.5.4 (Build 37)"
+                    "Foxway Deurbel v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
                 }
             }
 

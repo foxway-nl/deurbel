@@ -6,9 +6,16 @@ Welkom in het Foxway Smart Doorbell project. Lees deze regels zorgvuldig voordat
 
 ## 🚨 HARDE ANTI-REGRESSIE REGELS
 
-1. **NOOIT OUDE SPECS GEBRUIKEN:**
-   - De codebase bevindt zich op versie **v3.6.0** (`versionCode = 39`).
-   - Oude documenten over v1.0 / v2.0 / v2.3 / v2.4 / v2.5 / v2.6 / v2.8 / v2.9 / v3.0 / v3.1.2 / v3.1.4 / v3.2.0 / v3.3.0 / v3.3.1 / v3.4.0 / v3.4.1 / v3.5.0 / v3.5.1 / v3.5.2 / v3.5.3 / v3.5.4 / v3.5.5 / v3.5.6 mogen nooit leidend zijn.
+1. **NOOIT OUDE SPECS GEBRUIKEN & VERSIENUMMERS ALTIJD SYNCHROON HOUDEN:**
+   - De codebase bevindt zich op versie **v3.7.0** (`versionCode = 40`).
+   - Oude documenten over v1.0 / v2.0 / v2.3 / v2.4 / v2.5 / v2.6 / v2.8 / v2.9 / v3.0 / v3.1.2 / v3.1.4 / v3.2.0 / v3.3.0 / v3.3.1 / v3.4.0 / v3.4.1 / v3.5.x / v3.6.x mogen nooit leidend zijn.
+   - **HARDE VERSIE-SYNCHRONISATIE WET (NOOIT VERGETEN):** Bij ELKE versie-ophoging of release moeten de volgende locaties ALTIJD tegelijkertijd synchroon worden bijgewerkt:
+     1. `android-app/app/build.gradle.kts` (`versionCode = X`, `versionName = "X.Y.Z"`)
+     2. `backend/app/main.py` (`FastAPI(..., version="X.Y.Z")` én `@app.get("/api/v1/app/version")` / `@app.get("/api/v1/version")` met `"version": "X.Y.Z"`, `"version_code": X`, update changelog)
+     3. `backend/app/templates/login.html` en `backend/app/templates/admin.html` (versiebadges `vX.Y.Z`)
+     4. `android-app/app/src/main/java/nl/foxway/deurbel/ui/settings/SettingsScreen.kt` (gebruikt altijd `BuildConfig.VERSION_NAME` en `BuildConfig.VERSION_CODE`, hardcodeer hier NOOIT statische versies!)
+     5. `AGENTS.md` (deze Regel 1)
+     6. Release APK herbouwen en kopiëren naar `/mnt/opslag/deurbel/clips/foxway-deurbel.apk`
 
 2. **VERPLICHTE AGENT START- & EIND-ROUTINE:**
    - **START:** Elke agent draait ALTIJD eerst `python3 /mnt/opslag/deurbel/scripts/triage.py` om de huidige status en eventuele errors te controleren.

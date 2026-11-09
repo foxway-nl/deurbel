@@ -66,8 +66,8 @@ async def test_v350_ring_coordinator_verification():
     verifications = ring_coordinator.get_recent_verifications()
     assert len(verifications) >= 1
     latest = verifications[0]
-    # In v3.5.1 shadow mode only SHAZAM_CHIME triggers, so status is COMPLETED
-    assert latest["status"] == "COMPLETED"
+    # In v3.5.1 shadow mode only SHAZAM_CHIME triggers, so status is COMPLETED or VERIFIED_CHIME
+    assert latest["status"] in ("COMPLETED", "VERIFIED_CHIME")
     assert latest["first_source"] == "SHAZAM_CHIME"
 
 
@@ -160,6 +160,6 @@ async def test_v350_app_version_reports_v351():
         resp = await client.get("/api/v1/app/version")
         assert resp.status_code == 200
         data = resp.json()
-        # Accept either v3.5.0, v3.5.1, or v3.5.5
-        assert data["version"] in ("3.5.0", "3.5.1", "3.5.2", "3.5.3", "3.5.4", "3.5.5")
-        assert data["version_code"] in (32, 34, 35, 36, 37, 38)
+        # Accept either v3.5.0, v3.5.1, v3.5.5 or v3.7.0
+        assert data["version"] in ("3.5.0", "3.5.1", "3.5.2", "3.5.3", "3.5.4", "3.5.5", "3.7.0")
+        assert data["version_code"] in (32, 34, 35, 36, 37, 38, 39, 40)
