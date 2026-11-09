@@ -848,7 +848,11 @@ async def sync_and_index_clips_on_disk() -> dict:
 
             try:
                 f_size = mp4_file.stat().st_size
-                if f_size < 1000:
+                if f_size < 10000:
+                    continue
+                from app.recorder import _probe_duration
+                dur = await _probe_duration(str(mp4_file))
+                if dur <= 0:
                     continue
                 file_dt = datetime.fromtimestamp(mp4_file.stat().st_mtime, timezone.utc).isoformat()
                 thumb_cand = mp4_file.parent / f"thumb_{cid}.jpg"
@@ -864,6 +868,7 @@ async def sync_and_index_clips_on_disk() -> dict:
                     answered_by=ans,
                     status="READY",
                     category=cat,
+                    duration=dur,
                     file_size=f_size,
                     created_at=file_dt,
                 )

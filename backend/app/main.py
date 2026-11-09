@@ -306,8 +306,8 @@ async def _on_fetch_snapshot(call_id: str) -> str:
     return await fetch_snapshot(call_id)
 
 
-async def _on_start_recording(call_id: str, clip_path: str) -> asyncio.Task:
-    return await start_recording(call_id, clip_path)
+async def _on_start_recording(call_id: str, clip_path: str, trigger_source: str = "SHAZAM_CHIME") -> asyncio.Task:
+    return await start_recording(call_id, clip_path, trigger_source=trigger_source)
 
 
 async def _on_stop_recording(task: asyncio.Task) -> None:

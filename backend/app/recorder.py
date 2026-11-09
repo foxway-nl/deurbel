@@ -652,8 +652,22 @@ async def _record_call_smart(call_id: str, clip_path: str, trigger_source: str =
         actual_dur = await _probe_duration(clip_path)
         if actual_dur <= 0:
             actual_dur = dur
-        thumb_path = await ensure_thumbnail(call_id, clip_path, preroll_seconds=preroll)
         file_size = os.path.getsize(clip_path) if os.path.exists(clip_path) else 0
+
+        # Purge empty or corrupted clip (< 10 KB or duration == 0)
+        if file_size < 10240 or actual_dur <= 0:
+            logger.warning("Call recording for %s produced invalid clip (size=%d, dur=%.1fs) — deleting row", call_id, file_size, actual_dur)
+            try:
+                from app.models import delete_clip
+                await delete_clip(call_id)
+            except Exception as de:
+                logger.error("Failed to delete invalid clip row %s: %s", call_id, de)
+            if os.path.exists(clip_path):
+                try: os.remove(clip_path)
+                except Exception: pass
+            return
+
+        thumb_path = await ensure_thumbnail(call_id, clip_path, preroll_seconds=preroll)
 
         # Preserve answered_by or trigger source
         ans = f"Aanbellen [{trigger_source}]"
@@ -677,9 +691,9 @@ async def _record_call_smart(call_id: str, clip_path: str, trigger_source: str =
         cats = sorted(list(active_cats), key=lambda c: 0 if c == "ring" else 1 if c == "person" else 2)
         combined_cat = ",".join(cats) if cats else "ring"
 
-        await save_clip(
+        from app.models import update_clip
+        await update_clip(
             clip_id=call_id,
-            call_id=call_id,
             video_path=clip_path,
             snapshot_path=thumb_path,
             duration=actual_dur,

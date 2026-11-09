@@ -9,6 +9,8 @@
 *.pt
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
 foxway.db
 
 # Python

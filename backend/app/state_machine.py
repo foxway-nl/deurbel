@@ -167,32 +167,50 @@ class CallStateMachine:
                 except Exception:
                     logger.exception("Failed to fetch snapshot for %s", call_id)
 
-            if self.on_start_recording:
-                try:
-                    call.recorder_task = await self.on_start_recording(call_id, clip_path)
-                except Exception:
-                    logger.exception("Failed to start recorder for %s", call_id)
+            from app.recorder import is_recording_active, _active_recording_info
+            already_recording = is_recording_active()
 
-            # Synchronously create the Clip row with status = "RECORDING" (v3.5.4 Taak 1)
-            try:
-                from app.models import save_clip
-                await save_clip(
-                    clip_id=call_id,
-                    call_id=call_id,
-                    video_path=clip_path,
-                    snapshot_path=call.snapshot_path or "",
-                    status="RECORDING",
-                    category="ring",
-                    answered_by=f"Aanbellen [{trigger_source}]",
-                    created_at=call.started_at,
+            if already_recording:
+                active_cid = _active_recording_info.get("clip_id")
+                logger.info(
+                    "🔔 Doorbell ring while recording active (clip=%s) — merging call %s into existing clip",
+                    active_cid, call_id,
                 )
-            except Exception:
-                logger.exception("Failed to create initial RECORDING clip for %s", call_id)
+                if self.on_start_recording:
+                    try:
+                        call.recorder_task = await self.on_start_recording(call_id, clip_path, trigger_source=trigger_source)
+                    except Exception:
+                        logger.exception("Failed to merge recorder for %s", call_id)
+
+                if _active_recording_info.get("video_path"):
+                    call.clip_path = _active_recording_info["video_path"]
+            else:
+                # No recording active: start single record_smart_clip task and create single initial clip row
+                try:
+                    from app.models import save_clip
+                    await save_clip(
+                        clip_id=call_id,
+                        call_id=call_id,
+                        video_path=clip_path,
+                        snapshot_path=call.snapshot_path or "",
+                        status="RECORDING",
+                        category="ring",
+                        answered_by=f"Aanbellen [{trigger_source}]",
+                        created_at=call.started_at,
+                    )
+                except Exception:
+                    logger.exception("Failed to create initial RECORDING clip for %s", call_id)
+
+                if self.on_start_recording:
+                    try:
+                        call.recorder_task = await self.on_start_recording(call_id, clip_path, trigger_source=trigger_source)
+                    except Exception:
+                        logger.exception("Failed to start recorder for %s", call_id)
 
             await save_call_log(
                 call_id, CallState.RINGING.value,
                 snapshot_path=call.snapshot_path or "",
-                clip_path=clip_path,
+                clip_path=call.clip_path or clip_path,
             )
 
         asyncio.create_task(_async_media_init())
