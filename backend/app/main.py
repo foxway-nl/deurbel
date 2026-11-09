@@ -443,7 +443,7 @@ openapi_tags = [
 
 app = FastAPI(
     title="Foxway Smart Doorbell API",
-    version="3.7.0",
+    version="3.7.1",
     description="Signaling, state management, media proxy, and clip API for the Foxway Doorbell system.",
     openapi_tags=openapi_tags,
     lifespan=lifespan,
@@ -822,13 +822,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "3.7.0",
-        "version_code": 40,
-        "build_time": "2026-11-09T22:30:00Z",
+        "version": "3.7.1",
+        "version_code": 41,
+        "build_time": "2026-11-09T23:15:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.7.0: 4-laags fysische chime verificatie (Lock 1-4), schone database, dubbele clip-opname fix, pull-to-refresh op opnames feed en dynamische versie-synchronisatie.",
+        "changelog": "v3.7.1: Pull-to-refresh op opnames en instellingen, ververs-knoppen verwijderd voor uniforme swipe-to-refresh UX.",
     }
 
 

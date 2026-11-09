@@ -24,6 +24,9 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -272,6 +275,48 @@ fun SettingsScreen(
         }
     }
 
+    var isRefreshing by remember { mutableStateOf(false) }
+    val pullRefreshState = rememberPullToRefreshState()
+
+    val refreshAll: () -> Unit = {
+        coroutineScope.launch {
+            isRefreshing = true
+            try {
+                permState = PermissionChecker.checkAll(context)
+                endpointConfig = prefs.getEndpointConfig()
+                val jobUsers = launch {
+                    try {
+                        val api = ApiClientFactory.createApi()
+                        val resp = api.getUsers()
+                        if (resp.isSuccessful) {
+                            activeUsers = resp.body() ?: emptyList()
+                        }
+                    } catch (_: Exception) {}
+                }
+                val jobSettings = launch {
+                    try {
+                        val api = ApiClientFactory.createApi()
+                        val det = api.getDetectionSettings()
+                        if (det.isSuccessful) {
+                            det.body()?.let {
+                                detectionSettings = it
+                                saveSettingsToPrefs(it)
+                            }
+                        }
+                        val stor = api.getStorageSettings()
+                        if (stor.isSuccessful) {
+                            stor.body()?.let { storageStats = it }
+                        }
+                    } catch (_: Exception) {}
+                }
+                jobUsers.join()
+                jobSettings.join()
+            } finally {
+                isRefreshing = false
+            }
+        }
+    }
+
     LaunchedEffect(Unit) {
         endpointConfig = prefs.getEndpointConfig()
         refreshUsers()
@@ -290,25 +335,35 @@ fun SettingsScreen(
                     IconButton(onClick = { showLogsDialog = true }) {
                         Icon(imageVector = Icons.Default.Info, contentDescription = "Logboek", tint = CyanAccent)
                     }
-                    IconButton(onClick = {
-                        permState = PermissionChecker.checkAll(context)
-                        refreshUsers()
-                    }) {
-                        Icon(imageVector = Icons.Default.Refresh, contentDescription = "Vernieuwen", tint = TextPrimary)
-                    }
                 }
             )
         },
         containerColor = BackgroundDark
     ) { padding ->
-        Column(
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = { refreshAll() },
+            state = pullRefreshState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(scrollState)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp)
+                .padding(padding),
+            indicator = {
+                PullToRefreshDefaults.Indicator(
+                    state = pullRefreshState,
+                    isRefreshing = isRefreshing,
+                    modifier = Modifier.align(Alignment.TopCenter),
+                    containerColor = SurfaceDark,
+                    color = EmeraldPrimary
+                )
+            }
         ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(scrollState)
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(20.dp)
+            ) {
             // ── KAART 1: Profiel & Gekoppelde Apparaten ──────────────
             Card(
                 colors = CardDefaults.cardColors(containerColor = SurfaceDark),
@@ -1083,6 +1138,7 @@ fun SettingsScreen(
             }
         }
     }
+}
 
     // ── Dialog 1: Hardware Test Dialog (Requirement #7) ──────────────
     if (showHardwareTestDialog) {
