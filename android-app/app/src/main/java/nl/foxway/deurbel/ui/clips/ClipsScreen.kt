@@ -21,11 +21,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -162,15 +166,19 @@ fun ClipsScreen(
     }
 
     var cacheBuster by remember { mutableStateOf(System.currentTimeMillis()) }
+    var isRefreshing by remember { mutableStateOf(false) }
+    val pullRefreshState = rememberPullToRefreshState()
 
     // Load clips from backend with server-side filtering, pagination & cache-busting (v3.5.1)
     val loadClips: (Boolean) -> Unit = { isRefresh ->
         coroutineScope.launch {
             if (isRefresh) {
-                isLoading = true
+                isRefreshing = true
                 currentOffset = 0
                 cacheBuster = System.currentTimeMillis()
-                clips = emptyList()
+                if (clips.isEmpty()) {
+                    isLoading = true
+                }
             } else {
                 if (isFetchingMore || !hasMore) return@launch
                 isFetchingMore = true
@@ -206,6 +214,7 @@ fun ClipsScreen(
             } catch (_: Exception) {
             } finally {
                 isLoading = false
+                isRefreshing = false
                 isFetchingMore = false
             }
         }
@@ -330,17 +339,6 @@ fun ClipsScreen(
                             tint = if (selectedDateYmd != null) EmeraldPrimary else TextPrimary
                         )
                     }
-                    IconButton(onClick = { loadClips(true) }) {
-                        if (isLoading) {
-                            CircularProgressIndicator(
-                                color = EmeraldPrimary,
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp
-                            )
-                        } else {
-                            Icon(imageVector = Icons.Default.Refresh, contentDescription = "Vernieuwen", tint = TextPrimary)
-                        }
-                    }
                 }
             )
         },
@@ -404,17 +402,34 @@ fun ClipsScreen(
                 }
             }
 
-            Box(
+            PullToRefreshBox(
+                isRefreshing = isRefreshing,
+                onRefresh = { loadClips(true) },
+                state = pullRefreshState,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f)
+                    .weight(1f),
+                indicator = {
+                    PullToRefreshDefaults.Indicator(
+                        state = pullRefreshState,
+                        isRefreshing = isRefreshing,
+                        modifier = Modifier.align(Alignment.TopCenter),
+                        containerColor = SurfaceDark,
+                        color = EmeraldPrimary
+                    )
+                }
             ) {
                 if (isLoading && clips.isEmpty()) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(color = EmeraldPrimary)
                     }
                 } else if (clips.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState()),
+                        contentAlignment = Alignment.Center
+                    ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Icon(imageVector = Icons.Default.FilterAltOff, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(40.dp))
                             Text("Geen opnames gevonden voor dit filter", color = TextSecondary)
