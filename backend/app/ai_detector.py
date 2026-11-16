@@ -522,12 +522,19 @@ class SmartDetector:
                 jpeg_bytes = live_hub.get_latest_frame()
                 frame_ts = live_hub.latest_frame_ts
 
-                if not jpeg_bytes or frame_ts <= 0 or (frame_ts == last_processed_ts and (loop_start - frame_ts) > max_frame_age):
-                    jpeg_bytes = await live_hub.fetch_snapshot_async(timeout=0.8)
-                    frame_ts = live_hub.latest_frame_ts
+                # Prefer the in-memory frame already cached by live_hub.
+                # Only fall back to a direct HTTP fetch when live_hub has nothing
+                # at all — this avoids spawning redundant connections to go2rtc
+                # (which caused "broken pipe" errors + extra go2rtc CPU).
+                if not jpeg_bytes or frame_ts <= 0 or (
+                    frame_ts == last_processed_ts and (loop_start - frame_ts) > (max_frame_age * 2)
+                ):
+                    if not jpeg_bytes:
+                        jpeg_bytes = await live_hub.fetch_snapshot_async(timeout=1.5)
+                        frame_ts = live_hub.latest_frame_ts
 
                 if not jpeg_bytes:
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.10)
                     continue
 
                 last_processed_ts = frame_ts

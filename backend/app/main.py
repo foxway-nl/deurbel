@@ -839,7 +839,7 @@ async def app_version_endpoint():
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.7.1: Pull-to-refresh op opnames en instellingen, ververs-knoppen verwijderd voor uniforme swipe-to-refresh UX.",
+        "changelog": "v3.7.1: Achtergrond libx264-hercodering uitgeschakeld (CPU-piekpreventie). AI-detectie gebruikt uitsluitend live_hub in-memory frame. Debug-endpoints verwijderd.",
     }
 
 
@@ -2401,19 +2401,6 @@ async def get_devices():
         }
         for d in devices
     ]
-
-
-@app.get("/api/v1/debug/native_threads")
-def debug_native_threads():
-    import threading
-    res = {}
-    for t in threading.enumerate():
-        res[str(getattr(t, "native_id", None))] = {
-            "name": t.name,
-            "ident": t.ident,
-            "daemon": t.daemon,
-        }
-    return res
 
 
 # ══════════════════════════════════════════════════════════════════════

@@ -1151,65 +1151,21 @@ async def remove_clip(clip_id: str) -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  Background Video Compression (libx264 -crf 28)
+#  Background Video Compression — DISABLED (v3.7.1)
+#  record_smart_clip() already produces a lossless H.264 stream-copy MP4
+#  in 0.1s at 0% CPU. Re-encoding with libx264 -preset veryfast spawns
+#  12 unconstrained threads that pin the CPU for 60-90s on every clip,
+#  causing the mini-PC fan to run at full speed continuously.
 # ──────────────────────────────────────────────────────────────────────
 
 
 async def compress_clip_background(clip_path: str) -> bool:
     """
-    Compress clip in background using nice -n 19 and libx264 -crf 28.
-    Keeps audio clean with aac 48k. Reduces typical clip size to 1-4 MB
-    without noticeable loss of visual clarity.
+    NO-OP: Software re-encoding disabled (v3.7.1).
+    Clips are already valid H.264/AAC MP4s from the RAM ring-buffer stream-copy.
+    Calling this function is a safe no-op and returns False immediately.
     """
-    if not os.path.exists(clip_path) or "_compressed" in clip_path or "_tmp" in clip_path:
-        return False
-
-    tmp_path = clip_path.replace(".mp4", "_compressed_tmp.mp4")
-    cmd = [
-        "nice", "-n", "19",
-        "ffmpeg", "-y",
-        "-i", clip_path,
-        "-vcodec", "libx264",
-        "-crf", "28",
-        "-preset", "veryfast",
-        "-vf", "scale=960:720,setsar=1:1",
-        "-pix_fmt", "yuv420p",
-        "-acodec", "aac",
-        "-b:a", "48k",
-        "-movflags", "+faststart",
-        tmp_path,
-    ]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.communicate()
-        if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 1000:
-            old_size = os.path.getsize(clip_path)
-            new_size = os.path.getsize(tmp_path)
-            if new_size <= old_size or old_size == 0:
-                os.replace(tmp_path, clip_path)
-                logger.info(
-                    "Compressed %s: %d KB → %d KB (%.1f%% saving)",
-                    Path(clip_path).name,
-                    old_size // 1024,
-                    new_size // 1024,
-                    (1.0 - new_size / max(1, old_size)) * 100.0,
-                )
-            else:
-                os.remove(tmp_path)
-            return True
-        elif os.path.exists(tmp_path):
-            os.remove(tmp_path)
-    except Exception as e:
-        logger.warning("Compression error for %s: %s", clip_path, e)
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+    logger.debug("compress_clip_background: skipped (disabled) for %s", clip_path)
     return False
 
 
