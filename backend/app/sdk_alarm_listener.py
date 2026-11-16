@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import concurrent.futures
 import ctypes
 import datetime
 import logging
@@ -171,6 +172,7 @@ class SDKAlarmListener:
         self._recent_events: Deque[SDKAlarmEvent] = collections.deque(maxlen=100)
         self._last_trigger_ts: float = 0.0
         self._last_motion_payload: Optional[bytes] = None
+        self._db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="sdk_db")
 
     @property
     def is_connected(self) -> bool:
@@ -275,10 +277,10 @@ class SDKAlarmListener:
             event_name=event_name,
         )
 
-        # Write to SQLite sdk_alarm_logs table in background
-        threading.Thread(
-            target=self._insert_db_log,
-            args=(
+        # Write to SQLite sdk_alarm_logs table in background via dedicated worker pool
+        try:
+            self._db_executor.submit(
+                self._insert_db_log,
                 command_id,
                 f"0x{command_id:04x}",
                 cmd_name,
@@ -290,9 +292,9 @@ class SDKAlarmListener:
                 by_deploy_type,
                 payload_hex,
                 payload_ascii,
-            ),
-            daemon=True,
-        ).start()
+            )
+        except Exception as e:
+            logger.debug("Failed submitting sdk log to db executor: %s", e)
 
         return ev
 
@@ -686,8 +688,9 @@ class SDKAlarmListener:
                 return False
 
     async def _supervisor_loop(self) -> None:
-        """Continuous background monitor that maintains connection and auto-reconnects (v3.4.1: 2s check, 3s retry)."""
+        """Continuous background monitor that maintains connection and auto-reconnects with exponential backoff."""
         was_disconnected = False
+        retry_delay = 1.0
         while self._running:
             try:
                 if not self.is_connected:
@@ -695,22 +698,26 @@ class SDKAlarmListener:
                     logger.info("Connecting Port 8000 SDK Dual Alarm Channels...")
                     success = await asyncio.to_thread(self._setup_channel_sync)
                     if not success:
-                        logger.warning("Port 8000 SDK Alarm Channel setup failed, retrying in 3s...")
-                        await asyncio.sleep(3.0)
+                        logger.warning("Port 8000 SDK Alarm Channel setup failed, retrying in %.1fs...", retry_delay)
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 2.0, 30.0)
                         continue
                     else:
                         logger.info("🎉 [CAMERA RECONNECTED] Port 8000 SDK Dual Alarm Channels restored!")
                         was_disconnected = False
+                        retry_delay = 1.0
                 elif was_disconnected:
                     logger.info("🎉 [CAMERA RECONNECTED] Port 8000 SDK Dual Alarm Channels active!")
                     was_disconnected = False
+                    retry_delay = 1.0
 
                 await asyncio.sleep(2.0)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("Error in SDK alarm supervisor: %s", e)
-                await asyncio.sleep(3.0)
+                await asyncio.sleep(min(retry_delay, 10.0))
+                retry_delay = min(retry_delay * 2.0, 30.0)
 
     async def start(self) -> None:
         """Start the SDK alarm listener service."""
@@ -731,6 +738,11 @@ class SDKAlarmListener:
             except (asyncio.CancelledError, Exception):
                 pass
             self._supervisor_task = None
+
+        try:
+            self._db_executor.shutdown(wait=False)
+        except Exception:
+            pass
 
         await asyncio.to_thread(self._close_channel_sync)
         logger.info("Hikvision Port 8000 Hardware Alarm Listener stopped")

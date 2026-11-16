@@ -239,6 +239,7 @@ class RamRingBuffer:
 
     async def _supervise_loop(self) -> None:
         rtsp_url = "rtsp://127.0.0.1:8554/deurbel"
+        backoff = 1.0
         while self._running:
             cmd = [
                 "nice", "-n", "15",
@@ -252,6 +253,7 @@ class RamRingBuffer:
                 "-strftime", "1",
                 str(self.ring_dir / "seg_%s.ts"),
             ]
+            t_start = time.monotonic()
             try:
                 logger.info("Starting RAM ring buffer FFmpeg ingest: %s", " ".join(cmd))
                 self._proc = await asyncio.create_subprocess_exec(
@@ -265,8 +267,16 @@ class RamRingBuffer:
             except Exception as e:
                 logger.warning("RAM ring buffer ingest error: %s", e)
 
+            # If process ran stably for >10s, reset backoff
+            elapsed = time.monotonic() - t_start
+            if elapsed >= 10.0:
+                backoff = 1.0
+            else:
+                backoff = min(backoff * 2.0, 30.0)
+
             if self._running:
-                await asyncio.sleep(2)
+                logger.info("RAM ring buffer restarting in %.1fs...", backoff)
+                await asyncio.sleep(backoff)
 
 
 ring_buffer = RamRingBuffer()

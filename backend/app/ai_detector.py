@@ -34,9 +34,17 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+# Strict thread limits before importing C libraries
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OMP_WAIT_POLICY"] = "PASSIVE"
+os.environ["OPENCV_FOR_THREADS_NUM"] = "1"
+
 import cv2
 import numpy as np
 import onnxruntime as ort
+
+# Limit OpenCV internal thread pool to prevent thread explosion & high CPU contention
+cv2.setNumThreads(1)
 
 from app.config import settings
 from app.models import (
@@ -302,6 +310,7 @@ class SmartDetector:
         self._cooldown_seconds: float = 5.0
         self._prev_frame: Optional[np.ndarray] = None
         self._prev_frame_time: float = 0.0
+        self._last_full_inference_time: float = 0.0
 
         self.init_model()
 
@@ -321,12 +330,14 @@ class SmartDetector:
             if path and os.path.exists(path) and path.endswith(".onnx") and os.path.getsize(path) > 5_000_000:
                 try:
                     opts = ort.SessionOptions()
-                    opts.intra_op_num_threads = 4
+                    intra_threads = int(os.environ.get("AI_INFERENCE_THREADS", "2"))
+                    opts.intra_op_num_threads = intra_threads
+                    opts.inter_op_num_threads = 1
                     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
                     self._ort_session = ort.InferenceSession(path, sess_options=opts, providers=["CPUExecutionProvider"])
                     self._input_name = self._ort_session.get_inputs()[0].name
                     self._model_path = path
-                    logger.info("ONNXRuntime InferenceSession initialized from %s (4 threads)", path)
+                    logger.info("ONNXRuntime InferenceSession initialized from %s (%d threads)", path, intra_threads)
                     return True
                 except Exception as e:
                     logger.warning("Failed loading ONNX session from %s: %s (trying next candidate)", path, e)
@@ -492,7 +503,7 @@ class SmartDetector:
         logger.info("AI Engine stopped")
 
     async def _detection_loop(self) -> None:
-        """Main continuous detection loop running at true 4 FPS (0.25s target cycle)."""
+        """Main continuous detection loop running at adaptive 2-4 FPS."""
         await asyncio.sleep(1.5)
         last_processed_ts = 0.0
 
@@ -504,11 +515,14 @@ class SmartDetector:
                     await asyncio.sleep(1.0)
                     continue
 
+                is_active = self.is_motion_active() or (loop_start - self._last_full_inference_time) < 1.0
+                max_frame_age = 0.20 if is_active else 0.50
+
                 from app.live_hub import live_hub
                 jpeg_bytes = live_hub.get_latest_frame()
                 frame_ts = live_hub.latest_frame_ts
 
-                if not jpeg_bytes or frame_ts <= 0 or (frame_ts == last_processed_ts and (loop_start - frame_ts) > 0.20):
+                if not jpeg_bytes or frame_ts <= 0 or (frame_ts == last_processed_ts and (loop_start - frame_ts) > max_frame_age):
                     jpeg_bytes = await live_hub.fetch_snapshot_async(timeout=0.8)
                     frame_ts = live_hub.latest_frame_ts
 
@@ -526,9 +540,10 @@ class SmartDetector:
 
                 await self._process_frame_pipeline(raw_frame, now_t, cfg)
 
-                # Maintain steady 4 FPS (0.25s interval minus processing time)
+                # Maintain steady 4 FPS when active (0.25s), 2 FPS when idle (0.50s)
+                target_interval = 0.25 if is_active else 0.50
                 elapsed = time.time() - loop_start
-                sleep_dur = max(0.04, 0.25 - elapsed)
+                sleep_dur = max(0.04, target_interval - elapsed)
                 await asyncio.sleep(sleep_dur)
 
             except asyncio.CancelledError:
@@ -610,11 +625,7 @@ class SmartDetector:
         except Exception:
             exclusion_zones = []
 
-        # ── Step 2a: Full-Frame YOLO Inference (non-blocking) ──────────────
-        base_thresh = min(conf_animal, conf_person, conf_vehicle, 0.25)
-        raw_detections = await asyncio.to_thread(self._infer_image, frame, base_thresh)
-
-        # ── Step 2b: High-Res Motion Zoom-Crop Inference for Distant/Small Objects ──
+        # ── Step 2: Motion Contours & Motion-Gated Inference ──────────────
         contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         min_motion_area = int(0.0025 * w * h)  # >= 0.25% of frame (catches distant pedestrians & cyclists)
 
@@ -625,37 +636,58 @@ class SmartDetector:
             reverse=True,
         )[:2]
 
-        for cnt in motion_contours:
-            mx, my, mw, mh = cv2.boundingRect(cnt)
-            if mw < (0.50 * w) and mh < (0.55 * h) and (my + mh) >= int(0.20 * h):
-                motion_box = (float(mx), float(my), float(mx + mw), float(my + mh))
-                has_strong_full_det = any(
-                    compute_iou(motion_box, d[0]) >= 0.35 and d[1] >= 0.55 for d in raw_detections
-                )
-                if not has_strong_full_det:
-                    # Slice directly from HIGH-RES `raw_frame` with 35% margin!
-                    pad_w = max(24, int(0.35 * mw))
-                    pad_h = max(24, int(0.35 * mh))
-                    cx1_640 = max(0, mx - pad_w)
-                    cy1_640 = max(0, my - pad_h)
-                    cx2_640 = min(w, mx + mw + pad_w)
-                    cy2_640 = min(h, my + mh + pad_h)
+        # Motion-Gated Execution:
+        # If there are NO active tracks being tracked, NO camera hardware motion,
+        # NO recently verified objects, and NO motion contours in the scene,
+        # and periodic baseline check (every 2.0s) is not due:
+        # Skip deep neural network inference (YOLO + zoom crops) for this idle frame!
+        baseline_interval = float(os.environ.get("AI_BASELINE_SCAN_INTERVAL", "30.0"))
+        has_motion = (
+            len(motion_contours) > 0
+            or self.is_motion_active()
+            or (now - self._last_full_inference_time) >= baseline_interval
+        )
 
-                    rx1 = max(0, int(cx1_640 * scale_to_raw_x))
-                    ry1 = max(0, int(cy1_640 * scale_to_raw_y))
-                    rx2 = min(raw_w, int(cx2_640 * scale_to_raw_x))
-                    ry2 = min(raw_h, int(cy2_640 * scale_to_raw_y))
-                    high_res_crop = raw_frame[ry1:ry2, rx1:rx2]
+        raw_detections: List[Tuple[Tuple[float, float, float, float], float, int]] = []
+        if has_motion:
+            self._last_full_inference_time = now
 
-                    if high_res_crop.shape[0] >= 32 and high_res_crop.shape[1] >= 32:
-                        crop_dets = await asyncio.to_thread(self._infer_image, high_res_crop, max(0.26, base_thresh - 0.05))
-                        for c_box, c_conf, c_cid in crop_dets:
-                            # Map back from high_res_crop coordinates to normalized 640x480 space
-                            fx1 = float((rx1 + c_box[0]) / scale_to_raw_x)
-                            fy1 = float((ry1 + c_box[1]) / scale_to_raw_y)
-                            fx2 = float((rx1 + c_box[2]) / scale_to_raw_x)
-                            fy2 = float((ry1 + c_box[3]) / scale_to_raw_y)
-                            raw_detections.append(((fx1, fy1, fx2, fy2), c_conf, c_cid))
+            # ── Step 2a: Full-Frame YOLO Inference (non-blocking) ──────────────
+            base_thresh = min(conf_animal, conf_person, conf_vehicle, 0.25)
+            raw_detections = await asyncio.to_thread(self._infer_image, frame, base_thresh)
+
+            # ── Step 2b: High-Res Motion Zoom-Crop Inference for Distant/Small Objects ──
+            for cnt in motion_contours:
+                mx, my, mw, mh = cv2.boundingRect(cnt)
+                if mw < (0.50 * w) and mh < (0.55 * h) and (my + mh) >= int(0.20 * h):
+                    motion_box = (float(mx), float(my), float(mx + mw), float(my + mh))
+                    has_strong_full_det = any(
+                        compute_iou(motion_box, d[0]) >= 0.35 and d[1] >= 0.55 for d in raw_detections
+                    )
+                    if not has_strong_full_det:
+                        # Slice directly from HIGH-RES `raw_frame` with 35% margin!
+                        pad_w = max(24, int(0.35 * mw))
+                        pad_h = max(24, int(0.35 * mh))
+                        cx1_640 = max(0, mx - pad_w)
+                        cy1_640 = max(0, my - pad_h)
+                        cx2_640 = min(w, mx + mw + pad_w)
+                        cy2_640 = min(h, my + mh + pad_h)
+
+                        rx1 = max(0, int(cx1_640 * scale_to_raw_x))
+                        ry1 = max(0, int(cy1_640 * scale_to_raw_y))
+                        rx2 = min(raw_w, int(cx2_640 * scale_to_raw_x))
+                        ry2 = min(raw_h, int(cy2_640 * scale_to_raw_y))
+                        high_res_crop = raw_frame[ry1:ry2, rx1:rx2]
+
+                        if high_res_crop.shape[0] >= 32 and high_res_crop.shape[1] >= 32:
+                            crop_dets = await asyncio.to_thread(self._infer_image, high_res_crop, max(0.26, base_thresh - 0.05))
+                            for c_box, c_conf, c_cid in crop_dets:
+                                # Map back from high_res_crop coordinates to normalized 640x480 space
+                                fx1 = float((rx1 + c_box[0]) / scale_to_raw_x)
+                                fy1 = float((ry1 + c_box[1]) / scale_to_raw_y)
+                                fx2 = float((rx1 + c_box[2]) / scale_to_raw_x)
+                                fy2 = float((ry1 + c_box[3]) / scale_to_raw_y)
+                                raw_detections.append(((fx1, fy1, fx2, fy2), c_conf, c_cid))
 
         # ── Step 3: Cross-Scale Deduplication (NMS) & Supercategory Mapping ─
         classified_raw: List[Tuple[str, str, float, Tuple[float, float, float, float], float]] = []

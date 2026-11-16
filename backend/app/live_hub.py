@@ -62,6 +62,15 @@ class LiveHub:
         self._supervisor_task: Optional[asyncio.Task] = None
         self._proc: Optional[subprocess.Popen] = None
         self._udp_sock: Optional[socket.socket] = None
+        self._http_client: Optional[httpx.AsyncClient] = None
+
+    def _get_http_client(self, timeout: float = 2.0) -> httpx.AsyncClient:
+        """Shared persistent HTTP client with connection pooling for low-overhead go2rtc polling."""
+        if self._http_client is None or self._http_client.is_closed:
+            limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+            client_timeout = httpx.Timeout(connect=1.5, read=timeout, write=1.5, pool=2.0)
+            self._http_client = httpx.AsyncClient(limits=limits, timeout=client_timeout)
+        return self._http_client
 
     def is_fresh(self, max_age: float = 4.0, max_age_sec: Optional[float] = None) -> bool:
         """Return True only if the latest frame was decoded within the last max_age seconds."""
@@ -106,19 +115,19 @@ class LiveHub:
         return self.latest_jpeg
 
     async def fetch_snapshot_async(self, timeout: float = 2.0) -> Optional[bytes]:
-        """Fetch fresh JPEG frame asynchronously from go2rtc."""
+        """Fetch fresh JPEG frame asynchronously from go2rtc using persistent connection pool."""
+        client = self._get_http_client(timeout=timeout)
         for url in (GO2RTC_SUB_SNAPSHOT_URL, GO2RTC_SNAPSHOT_URL):
             try:
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    resp = await client.get(url)
-                    if resp.status_code == 200 and len(resp.content) > 1000:
-                        now = time.time()
-                        now_mono = time.monotonic()
-                        self.latest_jpeg = resp.content
-                        self.latest_frame_ts = now
-                        self.last_fresh_frame_time = now_mono
-                        self.frame_seq += 1
-                        return resp.content
+                resp = await client.get(url, timeout=timeout)
+                if resp.status_code == 200 and len(resp.content) > 1000:
+                    now = time.time()
+                    now_mono = time.monotonic()
+                    self.latest_jpeg = resp.content
+                    self.latest_frame_ts = now
+                    self.last_fresh_frame_time = now_mono
+                    self.frame_seq += 1
+                    return resp.content
             except Exception as e:
                 logger.debug("Snapshot async fetch (%s): %s", url, e)
         return self.latest_jpeg
@@ -140,6 +149,13 @@ class LiveHub:
                 await self._supervisor_task
             except asyncio.CancelledError:
                 pass
+
+        if self._http_client and not self._http_client.is_closed:
+            try:
+                await self._http_client.aclose()
+            except Exception:
+                pass
+            self._http_client = None
 
         self._cleanup_process()
         logger.info("Always-Warm RAM Live Hub stopped")
@@ -242,16 +258,36 @@ class LiveHub:
                 loop = asyncio.get_running_loop()
                 audio_task = asyncio.create_task(self._read_audio_loop(loop))
 
+                backoff_delay = 0.25
                 while self._running:
-                    # Keep latest frame fresh for continuous AI detection (at 4 FPS / 250ms)
-                    need_fetch = bool(self._clients) or not self.is_fresh(max_age=0.25)
+                    # Dynamically check if active high-rate polling is required
+                    has_clients = bool(self._clients)
+                    ai_active = False
+                    try:
+                        from app.ai_detector import smart_detector
+                        if smart_detector and smart_detector.is_motion_active():
+                            ai_active = True
+                    except Exception:
+                        pass
+
+                    # When clients are active or motion is occurring, poll at 4-5 FPS (0.20 - 0.25s)
+                    # When completely idle, poll at ~1.3 FPS (0.75s) to conserve CPU on both go2rtc and backend
+                    max_age = 0.25 if (has_clients or ai_active) else 0.75
+                    need_fetch = has_clients or not self.is_fresh(max_age=max_age)
+
                     if need_fetch:
                         frame = await self.fetch_snapshot_async(timeout=1.0)
                         if frame and self._clients:
                             self._broadcast(b"\x01" + frame)
+                        if not frame:
+                            # go2rtc error or restarting: back off slightly
+                            await asyncio.sleep(min(backoff_delay, 2.0))
+                            backoff_delay = min(backoff_delay * 1.5, 2.0)
+                            continue
+                        else:
+                            backoff_delay = 0.25
 
-                    # 200ms when clients active (5 FPS), 250ms for background AI detector (4 FPS)
-                    sleep_time = 0.20 if self._clients else 0.25
+                    sleep_time = 0.20 if has_clients else (0.25 if ai_active else 0.75)
                     await asyncio.sleep(sleep_time)
 
                 audio_task.cancel()

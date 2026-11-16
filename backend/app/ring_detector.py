@@ -460,7 +460,9 @@ class ShazamChimeDetector:
 
         logger.info("Starting Shazam RTSP audio consumer (low_delay) on %s", rtsp_url)
         had_disconnect = False
+        backoff = 1.0
         while self._running:
+            t_start = time.monotonic()
             try:
                 self._process = subprocess.Popen(
                     cmd,
@@ -493,7 +495,7 @@ class ShazamChimeDetector:
                     self.feed_pcm_samples(bytes(chunk))
             except Exception as e:
                 had_disconnect = True
-                logger.debug("Shazam audio stream error (retrying in 3s): %s", e)
+                logger.debug("Shazam audio stream error (retrying in %.1fs): %s", backoff, e)
             finally:
                 had_disconnect = True
                 if self._process:
@@ -503,8 +505,14 @@ class ShazamChimeDetector:
                         pass
                     self._process = None
 
+            elapsed = time.monotonic() - t_start
+            if elapsed >= 10.0:
+                backoff = 1.0
+            else:
+                backoff = min(backoff * 2.0, 30.0)
+
             if self._running:
-                time.sleep(3.0)
+                time.sleep(backoff)
 
     async def start(self) -> None:
         if self._running:
