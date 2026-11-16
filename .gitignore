@@ -6,6 +6,8 @@
 *.wav
 *.apk
 *.onnx
+*.onnx.bak
+*.bak
 *.pt
 *.db
 *.db-journal

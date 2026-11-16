@@ -612,19 +612,19 @@ class SmartDetector:
         contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         min_motion_area = int(0.0025 * w * h)  # >= 0.25% of frame (catches distant pedestrians & cyclists)
 
-        # Sort contours largest first, inspect top 2 motion regions
+        # Sort contours largest first, inspect top 1 motion region (v3.8.4 CPU limit)
         motion_contours = sorted(
             [c for c in contours if cv2.contourArea(c) >= min_motion_area],
             key=cv2.contourArea,
             reverse=True,
-        )[:2]
+        )[:1]
 
         # Motion-Gated Execution:
         # If there are NO active tracks being tracked, NO camera hardware motion,
         # NO recently verified objects, and NO motion contours in the scene,
-        # and periodic baseline check (every 2.0s) is not due:
+        # and periodic baseline check is not due:
         # Skip deep neural network inference (YOLO + zoom crops) for this idle frame!
-        baseline_interval = float(os.environ.get("AI_BASELINE_SCAN_INTERVAL", "30.0"))
+        baseline_interval = float(os.environ.get("AI_BASELINE_SCAN_INTERVAL", "120.0"))
         has_motion = (
             len(motion_contours) > 0
             or self.is_motion_active()

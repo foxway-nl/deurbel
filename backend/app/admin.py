@@ -460,7 +460,7 @@ async def get_admin_system_status(request: Request):
         "shazam_active": ring_detector._running,
         "sniffer_active": network_sniffer._running,
         "iface": network_sniffer.iface,
-        "recent_verifications": ring_coordinator.get_recent_verifications(),
+        "recent_verifications": ring_coordinator.get_recent_verifications() if hasattr(ring_coordinator, "get_recent_verifications") else [],
     }
 
     return {

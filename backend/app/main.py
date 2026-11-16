@@ -465,7 +465,7 @@ openapi_tags = [
 
 app = FastAPI(
     title="Foxway Smart Doorbell API",
-    version="3.8.3",
+    version="3.8.4",
     description="Signaling, state management, media proxy, and clip API for the Foxway Doorbell system.",
     openapi_tags=openapi_tags,
     lifespan=lifespan,
@@ -846,13 +846,13 @@ async def app_version_endpoint():
     target_path = apk_ram if apk_ram.exists() else apk_disk
     apk_size = target_path.stat().st_size if target_path.exists() else 0
     return {
-        "version": "3.8.3",
-        "version_code": 44,
-        "build_time": "2026-11-16T22:35:00Z",
+        "version": "3.8.4",
+        "version_code": 45,
+        "build_time": "2026-11-16T23:05:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.8.3: GZipMiddleware volledig verwijderd tegen CPU-pieken. APK primair geserveerd vanuit RAM (/dev/shm).",
+        "changelog": "v3.8.4: YOLOv8n (Nano) geactiveerd, baseline scan interval naar 120s, max 1 zoom-crop per frame om CPU-pieken te elimineren.",
     }
 
 

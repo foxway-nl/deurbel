@@ -13,8 +13,8 @@ android {
         applicationId = "nl.foxway.deurbel"
         minSdk = 28
         targetSdk = 35
-        versionCode = 44
-        versionName = "3.8.3"
+        versionCode = 45
+        versionName = "3.8.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
