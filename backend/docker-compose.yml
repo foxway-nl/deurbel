@@ -37,7 +37,10 @@ services:
       - FOXWAY_POST_HANGUP_RECORD_SECONDS=5
       # Clip retention
       - FOXWAY_CLIP_RETENTION_DAYS=30
+    shm_size: '2gb'
     volumes:
+      # RAM disk for instant APK downloads & ring buffers
+      - /dev/shm:/dev/shm
       # NAS storage mount — clips, snapshots, and SQLite database
       - /mnt/opslag/deurbel:/mnt/opslag/deurbel
       # Live app code and audio replies mount
