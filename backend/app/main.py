@@ -56,22 +56,7 @@ from fastapi import (
 )
 from starlette.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
-
-
-class SelectiveGZipMiddleware(GZipMiddleware):
-    """
-    High-performance GZip middleware that bypasses compression for pre-compressed
-    binary assets (.apk, .mp4, .ts) and continuous live streams.
-    Prevents 100% CPU spikes and thermal throttling on large downloads.
-    """
-    async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] == "http":
-            path = scope.get("path", "")
-            if path.endswith(".apk") or path.endswith(".mp4") or path.endswith(".ts") or "/live" in path:
-                await self.app(scope, receive, send)
-                return
-        await super().__call__(scope, receive, send)
+# from fastapi.middleware.gzip import GZipMiddleware  # Removed in v3.8.3: CPU hog on binary streams (.mp4 / .apk)
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from jose import jwt
 from pydantic import BaseModel, Field
@@ -350,6 +335,17 @@ async def lifespan(app: FastAPI):
 
     # Startup
     logger.info("🚀 Foxway Doorbell Backend starting on port %d", settings.HOST_PORT)
+
+    # Cache APK to RAM for instant downloads
+    try:
+        import shutil
+        apk_disk = Path("/mnt/opslag/deurbel/clips/foxway-deurbel.apk")
+        apk_ram = Path("/dev/shm/foxway-deurbel.apk")
+        if apk_disk.exists():
+            shutil.copy2(apk_disk, apk_ram)
+            logger.info("APK cached to /dev/shm for instant downloads")
+    except Exception as e:
+        logger.warning("Failed caching APK to RAM: %s", e)
     await init_db()
     from app.models import sync_and_index_clips_on_disk
     await sync_and_index_clips_on_disk()
@@ -412,18 +408,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not start Network Sniffer: %s", e)
 
-    # Pre-warm APK in DDR4 RAM (/dev/shm) for instant downloads (v3.8.1)
-    try:
-        disk_apk = Path("/mnt/opslag/deurbel/clips/foxway-deurbel.apk")
-        ram_apk = Path("/dev/shm/foxway-deurbel.apk")
-        if disk_apk.exists():
-            import shutil
-            shutil.copyfile(disk_apk, ram_apk)
-            os.chmod(ram_apk, 0o666)
-            logger.info("⚡ APK pre-warmed in /dev/shm (%d bytes)", ram_apk.stat().st_size)
-    except Exception as e:
-        logger.warning("Could not pre-warm APK in /dev/shm: %s", e)
-
     logger.info("✅ Backend ready")
     yield
 
@@ -481,7 +465,7 @@ openapi_tags = [
 
 app = FastAPI(
     title="Foxway Smart Doorbell API",
-    version="3.8.1",
+    version="3.8.3",
     description="Signaling, state management, media proxy, and clip API for the Foxway Doorbell system.",
     openapi_tags=openapi_tags,
     lifespan=lifespan,
@@ -496,7 +480,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(SelectiveGZipMiddleware, minimum_size=500)
+# app.add_middleware(GZipMiddleware, minimum_size=500)  # Disabled in v3.8.3: CPU hog on binary streams (.mp4 / .apk)
 
 
 @app.middleware("http")
@@ -857,18 +841,18 @@ async def put_camera_settings_endpoint(body: CameraSettingsUpdate):
 @app.get("/api/v1/version")
 async def app_version_endpoint():
     """In-app version check & 1-click self-updater information."""
-    ram_apk = Path("/dev/shm/foxway-deurbel.apk")
-    disk_apk = settings.CLIPS_DIR / "foxway-deurbel.apk"
-    apk_path = ram_apk if (ram_apk.exists() and ram_apk.stat().st_size > 1_000_000) else disk_apk
-    apk_size = apk_path.stat().st_size if apk_path.exists() else 0
+    apk_ram = Path("/dev/shm/foxway-deurbel.apk")
+    apk_disk = settings.CLIPS_DIR / "foxway-deurbel.apk"
+    target_path = apk_ram if apk_ram.exists() else apk_disk
+    apk_size = target_path.stat().st_size if target_path.exists() else 0
     return {
-        "version": "3.8.1",
-        "version_code": 43,
-        "build_time": "2026-11-16T22:05:00Z",
+        "version": "3.8.3",
+        "version_code": 44,
+        "build_time": "2026-11-16T22:35:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.8.1: APK geserveerd vanuit DDR4 RAM (/dev/shm). GZipMiddleware selectief omzeild voor APK & media streams (0% CPU compressie belasting).",
+        "changelog": "v3.8.3: GZipMiddleware volledig verwijderd tegen CPU-pieken. APK primair geserveerd vanuit RAM (/dev/shm).",
     }
 
 
@@ -1414,18 +1398,19 @@ async def cleanup_unclassified_clips(include_unstarred_vehicles: bool = Query(Tr
 @app.get("/foxway-deurbel.apk")
 @app.head("/foxway-deurbel.apk")
 async def download_apk():
-    """Direct download for the compiled Foxway Deurbel Android APK served from DDR4 RAM (/dev/shm)."""
-    ram_apk = Path("/dev/shm/foxway-deurbel.apk")
-    disk_apk = Path("/mnt/opslag/deurbel/clips/foxway-deurbel.apk")
-    apk_path = ram_apk if (ram_apk.exists() and ram_apk.stat().st_size > 1_000_000) else disk_apk
-    if not apk_path.exists():
+    """Direct download for the compiled Foxway Deurbel Android APK from RAM."""
+    apk_ram = Path("/dev/shm/foxway-deurbel.apk")
+    apk_disk = Path("/mnt/opslag/deurbel/clips/foxway-deurbel.apk")
+    
+    target_path = apk_ram if apk_ram.exists() else apk_disk
+    if not target_path.exists():
         raise HTTPException(404, "APK not found")
+        
     return FileResponse(
-        str(apk_path),
+        str(target_path),
         media_type="application/vnd.android.package-archive",
         filename="foxway-deurbel.apk",
         headers={
-            "Content-Encoding": "identity",
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
             "Expires": "0",
