@@ -454,7 +454,7 @@ openapi_tags = [
 
 app = FastAPI(
     title="Foxway Smart Doorbell API",
-    version="3.7.1",
+    version="3.8.0",
     description="Signaling, state management, media proxy, and clip API for the Foxway Doorbell system.",
     openapi_tags=openapi_tags,
     lifespan=lifespan,
@@ -833,13 +833,13 @@ async def app_version_endpoint():
     apk_path = settings.CLIPS_DIR / "foxway-deurbel.apk"
     apk_size = apk_path.stat().st_size if apk_path.exists() else 0
     return {
-        "version": "3.7.1",
-        "version_code": 41,
-        "build_time": "2026-11-09T23:15:00Z",
+        "version": "3.8.0",
+        "version_code": 42,
+        "build_time": "2026-11-16T20:00:00Z",
         "apk_url": "/clips/foxway-deurbel.apk",
         "apk_download_url": f"{settings.WAN_URL}/clips/foxway-deurbel.apk",
         "apk_size_bytes": apk_size,
-        "changelog": "v3.7.1: Achtergrond libx264-hercodering uitgeschakeld (CPU-piekpreventie). AI-detectie gebruikt uitsluitend live_hub in-memory frame. Debug-endpoints verwijderd.",
+        "changelog": "v3.8.0: Volledige media en database opschoning. Fysieke verplaatsing vereist voor dieren (d_2d >= 0.025, preventie valse IR koe-hallucinaties). MOG2 achtergronddrempel verhoogd (varThreshold=45) tegen nachtruis. Instant doorstep fallback verwijderd.",
     }
 
 

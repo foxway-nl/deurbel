@@ -212,32 +212,6 @@ class DetectionSettings:
             }
 
 
-class CandidateDetection:
-    """Legacy candidate detection structure for backward compatibility with test suites."""
-
-    def __init__(
-        self,
-        track_id: str,
-        category: str,
-        label: str,
-        box: Tuple[float, float, float, float],
-        confidence: float,
-        timestamp: float,
-        pixel_ratio: float = 0.0,
-    ):
-        self.track_id = track_id
-        self.category = category
-        self.label = label
-        self.best_box = box
-        self.best_conf = confidence
-        self.first_time = timestamp
-        self.last_time = timestamp
-        self.frames = [(timestamp, box, confidence)]
-        self.motion_ratios = [pixel_ratio]
-        self.verified = False
-        self.best_frame: Optional[np.ndarray] = None
-
-
 class TrackedTrajectory:
     """3D Trajectory tracking candidate across time."""
 
@@ -281,7 +255,7 @@ class SmartDetector:
         self._pytorch_model = None
 
         # Background Subtractor MOG2 for motion analysis
-        self.mog2 = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=22, detectShadows=False)
+        self.mog2 = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=45, detectShadows=False)
         self.kernel_3x3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 
         # Parked Car Baseline Memory
@@ -875,12 +849,6 @@ class SmartDetector:
                             "✅ [Person APPROVED (Doorstep Visitor)]: %s (conf=%.2f, y2=%.1f, mog=%.3f)",
                             trk.label, trk.best_conf, cur_box[3], recent_mog,
                         )
-                elif cur_box[3] > (0.52 * float(h)) and trk.best_conf >= 0.54 and recent_mog >= 0.018:
-                    is_approved = True
-                    logger.info(
-                        "✅ [Person APPROVED (Instant Doorstep)]: %s (conf=%.2f, y2=%.1f)",
-                        trk.label, trk.best_conf, cur_box[3],
-                    )
 
                 if is_approved:
                     self._last_person_seen = now_t
@@ -888,7 +856,9 @@ class SmartDetector:
                     to_dispatch.append(trk)
 
             elif trk.category == "animal":
-                if (len(recent_frames) >= 2 and d_2d >= 0.015) or (trk.best_conf >= 0.48 and recent_mog >= 0.015):
+                # HARDE EIS: Dieren MOETEN fysiek verplaatsen (d_2d >= 0.025). 
+                # Een stilstaand dier (d=0.0) is in 99% van de gevallen een hallucinerende struik in IR-zicht!
+                if len(recent_frames) >= 2 and d_2d >= 0.025:
                     is_approved = True
                     trk.verified = True
                     to_dispatch.append(trk)
