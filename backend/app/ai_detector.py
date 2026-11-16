@@ -503,9 +503,10 @@ class SmartDetector:
         logger.info("AI Engine stopped")
 
     async def _detection_loop(self) -> None:
-        """Main continuous detection loop running at adaptive 2-4 FPS."""
+        """Main continuous detection loop with Strict CPU Throttle on FFmpeg fallbacks."""
         await asyncio.sleep(1.5)
         last_processed_ts = 0.0
+        last_fetch_attempt = 0.0  # CPU SPIKE FIX: voorkomt FFmpeg fork bomb
 
         while self._running:
             loop_start = time.time()
@@ -521,24 +522,26 @@ class SmartDetector:
                 from app.live_hub import live_hub
                 jpeg_bytes = live_hub.get_latest_frame()
                 frame_ts = live_hub.latest_frame_ts
+                now_t = time.time()
 
-                # Prefer the in-memory frame already cached by live_hub.
-                # Only fall back to a direct HTTP fetch when live_hub has nothing
-                # at all — this avoids spawning redundant connections to go2rtc
-                # (which caused "broken pipe" errors + extra go2rtc CPU).
                 if not jpeg_bytes or frame_ts <= 0 or (
-                    frame_ts == last_processed_ts and (loop_start - frame_ts) > (max_frame_age * 2)
+                    frame_ts == last_processed_ts and (now_t - frame_ts) > (max_frame_age * 2)
                 ):
                     if not jpeg_bytes:
-                        jpeg_bytes = await live_hub.fetch_snapshot_async(timeout=1.5)
-                        frame_ts = live_hub.latest_frame_ts
+                        # HARDE CPU-THROTTLE: Maximaal 1 FFmpeg fetch per 5 seconden!
+                        if (now_t - last_fetch_attempt) > 5.0:
+                            last_fetch_attempt = now_t
+                            jpeg_bytes = await live_hub.fetch_snapshot_async(timeout=1.5)
+                            frame_ts = live_hub.latest_frame_ts
+                        else:
+                            await asyncio.sleep(0.5)
+                            continue
 
                 if not jpeg_bytes:
                     await asyncio.sleep(0.10)
                     continue
 
                 last_processed_ts = frame_ts
-                now_t = time.time()
 
                 raw_frame = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
                 if raw_frame is None:
@@ -547,7 +550,6 @@ class SmartDetector:
 
                 await self._process_frame_pipeline(raw_frame, now_t, cfg)
 
-                # Maintain steady 4 FPS when active (0.25s), 2 FPS when idle (0.50s)
                 target_interval = 0.25 if is_active else 0.50
                 elapsed = time.time() - loop_start
                 sleep_dur = max(0.04, target_interval - elapsed)

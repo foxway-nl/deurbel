@@ -1,14 +1,5 @@
-"""
-Foxway Smart Doorbell — Central Ring Coordinator & Isolated Sniffer Logger (v3.7.1).
-
-Architecture:
-- SHAZAM_CHIME completely dictates doorbell rings.
-- NETWORK_SNIFF is strictly an isolated background data-logger for the 50-triggers
-  comparison table and CANNOT EVER trigger a call or modify the call state machine.
-"""
-
+"""Foxway Smart Doorbell — Central Ring Coordinator & Isolated Sniffer Logger (v3.7.1)."""
 from __future__ import annotations
-
 import asyncio
 import collections
 import datetime
@@ -19,25 +10,17 @@ from typing import Any, Deque, Dict, List, Optional
 
 logger = logging.getLogger("foxway.ring_coordinator")
 
-
 class RingCoordinator:
     def __init__(self, cooldown_sec: float = 6.0):
         self.cooldown_sec = cooldown_sec
         self.mode: str = "SHAZAM_PRIMARY"
-
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._lock = threading.RLock()
-
         self._last_ring_ts: float = 0.0
         self._on_ring_callback = None
         self._active_window: Optional[Dict[str, Any]] = None
         self.verification_window_sec: float = 3.5
-
         self.recent_verifications: Deque[Dict[str, Any]] = collections.deque(maxlen=50)
-
-    def register_cloud_burst(self, burst_details: Dict[str, Any]) -> None:
-        """Passive cloud burst tracker stub."""
-        pass
 
     def reset(self) -> None:
         """Reset coordinator state between tests."""
@@ -49,23 +32,23 @@ class RingCoordinator:
         self._loop = loop
 
     def set_mode(self, mode: str) -> None:
-        self.mode = "SHAZAM_PRIMARY" # Afgedwongen, geen sniffer mode toegestaan
+        self.mode = "SHAZAM_PRIMARY" # Geen sniffer mode toegestaan
 
     def set_on_ring_callback(self, callback) -> None:
         self._on_ring_callback = callback
 
+    def register_cloud_burst(self, burst_details: Dict[str, Any]) -> None:
+        """Passive cloud burst tracker stub."""
+        pass
+
     def register_sniffer_trigger(self, sniffer_event: Dict[str, Any]) -> None:
-        """
-        Passive data logger. Logs the sniffer packet to the DB to compare against Shazam.
-        DOES NOT TRIGGER A CALL.
-        """
+        """PASSIEVE DATA LOGGER: Mag NOOIT een oproep starten!"""
         now = sniffer_event.get("timestamp", time.time())
         sniffer_sig = sniffer_event.get("sig_name", "")
         sniffer_topic = sniffer_event.get("topic", "")
         sniffer_plen = sniffer_event.get("plen", 0)
         sniffer_hex = sniffer_event.get("hex", "")[:64]
 
-        # Check if Shazam recently triggered
         is_both = False
         delta_ms = 0.0
         shazam_ts = 0.0
@@ -81,26 +64,17 @@ class RingCoordinator:
             try:
                 from app.models import save_ring_comparison_trial
                 await save_ring_comparison_trial(
-                    event_type=event_type,
-                    shazam_triggered=1 if is_both else 0,
-                    shazam_ts=shazam_ts,
-                    sniffer_triggered=1,
-                    sniffer_ts=now,
-                    sniffer_sig=sniffer_sig,
-                    sniffer_topic=sniffer_topic,
-                    sniffer_plen=sniffer_plen,
-                    sniffer_hex=sniffer_hex,
-                    delta_ms=delta_ms,
-                    faster_method=faster_method,
-                    active_mode="SHAZAM_PRIMARY",
+                    event_type=event_type, shazam_triggered=1 if is_both else 0, shazam_ts=shazam_ts,
+                    sniffer_triggered=1, sniffer_ts=now, sniffer_sig=sniffer_sig, sniffer_topic=sniffer_topic,
+                    sniffer_plen=sniffer_plen, sniffer_hex=sniffer_hex, delta_ms=delta_ms,
+                    faster_method=faster_method, active_mode="SHAZAM_PRIMARY"
                 )
             except Exception as e:
                 logger.error("Failed saving sniffer log: %s", e)
-
         self._dispatch_async_task(_save())
 
     def register_signal(self, source: str, details: Optional[Dict[str, Any]] = None) -> None:
-        """Entry point for valid ring triggers (SHAZAM_CHIME, TEST_BUTTON)."""
+        """Enige toegangspoort voor ECHTE aanbel-oproepen."""
         now = time.time()
         details = details or {}
 
@@ -119,23 +93,18 @@ class RingCoordinator:
                 "timestamp": datetime.datetime.now().isoformat(),
                 "status": "VERIFIED_CHIME",
                 "first_source": source,
-                "details": f"Geactiveerd via {source}",
+                "details": f"Geactiveerd via {source}"
             })
 
-            # Save SHAZAM event to comparison DB
             async def _save_shazam():
                 try:
                     from app.models import save_ring_comparison_trial
                     await save_ring_comparison_trial(
-                        event_type="SHAZAM_ONLY",
-                        shazam_triggered=1,
-                        shazam_ts=now,
-                        shazam_score=details.get("ncc", 0.0),
-                        shazam_details=details.get("reason", ""),
-                        active_mode="SHAZAM_PRIMARY",
+                        event_type="SHAZAM_ONLY", shazam_triggered=1, shazam_ts=now,
+                        shazam_score=details.get("ncc", 0.0), shazam_details=details.get("reason", ""),
+                        active_mode="SHAZAM_PRIMARY"
                     )
-                except Exception as e:
-                    pass
+                except Exception: pass
             self._dispatch_async_task(_save_shazam())
 
         self._dispatch_ring_to_state_machine(source)
@@ -144,33 +113,25 @@ class RingCoordinator:
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(coro, self._loop)
         else:
-            try:
-                asyncio.run(coro)
-            except Exception:
-                pass
+            try: asyncio.run(coro)
+            except Exception: pass
 
     def _dispatch_ring_to_state_machine(self, source: str) -> None:
         if self._on_ring_callback:
             try:
                 res = self._on_ring_callback(source, {})
-                if asyncio.iscoroutine(res):
-                    self._dispatch_async_task(res)
+                if asyncio.iscoroutine(res): self._dispatch_async_task(res)
                 return
-            except Exception:
-                pass
+            except Exception: pass
 
         async def _async_trigger():
             try:
                 from app.main import call_sm
                 await call_sm.ring(trigger_source=source)
             except Exception as e:
-                logger.error("[RingCoordinator] Failed to invoke call_sm.ring: %s", e)
-
+                logger.error("Failed to invoke call_sm.ring: %s", e)
         self._dispatch_async_task(_async_trigger())
 
-
 ring_coordinator = RingCoordinator()
-
-
 def register_ring_signal(source: str, details: Optional[Dict[str, Any]] = None) -> None:
     ring_coordinator.register_signal(source, details)
