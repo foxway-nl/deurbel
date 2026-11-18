@@ -2,6 +2,8 @@
 /clips/
 /snapshots/
 *.mp4
+!backend/app/assets/bel.mp4
+!claude/bel.mp4
 *.adts
 *.wav
 *.apk

@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     GO2RTC_API_URL: str = "http://127.0.0.1:1984"
     GO2RTC_RTSP_URL: str = "rtsp://127.0.0.1:8554/deurbel"
     GO2RTC_STREAM_NAME: str = "deurbel"
+    RTSP_URL: str = os.environ.get("RTSP_URL", "rtsp://127.0.0.1:8554/deurbel")
+
+    # ── Doorbell Audio Detection (doorbell_detector / bell_service) ────
+    DOORBELL_THRESHOLD: float = float(os.environ.get("DOORBELL_THRESHOLD", "0.30"))
+    DOORBELL_COOLDOWN: float = float(os.environ.get("DOORBELL_COOLDOWN", "8.0"))
+    BELL_REF_PATH: str = os.environ.get("BELL_REF_PATH", "/mnt/opslag/deurbel/backend/app/assets/bel.mp4")
 
     # ── Doorbell Hardware ──────────────────────────────────────────────
     DOORBELL_IP: str = ""

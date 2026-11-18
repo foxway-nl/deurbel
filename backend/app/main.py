@@ -382,12 +382,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not start SDK Alarm Listener: %s", e)
 
-    # Start Real-Time 3-Layer Shazam Doorbell Chime Detector
+    # Start Doorbell Audio Detector Service (bell_service / doorbell_detector.py)
     try:
-        from app.ring_detector import ring_detector
-        await ring_detector.start()
+        from app.bell_service import bell_service
+        await bell_service.start()
     except Exception as e:
-        logger.warning("Could not start Shazam Ring Detector: %s", e)
+        logger.warning("Could not start Doorbell Bell Service: %s", e)
 
     # Start RAM Ring Buffer for continuous smart pre-roll
     try:
@@ -437,8 +437,8 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     try:
-        from app.ring_detector import ring_detector
-        await ring_detector.stop()
+        from app.bell_service import bell_service
+        await bell_service.stop()
     except Exception:
         pass
     try:
@@ -592,6 +592,14 @@ async def get_status():
     state["server_lan_url"] = server_lan_url
     state["lan_url"] = server_lan_url
     return state
+
+
+@app.get("/api/v1/bell/status", tags=["Health & Diagnostics"])
+@app.get("/api/bell/status", tags=["Health & Diagnostics"])
+async def bell_status_endpoint():
+    """Returns real-time status of the doorbell audio detector thread and detector scores."""
+    from app.bell_service import bell_service
+    return bell_service.get_status()
 
 
 # ══════════════════════════════════════════════════════════════════════
