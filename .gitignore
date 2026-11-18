@@ -8,6 +8,7 @@
 *.wav
 *.apk
 *.onnx
+!backend/app/assets/yolo11n.onnx
 *.onnx.bak
 *.bak
 *.pt

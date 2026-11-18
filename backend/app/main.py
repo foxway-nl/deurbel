@@ -389,6 +389,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not start Doorbell Bell Service: %s", e)
 
+    # Start Door Watch AI Service (door_service / door_watch.py)
+    try:
+        from app.door_service import door_service
+        await door_service.start()
+    except Exception as e:
+        logger.warning("Could not start Door Service: %s", e)
+
     # Start RAM Ring Buffer for continuous smart pre-roll
     try:
         await ring_buffer.start()
@@ -439,6 +446,11 @@ async def lifespan(app: FastAPI):
     try:
         from app.bell_service import bell_service
         await bell_service.stop()
+    except Exception:
+        pass
+    try:
+        from app.door_service import door_service
+        await door_service.stop()
     except Exception:
         pass
     try:
@@ -2153,6 +2165,192 @@ async def update_storage_settings_endpoint(body: StorageSettingsModel):
     stats = await cleanup_storage_and_retention(body.retention_days, body.max_storage_gb)
     stats["retention_days"] = body.retention_days
     return StorageStatsResponse(**stats)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ROUTE: Door Watch Webhook & Status (door_watch.py integration)
+# ══════════════════════════════════════════════════════════════════════
+
+_last_door_event_time: float = 0.0
+_last_door_event_cat: str = ""
+_door_event_lock = asyncio.Lock()
+
+
+@app.post("/api/door-event", tags=["Door Watch"])
+@app.post("/api/v1/door-event", tags=["Door Watch"])
+async def receive_door_event(request: Request):
+    """
+    Webhook receiver for door_watch.py object detection events.
+    Payload: {"type": "person"|"animal"|"vehicle", "label": str, "conf": float, "snapshot": str, "t": float}
+    """
+    global _last_door_event_time, _last_door_event_cat
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    cat = str(payload.get("type", "person")).lower().strip()
+    label = str(payload.get("label", cat)).strip()
+    conf = float(payload.get("conf", 0.0))
+    snap_rel = payload.get("snapshot")
+    t_val = float(payload.get("t", 0.0))
+
+    # Priority gatekeeper: person (0) > animal (1) > vehicle (2)
+    prio_map = {"person": 0, "animal": 1, "vehicle": 2}
+    now = time.time()
+    async with _door_event_lock:
+        if (now - _last_door_event_time) < 8.0:
+            recent_prio = prio_map.get(_last_door_event_cat, 9)
+            current_prio = prio_map.get(cat, 9)
+            if current_prio > recent_prio:
+                logger.info(
+                    "Door event '%s' suppressed: recent higher-priority event '%s' occurred %.1fs ago",
+                    cat, _last_door_event_cat, now - _last_door_event_time
+                )
+                return {"status": "SUPPRESSED", "reason": f"priority: {_last_door_event_cat} > {cat}"}
+        _last_door_event_time = now
+        _last_door_event_cat = cat
+
+    # Format localized title and icon
+    cat_titles = {
+        "person": f"👤 Persoon gedetecteerd: {label}",
+        "animal": f"🐾 Dier gedetecteerd: {label}",
+        "vehicle": f"🚗 Voertuig in beweging: {label}",
+    }
+    title = cat_titles.get(cat, f"🔔 Beweging gedetecteerd: {label}")
+
+    # Determine silent / quiet hours
+    from app.models import get_system_settings, save_clip, save_event
+    sys_settings = await get_system_settings()
+    notify_key = f"notify_{cat}"
+    category_notify_enabled = sys_settings.get(notify_key, "true").lower() == "true"
+    detection_enabled = sys_settings.get("detection_enabled", "true").lower() == "true"
+    smart_ai_enabled = sys_settings.get("smart_ai_enabled", "true").lower() == "true"
+
+    in_quiet_hours = False
+    if sys_settings.get("quiet_hours_enabled", "false").lower() == "true":
+        try:
+            from zoneinfo import ZoneInfo
+            now_amsterdam = datetime.now(ZoneInfo("Europe/Amsterdam"))
+            cur_time_str = now_amsterdam.strftime("%H:%M")
+            start_str = sys_settings.get("quiet_hours_start", "23:30")
+            end_str = sys_settings.get("quiet_hours_end", "07:30")
+            if start_str > end_str:
+                in_quiet_hours = cur_time_str >= start_str or cur_time_str < end_str
+            else:
+                in_quiet_hours = start_str <= cur_time_str < end_str
+        except Exception as qe:
+            logger.debug("Quiet hours check error: %s", qe)
+
+    is_silent = in_quiet_hours or not category_notify_enabled or not detection_enabled or not smart_ai_enabled
+
+    # Snapshot URL handling
+    full_snap_path: Optional[Path] = None
+    snapshot_url = ""
+    if snap_rel:
+        snap_name = Path(snap_rel).name
+        cand_path = Path(settings.SNAPSHOTS_DIR) / snap_name
+        if cand_path.exists():
+            full_snap_path = cand_path
+        elif os.path.exists(snap_rel):
+            full_snap_path = Path(snap_rel)
+        snapshot_url = f"/api/v1/snapshots/{snap_name}"
+
+    # Generate clip identifiers
+    clip_id = uuid.uuid4().hex[:8]
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Save event in database
+    event_id = await save_event(
+        event_type="motion",
+        title=title,
+        category=cat,
+        clip_id=clip_id,
+        snapshot_url=snapshot_url,
+        silent=is_silent,
+    )
+
+    # Dispatched unified WS + FCM notification to mobile devices
+    ws_payload = {
+        "event_id": event_id,
+        "category": cat,
+        "title": title,
+        "clip_id": clip_id,
+        "snapshot_url": snapshot_url,
+        "silent": is_silent,
+        "timestamp": now_iso,
+        "conf": conf,
+        "label": label,
+    }
+    await push_event("AI_DETECTION", ws_payload)
+    logger.info("🚀 [Door Event Dispatched]: %s (clip_id=%s, silent=%s)", title, clip_id, is_silent)
+
+    # Update door_service status
+    from app.door_service import door_service
+    door_service.record_event({
+        "type": cat,
+        "label": label,
+        "conf": conf,
+        "snapshot": str(full_snap_path or snap_rel),
+        "t": t_val,
+        "title": title,
+        "timestamp": now_iso,
+    })
+
+    # Trigger background clip recording
+    from app.recorder import get_day_clip_dir
+    day_dir = get_day_clip_dir()
+    clip_path = str(day_dir / f"{clip_id}.mp4")
+    thumb_path = str(day_dir / f"thumb_{clip_id}.jpg")
+
+    if full_snap_path and os.path.exists(full_snap_path):
+        try:
+            import shutil
+            shutil.copyfile(str(full_snap_path), thumb_path)
+        except Exception:
+            pass
+
+    await save_clip(
+        clip_id=clip_id,
+        call_id=clip_id,
+        video_path=clip_path,
+        snapshot_path=thumb_path,
+        answered_by=f"AI: {title}",
+        duration=0.0,
+        status="RECORDING",
+        category=cat,
+        file_size=0,
+        created_at=now_iso,
+    )
+
+    asyncio.create_task(
+        smart_detector._finalize_clip_recording(
+            clip_id=clip_id,
+            clip_path=clip_path,
+            category=cat,
+            label=label,
+            clean_snapshot_path=thumb_path,
+        )
+    )
+
+    return {
+        "status": "PROCESSED",
+        "event_id": event_id,
+        "clip_id": clip_id,
+        "type": cat,
+        "label": label,
+        "title": title,
+        "snapshot_url": snapshot_url,
+        "silent": is_silent,
+    }
+
+
+@app.get("/api/door/status", tags=["Door Watch"])
+@app.get("/api/v1/door/status", tags=["Door Watch"])
+async def get_door_status():
+    """Diagnostic status endpoint for door_watch supervisor process."""
+    from app.door_service import door_service
+    return door_service.get_status()
 
 
 # ══════════════════════════════════════════════════════════════════════
