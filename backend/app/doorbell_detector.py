@@ -46,6 +46,7 @@ LINE_HZ = [726.56, 562.5, 398.4, 1968.8, 2500.0, 1687.5, 1523.4]
 I_DING, I_DONG = 0, 1
 DING_SEC = [2, 3, 4]
 DONG_SEC = [5, 6]
+I_DOM_DING, I_DOM_DONG = 7, 8
 
 
 @dataclass
@@ -64,6 +65,7 @@ class Params:
     hole: int = 3           # maximaal zoveel frames tussen ding en dong
     gap_min: float = 0.15   # s tussen begin ding en begin dong
     gap_max: float = 0.60
+    min_dom_db: float = 9.0  # piek-dominantie (t.o.v. directe buren b+-2) minimaal zoveel dB
 
 
 def build_template(path=None, verbose=True):
@@ -93,13 +95,27 @@ _B = [int(round(f / BIN_HZ)) for f in LINE_HZ]
 
 
 def line_prominence(frames):
-    """frames [n, NFFT] -> [n, 7]: dB van elke lijn boven de mediaan van de omgeving (+-300 Hz)."""
+    """frames [n, NFFT] -> [n, 9]:
+    0..6: dB van elke lijn boven de mediaan van de omgeving (+-300 Hz).
+    7: piek-dominantie ding (726,56 Hz t.o.v. directe buren b+-2).
+    8: piek-dominantie dong (562,5 Hz t.o.v. directe buren b+-2).
+    """
     db = 10 * np.log10(np.abs(np.fft.rfft(frames * _WIN, axis=1)) ** 2 + 1e-12)
-    out = np.empty((len(frames), len(_B)), np.float32)
+    out = np.empty((len(frames), len(_B) + 2), np.float32)
     for k, b in enumerate(_B):
         pk = db[:, b - 1:b + 2].max(axis=1)
         bg = np.median(np.concatenate([db[:, b - 48:b - 5], db[:, b + 6:b + 49]], axis=1), axis=1)
         out[:, k] = pk - bg
+
+    b_ding, b_dong = _B[I_DING], _B[I_DONG]
+    pk_ding = db[:, b_ding - 1:b_ding + 2].max(axis=1)
+    nbr_ding = np.maximum(db[:, b_ding - 2], db[:, b_ding + 2])
+    out[:, I_DOM_DING] = pk_ding - nbr_ding
+
+    pk_dong = db[:, b_dong - 1:b_dong + 2].max(axis=1)
+    nbr_dong = np.maximum(db[:, b_dong - 2], db[:, b_dong + 2])
+    out[:, I_DOM_DONG] = pk_dong - nbr_dong
+
     return out
 
 
@@ -131,7 +147,7 @@ class Detector:
         self.buf = np.zeros(0, np.float32)      # nog niet verwerkte samples
         self.ring = np.zeros(0, np.float32)     # laatste clip_s seconden (voor opslaan)
         self.ring_n = int(clip_s * SR)
-        self.hist = np.zeros((0, len(_B)), np.float32)
+        self.hist = np.zeros((0, len(_B) + 2), np.float32)
         self.hist_max = 100
         self.n_frames = 0                       # totaal verwerkte frames
         self.t_total = 0.0
@@ -168,8 +184,9 @@ class Detector:
         if n < p.n_a_min + p.n_b:
             return None
         pa, pb = H[:, I_DING], H[:, I_DONG]
-        A = _fill1((pa >= p.ta) & (pb < p.tb_absent))
-        B = _fill1((pb >= p.tb) & (pa >= p.tb_ring))
+        dom_a, dom_b = H[:, I_DOM_DING], H[:, I_DOM_DONG]
+        A = _fill1((pa >= p.ta) & (pb < p.tb_absent) & (dom_a >= p.min_dom_db))
+        B = _fill1((pb >= p.tb) & (pa >= p.tb_ring) & (dom_b >= p.min_dom_db))
         t_now = self.t_total
 
         a_runs = _runs(A)
@@ -212,8 +229,8 @@ class Detector:
             elif not (p.gap_min <= gap <= p.gap_max):
                 why = f"afstand ding-dong {gap:.2f}s"
             else:
-                sd = sum(int((H[a0:a1 + 4, k] >= p.ts).sum() >= p.sec_frames) for k in DING_SEC)
-                so = sum(int((H[b0 - 2:b1 + 1, k] >= p.ts).sum() >= p.sec_frames) for k in DONG_SEC)
+                sd = sum(int((H[max(0, a0 - 2):a1 + 4, k] >= p.ts).sum() >= p.sec_frames) for k in DING_SEC)
+                so = sum(int((H[max(0, b0 - 2):b1 + 1, k] >= p.ts).sum() >= p.sec_frames) for k in DONG_SEC)
                 if sd < p.min_sec_ding:
                     why = f"nevenlijnen ding {sd}/{len(DING_SEC)}"
                 elif so < p.min_sec_dong:
@@ -245,7 +262,7 @@ class Detector:
     # -- diagnostiek
     def _near(self, why, rows):
         if self.verbose:
-            mx = np.round(rows.max(axis=0)).astype(int).tolist()
+            mx = np.round(rows[:, :len(_B)].max(axis=0)).astype(int).tolist()
             print(f"[bel] bijna-melding: {why}  (max dB per lijn {mx})", flush=True)
         self._save_clip("bijna")
 
@@ -368,6 +385,7 @@ def main():
     ap.add_argument("--webhook", help="URL die een POST krijgt bij aanbellen")
     ap.add_argument("--threshold", type=float, default=0.30)
     ap.add_argument("--cooldown", type=float, default=8.0)
+    ap.add_argument("--min-dom", type=float, default=None, help="minimale piek-dominantie in dB")
     ap.add_argument("--clip-dir", help="sla bij elke melding/bijna-melding 8 s audio op (voor afstellen)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
@@ -375,6 +393,8 @@ def main():
     if a.selftest:
         return selftest(a.ref or a.test)
     T = build_template(a.ref)
+    if a.min_dom is not None:
+        T.min_dom_db = a.min_dom
     if a.test:
         x = np.concatenate([np.zeros(SR, np.float32), load_audio(a.test), np.zeros(SR, np.float32)])
         d = Detector(T, a.threshold, a.cooldown, clip_dir=a.clip_dir, near_miss=True)
