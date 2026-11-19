@@ -58,7 +58,6 @@ def resolve_model_path(custom_path: Optional[str] = None) -> str:
         return custom_path
     candidates = [
         "/mnt/opslag/deurbel/backend/app/assets/yolo11n.onnx",
-        "/mnt/opslag/deurbel/claude/yolo11n.onnx",
         "/mnt/opslag/deurbel/backend/app/assets/yolov8n.onnx",
     ]
     for c in candidates:
@@ -257,6 +256,11 @@ class SmartDetector:
                 pass
         finally:
             self._last_clip_end_per_category[category] = time.time()
+
+
+async def get_substream_rtsp() -> str:
+    """Resolve RTSP substream URL (defaults to go2rtc deurbel_sub)."""
+    return os.environ.get("RTSP_SUB_URL", "rtsp://127.0.0.1:8554/deurbel_sub")
 
 
 smart_detector = SmartDetector()

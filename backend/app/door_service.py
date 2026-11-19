@@ -84,7 +84,6 @@ class DoorService:
         candidates = [
             "/mnt/opslag/deurbel/backend/app/assets/yolo11n.onnx",
             str(Path(__file__).parent / "assets" / "yolo11n.onnx"),
-            "/mnt/opslag/deurbel/claude/yolo11n.onnx",
             "yolo11n.onnx",
         ]
         for c in candidates:
@@ -101,7 +100,6 @@ class DoorService:
         candidates = [
             "/mnt/opslag/deurbel/backend/app/assets/zones.json",
             str(Path(__file__).parent / "assets" / "zones.json"),
-            "/mnt/opslag/deurbel/claude/zones.json",
             "zones.json",
         ]
         for c in candidates:
@@ -148,7 +146,6 @@ class DoorService:
         script_candidates = [
             str(Path(__file__).parent / "door_watch.py"),
             "/mnt/opslag/deurbel/backend/app/door_watch.py",
-            "/mnt/opslag/deurbel/claude/door_watch.py",
         ]
         script_path = None
         for s in script_candidates:

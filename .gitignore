@@ -2,11 +2,9 @@
 /clips/
 /snapshots/
 *.mp4
-!backend/app/assets/bel.mp4
-!claude/bel.mp4
 *.adts
 *.wav
-!backend/app/assets/deurbel_ding-dong_ezviz-app.wav
+!backend/app/assets/bel.wav
 *.apk
 *.onnx
 !backend/app/assets/yolo11n.onnx

@@ -29,14 +29,14 @@ def test_bell_service_template_initialization():
     assert isinstance(bell_service.template, Params)
 
 
-def test_doorbell_detection_on_bel_mp4():
-    ref_path = "/mnt/opslag/deurbel/backend/app/assets/bel.mp4"
+def test_doorbell_detection_on_bel_wav():
+    ref_path = "/mnt/opslag/deurbel/backend/app/assets/bel.wav"
     if not os.path.exists(ref_path):
-        pytest.skip("bel.mp4 not found")
+        pytest.skip("bel.wav not found")
 
     audio = load_audio(ref_path)
     events, best_score = scan_array(audio, threshold=0.30, cooldown=8.0)
     assert len(events) >= 1, f"Expected at least 1 detection, got {len(events)}"
     t_det, score = events[0]
-    assert score >= 0.80, f"Expected score >= 0.80, got {score}"
-    assert best_score >= 0.80
+    assert score >= 0.90, f"Expected score >= 0.90, got {score}"
+    assert best_score >= 0.90
