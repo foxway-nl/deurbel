@@ -6,6 +6,7 @@
 !claude/bel.mp4
 *.adts
 *.wav
+!backend/app/assets/deurbel_ding-dong_ezviz-app.wav
 *.apk
 *.onnx
 !backend/app/assets/yolo11n.onnx

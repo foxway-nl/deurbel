@@ -31,10 +31,13 @@ def _log_msg(msg: str) -> None:
 
 
 def resolve_template_path() -> str:
-    """Finds the ding-dong reference video/audio file (bel.mp4)."""
+    """Finds the ding-dong reference video/audio file."""
     candidates = [
         getattr(settings, "BELL_REF_PATH", None),
         os.environ.get("BELL_REF_PATH", None),
+        "/mnt/opslag/deurbel/backend/app/assets/deurbel_ding-dong_ezviz-app.wav",
+        "/mnt/opslag/deurbel/claude/deurbel_ding-dong_ezviz-app.wav",
+        str(Path(__file__).parent / "assets" / "deurbel_ding-dong_ezviz-app.wav"),
         "/mnt/opslag/deurbel/backend/app/assets/bel.mp4",
         "/mnt/opslag/deurbel/claude/bel.mp4",
         str(Path(__file__).parent / "assets" / "bel.mp4"),
@@ -44,7 +47,7 @@ def resolve_template_path() -> str:
     for c in candidates:
         if c and os.path.exists(c):
             return str(c)
-    raise FileNotFoundError("bel.mp4 referentiebestand niet gevonden in assets of claude map!")
+    raise FileNotFoundError("Deurbel referentiebestand (deurbel_ding-dong_ezviz-app.wav of bel.mp4) niet gevonden!")
 
 
 class BellService:
@@ -104,8 +107,11 @@ class BellService:
             path = self.ref_path
             _log_msg(f"Bouw deurbelsjabloon van referentie: {path}...")
             self.template = build_template(path)
-            duration_s = self.template.shape[0] * 256 / SR
-            _log_msg(f"✅ Deurbelsjabloon succesvol gebouwd (duur: {duration_s:.2f}s, vorm: {self.template.shape})")
+            if hasattr(self.template, "shape"):
+                duration_s = self.template.shape[0] * 256 / SR
+                _log_msg(f"✅ Deurbelsjabloon succesvol gebouwd (duur: {duration_s:.2f}s, vorm: {self.template.shape})")
+            else:
+                _log_msg(f"✅ Deurbelsjabloon succesvol gebouwd (v2 Params regel-detector)")
 
     def _worker(self) -> None:
         """Background thread executing ffmpeg audio-read loop."""

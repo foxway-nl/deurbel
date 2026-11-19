@@ -1,52 +1,84 @@
 #!/usr/bin/env python3
 """
-Herkent de ding-dong van de EZVIZ DB1 Pro, ook met wind, regen, verkeer, kinderen.
+EZVIZ DB1 Pro ding-dong detector, versie 2 (regel-gebaseerd, veel strenger dan v1).
 
-Werking (korte uitleg):
-  1. Audio -> spectrogram (STFT) in dB.
-  2. "Tonale contrast": per frame het gemiddelde over frequentie (mediaan) aftrekken.
-     Breedbandig lawaai (wind, regen, hagel, auto's) verdwijnt, smalle toonlijnen
-     (ding ~727 Hz, dong ~562 Hz) blijven over.
-  3. De referentie (jouw video) wordt automatisch een sjabloon van die toonlijnen in de tijd.
-  4. Live: genormaliseerde kruiscorrelatie (NCC) tussen sjabloon en laatste audio.
-     Score 0..1; boven drempel = aangebeld. Cooldown voorkomt dubbele meldingen.
+Waarom v2?  v1 vergeleek het hele spectrum met een sjabloon. Stemmen en kindergegil kunnen
+dan toevallig genoeg lijken. v2 kijkt alleen naar wat de bel ECHT uniek maakt: een aantal
+zuivere, exact vaste toonlijnen in een vaste volgorde:
+
+  DING  (~0,3 s):  726,6 Hz  + 398,4 / 1968,8 / 2500 Hz        (562,5 Hz is dan afwezig)
+  DONG  (~0,7 s):  562,5 Hz  + nagalm 726,6 Hz + 1687,5 / 1523,4 Hz
+  Tussen begin ding en begin dong: 0,15 - 0,6 s (app-sample 0,22 s, echte opnames 0,33-0,38 s).
+
+Een melding komt pas als ALLES klopt: ding-lijn lang genoeg (maar niet eindeloos), daarna dong-lijn
+lang genoeg, de nevenlijnen er bij, en de tijdsafstand juist. Stem, gegil, wind, regen, hagel,
+verkeer, sirenes of een constante piep halen dat niet. Het is een zuivere digitale sample, dus de
+lijnen liggen op de exacte frequentie (+-1 bin = +-8 Hz tolerantie).
+
+Compatibel met v1: build_template(), Detector(template, threshold, cooldown), det.feed(chunk) ->
+[(tijd_s, score)], det.step_n, det.best, scan_array(), load_audio() en run_stream().
 
 Gebruik:
-  python doorbell_detector.py --ref bel.mp4 --test opname.wav          # test bestand
-  python doorbell_detector.py --ref bel.mp4 --rtsp rtsp://HOST:8554/deurbel --webhook http://HOST/hook
-  python doorbell_detector.py --ref bel.mp4 --selftest                 # test met synthetisch lawaai
+  python doorbell_detector.py --test opname.mp4                   # bestand scannen
+  python doorbell_detector.py --rtsp rtsp://HOST:8554/deurbel --webhook http://HOST/hook --clip-dir clips
+  python doorbell_detector.py --selftest
 
-Vereist: python3, numpy, scipy, ffmpeg (in PATH).
+Vereist: python3, numpy, ffmpeg (in PATH). Geen scipy nodig.
 """
 import argparse
 import subprocess
 import sys
 import time
 import urllib.request
+import wave
+from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import median_filter, maximum_filter1d, uniform_filter1d
-from scipy.signal import stft
 
 SR = 16000
-NPERSEG = 1024          # 64 ms venster, 15.6 Hz per bin
-HOP = 256               # 16 ms
-FMIN, FMAX = 330, 3200  # laag (<330 Hz) negeren: wind, dreun, handling
-MEDIAN_BINS = 33        # ~500 Hz breed, bepaalt wat als "achtergrond" geldt
-CLIP_DB = 24.0          # contrast boven 24 dB niet extra laten wegen
+NFFT = 2048                 # 128 ms venster, 7,8 Hz per bin
+HOP = 512                   # 32 ms per frame
+FRAME_S = HOP / SR
+BIN_HZ = SR / NFFT
+
+# index: 0 ding-hoofd, 1 dong-hoofd, 2-4 ding-nevenlijnen, 5-6 dong-nevenlijnen
+LINE_HZ = [726.56, 562.5, 398.4, 1968.8, 2500.0, 1687.5, 1523.4]
+I_DING, I_DONG = 0, 1
+DING_SEC = [2, 3, 4]
+DONG_SEC = [5, 6]
 
 
-# ---------------------------------------------------------------- features
-def features(x):
-    """audio (float, SR) -> tonaal-contrast matrix [frames, bins]"""
-    f, _, Z = stft(x, SR, nperseg=NPERSEG, noverlap=NPERSEG - HOP, boundary=None, padded=False)
-    P = uniform_filter1d(np.abs(Z) ** 2, 3, axis=1)      # 3 frames middelen: minder ruis-speckle
-    db = 10 * np.log10(P + 1e-14)
-    sel = (f >= FMIN) & (f <= FMAX)
-    db = db[sel].T                                        # [frames, bins]
-    bg = median_filter(db, size=(1, MEDIAN_BINS), mode="nearest")
-    c = np.clip(db - bg, 0, CLIP_DB)
-    return c
+@dataclass
+class Params:
+    ta: float = 22.0        # ding-lijn minimaal zoveel dB boven de omgeving
+    tb_absent: float = 10.0  # tijdens ding mag 562,5 Hz hooguit zoveel dB boven de omgeving zijn
+    tb: float = 15.0        # dong-lijn minimaal
+    tb_ring: float = 12.0   # nagalm 726,6 Hz tijdens dong minimaal
+    ts: float = 10.0        # nevenlijn telt als aanwezig vanaf zoveel dB
+    sec_frames: int = 3     # nevenlijn moet zoveel frames aanwezig zijn
+    min_sec_ding: int = 1   # aantal nevenlijnen (van 3) in het ding
+    min_sec_dong: int = 1   # aantal nevenlijnen (van 2) in de dong
+    n_a_min: int = 5        # ding minstens 5 frames (0,16 s)
+    n_a_max: int = 18       # ding hoogstens 18 frames (0,58 s): langer = constante toon
+    n_b: int = 8            # dong minstens 8 frames (0,26 s) -> dan meteen melden
+    hole: int = 3           # maximaal zoveel frames tussen ding en dong
+    gap_min: float = 0.15   # s tussen begin ding en begin dong
+    gap_max: float = 0.60
+
+
+def build_template(path=None, verbose=True):
+    """Compatibel met v1. De lijnen zijn vast (uit jouw opnames bepaald). Met een referentiebestand
+    controleren we alleen of de bel daarin herkend wordt."""
+    p = Params()
+    if path:
+        try:
+            ev, _ = scan_array(load_audio(path), p, 0.0, 8.0)
+            if verbose:
+                print("referentie " + ("OK: bel herkend" if ev else
+                      "WAARSCHUWING: bel niet herkend in referentie (dong te kort afgeknipt of ander geluid?)"), flush=True)
+        except Exception as e:
+            print("referentiecontrole overgeslagen:", e, file=sys.stderr)
+    return p
 
 
 def load_audio(path):
@@ -55,98 +87,219 @@ def load_audio(path):
     return np.frombuffer(raw, dtype=np.float32)
 
 
-def build_template(path):
-    x = load_audio(path)
-    c = features(x)
-    strength = c.sum(axis=1)
-    mx = strength.max()
-    idx = np.where(strength > 0.2 * mx)[0]
-    start = max(idx[0] - 2, 0)
-    end = min(idx[-1] + 2, len(c) - 1)
-    return c[start:end + 1]
+# ---------------------------------------------------------------- spectrum -> lijnprominentie
+_WIN = np.hanning(NFFT).astype(np.float32)
+_B = [int(round(f / BIN_HZ)) for f in LINE_HZ]
 
 
-# ---------------------------------------------------------------- matching
-def ncc_scores(c, T):
-    """NCC van sjabloon T over feature-matrix c; geeft score per startframe."""
-    n = T.shape[0]
-    if len(c) < n:
-        return np.array([])
-    # +-1 bin tolerantie in live audio (kleine frequentieafwijking)
-    cp = maximum_filter1d(c, size=3, axis=1)
-    Tz = T - T.mean()
-    Tn = np.linalg.norm(Tz)
-    out = np.empty(len(c) - n + 1)
-    for i in range(len(out)):
-        w = cp[i:i + n]
-        wz = w - w.mean()
-        d = np.linalg.norm(wz) * Tn
-        out[i] = 0.0 if d < 1e-9 else float((wz * Tz).sum() / d)
+def line_prominence(frames):
+    """frames [n, NFFT] -> [n, 7]: dB van elke lijn boven de mediaan van de omgeving (+-300 Hz)."""
+    db = 10 * np.log10(np.abs(np.fft.rfft(frames * _WIN, axis=1)) ** 2 + 1e-12)
+    out = np.empty((len(frames), len(_B)), np.float32)
+    for k, b in enumerate(_B):
+        pk = db[:, b - 1:b + 2].max(axis=1)
+        bg = np.median(np.concatenate([db[:, b - 48:b - 5], db[:, b + 6:b + 49]], axis=1), axis=1)
+        out[:, k] = pk - bg
     return out
 
 
+def _fill1(m):
+    m = m.copy()
+    m[1:-1] |= m[:-2] & m[2:]            # gaten van 1 frame dichten
+    return m
+
+
+def _runs(m):
+    if not m.any():
+        return []
+    d = np.diff(np.concatenate([[0], m.astype(np.int8), [0]]))
+    s, e = np.where(d == 1)[0], np.where(d == -1)[0] - 1
+    return list(zip(s.tolist(), e.tolist()))
+
+
+# ---------------------------------------------------------------- detector
 class Detector:
-    def __init__(self, template, threshold=0.30, cooldown=8.0, buf_s=2.5, step_s=0.1):
-        self.T = template
+    def __init__(self, template=None, threshold=0.30, cooldown=8.0, clip_dir=None, verbose=True,
+                 clip_s=8.0, near_miss=True, **_ignored):
+        self.p = template if isinstance(template, Params) else Params()
         self.thr = threshold
         self.cool = cooldown
-        self.buf_n = int(buf_s * SR)
-        self.step_n = int(step_s * SR)
-        self.buf = np.zeros(0, dtype=np.float32)
-        self.pending = 0
-        self.last_fire = -1e9
+        self.clip_dir = clip_dir
+        self.verbose = verbose
+        self.near_miss = near_miss
+        self.step_n = int(0.1 * SR)             # v1-compatibel: lees in blokken van 0,1 s
+        self.buf = np.zeros(0, np.float32)      # nog niet verwerkte samples
+        self.ring = np.zeros(0, np.float32)     # laatste clip_s seconden (voor opslaan)
+        self.ring_n = int(clip_s * SR)
+        self.hist = np.zeros((0, len(_B)), np.float32)
+        self.hist_max = 100
+        self.n_frames = 0                       # totaal verwerkte frames
         self.t_total = 0.0
+        self.last_fire = -1e9
+        self.last_near = -1e9
+        self.reported_a = set()
         self.best = 0.0
+        self.last_event = None
 
+    # -- invoer
     def feed(self, chunk):
-        """chunk: float32 audio. Geeft lijst (tijd_s, score) van detecties."""
+        chunk = np.asarray(chunk, np.float32)
         events = []
-        self.buf = np.concatenate([self.buf, chunk])[-self.buf_n:]
-        self.pending += len(chunk)
+        self.buf = np.concatenate([self.buf, chunk])
+        self.ring = np.concatenate([self.ring, chunk])[-self.ring_n:]
         self.t_total += len(chunk) / SR
-        while self.pending >= self.step_n:
-            self.pending -= self.step_n
-            if len(self.buf) < self.buf_n // 2:
-                continue
-            s = ncc_scores(features(self.buf), self.T)
-            if s.size == 0:
-                continue
-            score = float(s.max())
-            self.best = max(self.best, score)
-            if score >= self.thr and (self.t_total - self.last_fire) > self.cool:
-                self.last_fire = self.t_total
-                events.append((self.t_total, score))
+        if len(self.buf) >= NFFT:
+            n = (len(self.buf) - NFFT) // HOP + 1
+            idx = np.arange(NFFT)[None, :] + HOP * np.arange(n)[:, None]
+            rows = line_prominence(self.buf[idx])
+            self.buf = self.buf[n * HOP:]
+            for r in rows:
+                self.n_frames += 1
+                self.hist = np.vstack([self.hist, r[None, :]])[-self.hist_max:]
+                ev = self._evaluate()
+                if ev:
+                    events.append(ev)
         return events
 
+    # -- regels
+    def _evaluate(self):
+        p, H = self.p, self.hist
+        n = len(H)
+        if n < p.n_a_min + p.n_b:
+            return None
+        pa, pb = H[:, I_DING], H[:, I_DONG]
+        A = _fill1((pa >= p.ta) & (pb < p.tb_absent))
+        B = _fill1((pb >= p.tb) & (pa >= p.tb_ring))
+        t_now = self.t_total
 
-def scan_array(x, template, threshold=0.30, cooldown=8.0):
-    d = Detector(template, threshold, cooldown)
-    x = np.concatenate([np.zeros(SR * 2, np.float32), x.astype(np.float32), np.zeros(SR * 2, np.float32)])
+        a_runs = _runs(A)
+        b_runs = _runs(B)
+        # voortgangsscore voor logging (best): ding gezien = 0.4, ding+dong = tot 1.0
+        if a_runs:
+            a0, a1 = a_runs[-1]
+            qa = min(1.0, float(pa[a0:a1 + 1].mean()) / 40) * min(1.0, (a1 - a0 + 1) / p.n_a_min)
+            self.best = max(self.best, 0.4 * qa)
+
+        # near-miss: ding zonder dong
+        if self.near_miss:
+            for a0, a1 in a_runs:
+                abs_end = self.n_frames - (n - 1 - a1)
+                if (a1 - a0 + 1) >= p.n_a_min and (n - 1 - a1) > 16 and abs_end not in self.reported_a:
+                    self.reported_a.add(abs_end)
+                    followed = any(b0 > a1 and (b1 - b0 + 1) >= 3 for b0, b1 in b_runs)
+                    if not followed and t_now - self.last_near > 20:
+                        self.last_near = t_now
+                        self._near("ding gezien, geen dong", H[a0:a1 + 1])
+            if len(self.reported_a) > 200:
+                self.reported_a = set(sorted(self.reported_a)[-50:])
+
+        if not b_runs or b_runs[-1][1] != n - 1:
+            return None
+        b0, b1 = b_runs[-1]
+        lb = b1 - b0 + 1
+        if lb != p.n_b:                           # precies 1x evalueren: op het moment dat de dong lang genoeg is
+            return None
+        cand = [r for r in a_runs if r[1] < b0 and (b0 - r[1] - 1) <= p.hole]
+        why = None
+        if not cand:
+            why = "dong zonder ding ervoor"
+        else:
+            a0, a1 = cand[-1]
+            la = a1 - a0 + 1
+            gap = (b0 - a0) * FRAME_S
+            if la < p.n_a_min or la > p.n_a_max:
+                why = f"ding-lengte {la * FRAME_S:.2f}s"
+            elif not (p.gap_min <= gap <= p.gap_max):
+                why = f"afstand ding-dong {gap:.2f}s"
+            else:
+                sd = sum(int((H[a0:a1 + 4, k] >= p.ts).sum() >= p.sec_frames) for k in DING_SEC)
+                so = sum(int((H[b0 - 2:b1 + 1, k] >= p.ts).sum() >= p.sec_frames) for k in DONG_SEC)
+                if sd < p.min_sec_ding:
+                    why = f"nevenlijnen ding {sd}/{len(DING_SEC)}"
+                elif so < p.min_sec_dong:
+                    why = f"nevenlijnen dong {so}/{len(DONG_SEC)}"
+        if why:
+            if self.near_miss and t_now - self.last_near > 20:
+                self.last_near = t_now
+                self._near(why, H[max(b0 - 20, 0):b1 + 1])
+            return None
+
+        score = float(min(1.0, min(pa[a0:a1 + 1].mean() / 40, pb[b0:b1 + 1].mean() / 30)))
+        self.best = max(self.best, score)
+        if score < self.thr or (t_now - self.last_fire) <= self.cool:
+            return None
+        self.last_fire = t_now
+        ding_t = t_now - (n - 1 - a0) * FRAME_S - NFFT / SR / 2
+        dong_t = t_now - (n - 1 - b0) * FRAME_S - NFFT / SR / 2
+        self.last_event = dict(t=t_now, ding_t=ding_t, dong_t=dong_t, score=score,
+                               p_ding=float(pa[a0:a1 + 1].mean()), p_dong=float(pb[b0:b1 + 1].mean()),
+                               gap=(b0 - a0) * FRAME_S, delay_after_ding=t_now - ding_t)
+        if self.verbose:
+            e = self.last_event
+            print(f"[bel] DETECTIE audio-tijd {t_now:.1f}s  ding {e['ding_t']:.2f}s dong {e['dong_t']:.2f}s "
+                  f"(vertraging detector na begin ding {e['delay_after_ding']:.2f}s)  score {score:.2f}  "
+                  f"P ding/dong {e['p_ding']:.0f}/{e['p_dong']:.0f} dB  gap {e['gap']:.2f}s", flush=True)
+        self._save_clip(f"bel_{score:.2f}")
+        return (t_now, score)
+
+    # -- diagnostiek
+    def _near(self, why, rows):
+        if self.verbose:
+            mx = np.round(rows.max(axis=0)).astype(int).tolist()
+            print(f"[bel] bijna-melding: {why}  (max dB per lijn {mx})", flush=True)
+        self._save_clip("bijna")
+
+    def _save_clip(self, tag):
+        if not self.clip_dir:
+            return
+        import os
+        os.makedirs(self.clip_dir, exist_ok=True)
+        fn = os.path.join(self.clip_dir, time.strftime("%Y%m%d_%H%M%S_") + tag + ".wav")
+        with wave.open(fn, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SR)
+            w.writeframes((np.clip(self.ring, -1, 1) * 32767).astype(np.int16).tobytes())
+        if self.verbose:
+            print("[bel] clip opgeslagen:", fn, flush=True)
+
+
+def scan_array(x, template=None, threshold=0.30, cooldown=8.0, verbose=False):
+    d = Detector(template, threshold, cooldown, verbose=verbose, near_miss=False)
+    x = np.concatenate([np.zeros(SR, np.float32), np.asarray(x, np.float32), np.zeros(SR, np.float32)])
     ev = []
     for i in range(0, len(x), d.step_n):
-        ev += d.feed(x[i:i + d.step_n])
+        ev += [(t - 1.0, s) for t, s in d.feed(x[i:i + d.step_n])]
     return ev, d.best
 
 
 # ---------------------------------------------------------------- live
 def run_stream(url, det, webhook=None):
-    cmd = ["ffmpeg", "-loglevel", "error", "-rtsp_transport", "tcp", "-i", url,
+    cmd = ["ffmpeg", "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay",
+           "-probesize", "32768", "-analyzeduration", "0", "-rtsp_transport", "tcp", "-i", url,
            "-vn", "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"]
     while True:
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
         print("luistert naar", url, flush=True)
+        t0, got, last_stat = time.time(), 0, time.time()
         try:
             while True:
                 raw = p.stdout.read(det.step_n * 4)
                 if not raw:
                     break
+                got += len(raw) // 4
                 for t, s in det.feed(np.frombuffer(raw, dtype=np.float32)):
-                    print(f"AANGEBELD score={s:.2f}", flush=True)
+                    print(f"AANGEBELD {time.strftime('%H:%M:%S')} score={s:.2f}", flush=True)
                     if webhook:
                         try:
                             urllib.request.urlopen(urllib.request.Request(webhook, data=b"doorbell", method="POST"), timeout=5)
                         except Exception as e:
                             print("webhook fout:", e, file=sys.stderr)
+                if time.time() - last_stat > 60:
+                    lag = (time.time() - t0) - got / SR
+                    print(f"[stats] luistert nog; achterstand verwerking {lag:+.1f}s (moet ~constant blijven); "
+                          f"hoogste deelscore {det.best:.2f}", flush=True)
+                    det.best, last_stat = 0.0, time.time()
         finally:
             p.kill()
         print("stream weg, opnieuw proberen over 5s", file=sys.stderr)
@@ -154,91 +307,85 @@ def run_stream(url, det, webhook=None):
 
 
 # ---------------------------------------------------------------- selftest
-def selftest(ref_path, thr):
-    rng = np.random.default_rng(1)
-    T = build_template(ref_path)
-    ref = load_audio(ref_path)
-    n = SR * 20
+def _noise(kind, n, rng):
     t = np.arange(n) / SR
-
-    def white(): return rng.standard_normal(n)
-    def pink():
-        X = np.fft.rfft(rng.standard_normal(n)); f = np.arange(len(X)); f[0] = 1
-        return np.fft.irfft(X / np.sqrt(f), n)
-    def wind():
+    if kind == "wit":
+        return rng.standard_normal(n)
+    if kind == "wind":
         X = np.fft.rfft(rng.standard_normal(n)); f = np.fft.rfftfreq(n, 1 / SR)
-        g = 1 / (1 + (f / 250) ** 3) * (1 + 0.8 * np.sin(2 * np.pi * 0.3 * t).mean())
-        w = np.fft.irfft(X * g, n); return w * (1 + 0.6 * np.sin(2 * np.pi * 0.2 * t))
-    def rain():
+        return np.fft.irfft(X / (1 + (f / 250) ** 3), n) * (1 + 0.6 * np.sin(2 * np.pi * 0.2 * t))
+    if kind == "regen":
         r = np.diff(rng.standard_normal(n), prepend=0)
-        r += (rng.random(n) > 0.9995) * rng.standard_normal(n) * 30
-        return r
-    def hail():
+        return r + (rng.random(n) > 0.9995) * rng.standard_normal(n) * 30
+    if kind == "hagel":
         h = np.zeros(n)
         for p in rng.integers(0, n - 800, 300):
             k = np.arange(800); h[p:p + 800] += np.exp(-k / 120) * np.sin(2 * np.pi * rng.uniform(1500, 4000) * k / SR) * rng.uniform(1, 5)
-        return h + 0.2 * white()
-    def car():
+        return h + 0.2 * rng.standard_normal(n)
+    if kind == "auto":
         X = np.fft.rfft(rng.standard_normal(n)); f = np.fft.rfftfreq(n, 1 / SR)
-        g = 1 / (1 + (f / 400) ** 2)
-        e = np.exp(-((t - 10) / 2.5) ** 2)
-        return np.fft.irfft(X * g, n) * e * 2 + 0.3 * np.sin(2 * np.pi * 90 * t) * e
-    def kids():
+        e = np.exp(-((t - n / SR / 2) / 2.5) ** 2)
+        return np.fft.irfft(X / (1 + (f / 400) ** 2), n) * e * 2 + 0.3 * np.sin(2 * np.pi * 90 * t) * e
+    if kind == "gegil":                       # harmonisch, glijdend, hard (kind), formant-achtig
         y = np.zeros(n)
-        for s in rng.uniform(0, 18, 12):
-            L = int(rng.uniform(0.5, 1.5) * SR); k = np.arange(L) / SR
-            f0 = rng.uniform(500, 900) + rng.uniform(-300, 300) * k
+        for s in rng.uniform(0, n / SR - 2, 14):
+            L = int(rng.uniform(0.6, 1.6) * SR); k = np.arange(L) / SR
+            f0 = rng.uniform(450, 1000) + rng.uniform(-400, 400) * k + 25 * np.sin(2 * np.pi * 6 * k)
             ph = 2 * np.pi * np.cumsum(f0) / SR
-            v = sum(np.sin(h * ph) / h for h in range(1, 8)) * np.hanning(L)
-            y[int(s * SR):int(s * SR) + L] += v[:max(0, min(L, n - int(s * SR)))] if False else v[:n - int(s * SR)]
+            v = sum(np.sin(h * ph) / h ** 0.7 for h in range(1, 10)) * np.hanning(L)
+            i0 = int(s * SR); y[i0:i0 + L] += v[:n - i0]
         return y
+    raise ValueError(kind)
 
-    bgs = dict(wit=white, roze=pink, wind=wind, regen=rain, hagel=hail, auto=car, kinderen=kids)
-    ok = True
-    for name, fn in bgs.items():
-        bg = fn(); bg = bg / np.std(bg)
-        # 1) alleen achtergrond: mag NIET afgaan
-        ev, best = scan_array(bg.astype(np.float32) * 0.1, T, thr)
-        fp = len(ev)
-        # 2) bel erin op 5 en 14 s, op verschillende signaal/ruis-niveaus
+
+def selftest(ref_path):
+    rng = np.random.default_rng(7)
+    ref = load_audio(ref_path)
+    n = SR * 30
+    rms_ref = float(np.sqrt(np.mean(ref ** 2)))
+    ok_all = True
+    for kind in ("wit", "wind", "regen", "hagel", "auto", "gegil"):
+        bg = _noise(kind, n, rng); bg = bg / np.std(bg)
+        fp = []
+        for lvl in (0.05, 0.3, 1.0):                    # achtergrond alleen, op 3 volumes
+            ev, _ = scan_array((bg * lvl).astype(np.float32))
+            fp.append(len(ev))
         res = []
-        for snr_db in (10, 0, -6):
-            sig = np.zeros(n); sig[5 * SR:5 * SR + len(ref)] += ref; sig[14 * SR:14 * SR + len(ref)] += ref
-            # ruis relatief aan RMS van de bel zelf
-            rms_ref = np.sqrt(np.mean(ref ** 2))
-            mix = sig + bg * rms_ref / (10 ** (snr_db / 20))
-            ev, _ = scan_array(mix.astype(np.float32), T, thr)
-            res.append((snr_db, len(ev)))
-        good = all(c == 2 for _, c in res) if name not in () else True
-        print(f"{name:9s} vals alarm: {fp} (max score {best:.2f}) | bel (snr dB -> detecties): {res}")
-    print("klaar. verwacht: vals alarm 0, detecties 2 per bel-test (hoge ruis kan missen)")
+        for rel_db in (10, 0, -6):                      # bel op 3 niveaus t.o.v. achtergrond
+            sig = np.zeros(n); sig[8 * SR:8 * SR + len(ref)] += ref; sig[20 * SR:20 * SR + len(ref)] += ref
+            mix = sig + bg * rms_ref / (10 ** (rel_db / 20))
+            ev, _ = scan_array(mix.astype(np.float32))
+            res.append((rel_db, len(ev)))
+        print(f"{kind:7s} valse alarmen (3 volumes): {fp} | bel 2x erin (bel {res[0][0]}/{res[1][0]}/{res[2][0]} dB boven ruis): {[c for _, c in res]}")
+    print("verwacht: valse alarmen 0; bel-detecties 2 (alleen bij zeer harde ruis kan er een gemist worden)")
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", required=True, help="video/audio met de ding-dong")
+    ap.add_argument("--ref", help="(optioneel) referentie-opname; wordt alleen gecontroleerd")
     ap.add_argument("--test", help="audio/video bestand om te scannen")
     ap.add_argument("--rtsp", help="rtsp url (bijv. go2rtc) om live te luisteren")
     ap.add_argument("--webhook", help="URL die een POST krijgt bij aanbellen")
     ap.add_argument("--threshold", type=float, default=0.30)
     ap.add_argument("--cooldown", type=float, default=8.0)
+    ap.add_argument("--clip-dir", help="sla bij elke melding/bijna-melding 8 s audio op (voor afstellen)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
 
     if a.selftest:
-        return selftest(a.ref, a.threshold)
+        return selftest(a.ref or a.test)
     T = build_template(a.ref)
-    print(f"sjabloon: {T.shape[0] * HOP / SR:.2f}s")
     if a.test:
-        x = load_audio(a.test)
-        ev, best = scan_array(x, T, a.threshold, a.cooldown)
-        print(f"beste score {best:.2f}")
+        x = np.concatenate([np.zeros(SR, np.float32), load_audio(a.test), np.zeros(SR, np.float32)])
+        d = Detector(T, a.threshold, a.cooldown, clip_dir=a.clip_dir, near_miss=True)
+        ev = []
+        for i in range(0, len(x), d.step_n):
+            ev += d.feed(x[i:i + d.step_n])
+        print(f"gevonden: {len(ev)}  hoogste deelscore {d.best:.2f}")
         for t, s in ev:
-            print(f"  bel bij ~{t:.1f}s (score {s:.2f})")
-        if not ev:
-            print("  geen bel gevonden")
+            print(f"  bel bij {t:.1f}s (score {s:.2f})")
     if a.rtsp:
-        run_stream(a.rtsp, Detector(T, a.threshold, a.cooldown), a.webhook)
+        run_stream(a.rtsp, Detector(T, a.threshold, a.cooldown, clip_dir=a.clip_dir), a.webhook)
 
 
 if __name__ == "__main__":
