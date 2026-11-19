@@ -754,6 +754,12 @@ class NetworkSniffer:
             logger.info("ℹ️ [Sniffer Auto-Calibrate] No external cloud burst in +/-2.5s window to correlate.")
 
         # 3. Dual-Trigger Precision Timing Registration (v3.5.5)
+        # Debounce: avoid duplicate timing records for the same ring within 5 seconds
+        if hasattr(self, "_last_timing_chime_ts") and (chime_timestamp - self._last_timing_chime_ts < 5.0):
+            logger.debug("[Sniffer] Ignoring duplicate chime trigger for timing log within 5s window")
+            return
+        self._last_timing_chime_ts = chime_timestamp
+
         chime_cet_str = datetime.datetime.fromtimestamp(chime_timestamp, tz=AMSTERDAM_TZ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
         session_candidates = [
@@ -857,9 +863,25 @@ class NetworkSniffer:
     def get_timing_analysis(self) -> dict:
         """Returns Dual-Trigger Precision Timing metrics and events (v3.5.5)."""
         with self._window_lock:
-            records = list(self.recent_timing_records)
+            raw_records = list(self.recent_timing_records)
 
-        matched = [r for r in records if r.get("delta_seconds") is not None]
+        # Deduplicate records by ring event session (collapse records within 5.0s)
+        deduped = []
+        for r in raw_records:
+            t = r.get("t_shazam_float", 0.0)
+            existing = None
+            for s in deduped:
+                if abs(s.get("t_shazam_float", 0.0) - t) < 5.0:
+                    existing = s
+                    break
+            if existing is None:
+                deduped.append(dict(r))
+            else:
+                # If current candidate is a better match than existing, update it
+                if r.get("status") == "PERFECT_MATCH" and existing.get("status") != "PERFECT_MATCH":
+                    existing.update(r)
+
+        matched = [r for r in deduped if r.get("delta_seconds") is not None]
         deltas = [r["delta_seconds"] for r in matched]
         avg_delta = round(sum(deltas) / len(deltas), 3) if deltas else None
         min_delta = min(deltas) if deltas else None
@@ -872,14 +894,14 @@ class NetworkSniffer:
                 "max": 1.5,
                 "description": "Netwerk verwacht tussen 4.5s vóór en 1.5s na Shazam chime",
             },
-            "total_events": len(records),
+            "total_events": len(deduped),
             "matched_count": len(matched),
             "stats": {
                 "avg_delta_seconds": avg_delta,
                 "min_delta_seconds": min_delta,
                 "max_delta_seconds": max_delta,
             },
-            "events": list(reversed(records)),
+            "events": list(reversed(deduped)),
         }
 
     async def start(self) -> None:

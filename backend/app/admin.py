@@ -3,10 +3,9 @@ Foxway Smart Doorbell — Web Admin System & Diagnostics Router (/admin).
 
 Provides:
   1. Secure authentication (/admin/login) with signed HTTP-only session cookie.
-  2. Tab 1: Live 4:3 Camera Stream, Frame Latency, FPS, CPU/RAM/Disk stats, 1-Click Operations.
-  3. Tab 2: Dynamic System & AI Variables (/api/v1/admin/settings) + Interactive Exclusion Zones.
-  4. Tab 3: AI Verification Inspector (/api/v1/admin/detections) with bounding boxes and reasons.
-  5. Tab 4: Backend Ring Log & Android Client Crash Logger (/api/v1/logs/client-crash).
+  2. Tab 1: Live 4:3 Camera Stream, Frame Latency, FPS, App/Backend Resource Insight, 1-Click Operations.
+  3. Tab 2: Dynamic System & AI Variables (/api/v1/admin/settings).
+  4. Tab 3: Backend Log & Android Client Crash Logger (/api/v1/logs/client-crash) + Precision Dual-Trigger Timing.
 """
 
 from __future__ import annotations
@@ -45,9 +44,6 @@ from app.models import (
     get_system_settings,
     get_system_setting,
     update_system_settings,
-    get_recent_ai_audit_logs,
-    get_ai_audit_stats,
-    save_ai_audit_feedback,
     save_crash_log,
     get_recent_crash_logs,
     get_camera_credentials,
@@ -256,173 +252,83 @@ async def update_admin_settings_endpoint(request: Request, body: dict):
     return {"status": "ok", "message": f"Succesvol {len(clean_updates)} instellingen bijgewerkt"}
 
 
-class DetectionFeedbackRequest(BaseModel):
-    feedback: str  # "CORRECT" or "INCORRECT"
-    reason: Optional[str] = ""  # "PARKED_CAR", "PERSON_NEAR_PARKED_CAR", "MISSED_OBJECT", "WRONG_CLASS", "VALID", etc.
-    notes: Optional[str] = ""
-
-
-@router.get("/api/v1/admin/detections")
-async def get_admin_detections_endpoint(
-    request: Request,
-    status: Optional[str] = None,
-    reviewed: Optional[str] = None,
-    limit: int = 250,
-):
-    """Returns AI audit logs for the Verification Inspector, optionally filtered by status and reviewed state."""
-    require_admin(request)
-    reviewed_bool = None
-    if reviewed is not None:
-        if reviewed.lower() in ("false", "0", "pending", "unreviewed"):
-            reviewed_bool = False
-        elif reviewed.lower() in ("true", "1", "reviewed"):
-            reviewed_bool = True
-    logs = await get_recent_ai_audit_logs(limit=limit, status=status, reviewed=reviewed_bool)
-    return logs
-
-
-@router.get("/api/v1/admin/detections/stats")
-async def get_admin_detections_stats_endpoint(request: Request):
-    """Returns summary counters for AI verification inspector."""
-    require_admin(request)
-    return await get_ai_audit_stats()
-
-
-@router.post("/api/v1/admin/detections/{log_id}/feedback")
-async def post_detection_feedback_endpoint(log_id: int, body: DetectionFeedbackRequest, request: Request):
-    """
-    Submits user ground-truth feedback on an AI evaluation decision (v3.5.5).
-    Active Learning:
-    1. Records feedback and notes in ai_audit_logs.
-    2. If marked as PARKED_CAR, PERSON_NEAR_PARKED_CAR, WALKING_PAST_CAR, or PARKED_CAR_FALSE_ALARM:
-       immediately registers the bounding box into stationary vehicles memory, so this parked vehicle
-       is permanently anchored and ignored for false motion.
-    3. Persists sample to verified_feedback.jsonl for fine-tuning dataset generation.
-    """
-    require_admin(request)
-    updated_row = await save_ai_audit_feedback(
-        log_id,
-        body.feedback.upper(),
-        body.reason.upper() if body.reason else "",
-        notes=body.notes or "",
-    )
-    if not updated_row:
-        raise HTTPException(404, "Audit log not found")
-
-    learned_actions = []
-
-    # Active Learning 1: If user confirms it was a parked car or person walking past stationary car
-    reason_upper = (body.reason or "").upper()
-    if reason_upper in (
-        "PARKED_CAR",
-        "PERSON_NEAR_PARKED_CAR",
-        "WALKING_PAST_CAR",
-        "PARKED_CAR_FALSE_ALARM",
-    ):
-        try:
-            boxes_json = updated_row.get("boxes_json") or "[]"
-            boxes = json.loads(boxes_json)
-            if boxes:
-                from app.ai_detector import smart_detector
-                now = time.time()
-                for b in boxes:
-                    if len(b) == 4:
-                        box_tuple = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
-                        smart_detector.stationary_vehicles.append({
-                            "box": box_tuple,
-                            "first_seen": now - 3600.0,
-                            "last_seen": now,
-                            "stationary_frames": 999,
-                            "is_baseline": True,
-                        })
-                learned_actions.append(f"Geleerd: {len(boxes)} geparkeerde auto-locatie(s) direct verankerd in stationary uitsluitingsgeheugen")
-        except Exception as e:
-            logger.warning("Failed active learning for parked car: %s", e)
-    elif reason_upper in ("TREE_SHADOW", "TREE_OR_SHADOW"):
-        learned_actions.append("Geleerd: Takken/schaduwbeweging geregistreerd voor boomkruin- en schaduwfiltering")
-    elif reason_upper in ("CAT_OR_DOG", "ANIMAL"):
-        learned_actions.append("Geleerd: Dierenlabel geverifieerd voor trainingsdataset")
-    elif reason_upper in ("CYCLIST_OR_SCOOTER",):
-        learned_actions.append("Geleerd: Tweewieler geverifieerd voor trainingsdataset")
-    elif reason_upper in ("POSTMAN_OR_DELIVERY",):
-        learned_actions.append("Geleerd: Pakketbezorger/postbode geverifieerd voor trainingsdataset")
-    elif reason_upper in ("FALSE_MOTION_GLITCH", "LIGHT_GLITCH"):
-        learned_actions.append("Geleerd: Lichtflits/camera-ruis geregistreerd")
-
-    # Active Learning 2: Append to fine-tuning annotations
-    try:
-        feedback_dataset_path = "/mnt/opslag/deurbel/training_dataset/verified_feedback.jsonl"
-        os.makedirs(os.path.dirname(feedback_dataset_path), exist_ok=True)
-        feedback_record = {
-            "log_id": log_id,
-            "timestamp": updated_row.get("timestamp"),
-            "category": updated_row.get("category"),
-            "label": updated_row.get("label"),
-            "confidence": updated_row.get("confidence"),
-            "displacement_pct": updated_row.get("displacement_pct"),
-            "snapshot_path": updated_row.get("snapshot_path"),
-            "boxes_json": updated_row.get("boxes_json"),
-            "ai_status": updated_row.get("status"),
-            "user_feedback": body.feedback.upper(),
-            "feedback_reason": body.reason.upper() if body.reason else "",
-            "notes": body.notes,
-            "verified_at": datetime.now(timezone.utc).isoformat(),
-        }
-        with open(feedback_dataset_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(feedback_record, ensure_ascii=False) + "\n")
-        learned_actions.append("Opgeslagen als geverifieerd trainingsvoorbeeld voor fine-tuning")
-    except Exception as e:
-        logger.warning("Failed logging verified feedback dataset: %s", e)
-
-    return {
-        "status": "ok",
-        "log_id": log_id,
-        "user_feedback": updated_row.get("user_feedback"),
-        "feedback_reason": updated_row.get("feedback_reason"),
-        "notes": updated_row.get("notes"),
-        "feedback_at": updated_row.get("feedback_at"),
-        "learned_actions": learned_actions,
-        "message": "Feedback succesvol verwerkt en AI-geheugen direct bijgewerkt",
-    }
-
-
 @router.get("/api/v1/admin/system-status")
 async def get_admin_system_status(request: Request):
-    """Returns live hardware metrics (CPU, RAM, Disk) and component health."""
+    """Returns live app/backend resource metrics and component health."""
     client_host = request.client.host if request.client else ""
     if client_host not in ("127.0.0.1", "::1", "localhost", "testclient"):
         require_admin(request)
-    
-    # 1. CPU & RAM via psutil
-    cpu_pct = 0.0
-    ram_pct = 0.0
-    ram_used_mb = 0
+
+    # 1. Backend Process Metrics (Lightweight, non-blocking via psutil)
+    backend_metrics = {
+        "pid": os.getpid(),
+        "cpu_percent": 0.0,
+        "rss_mb": 0.0,
+        "threads": 1,
+        "uptime_seconds": 0,
+    }
     try:
         import psutil
-        cpu_pct = psutil.cpu_percent(interval=0.05)
-        mem = psutil.virtual_memory()
-        ram_pct = mem.percent
-        ram_used_mb = int(mem.used / (1024 * 1024))
+        p = psutil.Process(os.getpid())
+        backend_metrics["cpu_percent"] = round(p.cpu_percent(interval=None), 1)
+        backend_metrics["rss_mb"] = round(p.memory_info().rss / (1024 * 1024), 1)
+        backend_metrics["threads"] = p.num_threads()
+        backend_metrics["uptime_seconds"] = int(time.time() - p.create_time())
     except Exception:
         pass
 
-    # 2. Disk Storage via recorder stats
-    from app.recorder import get_storage_stats
-    retention_days = int(await get_system_setting("retention_days", "30"))
-    max_storage_gb = float(await get_system_setting("max_storage_gb", "50.0"))
-    storage_stats = get_storage_stats(max_storage_gb)
+    # 2. Door Watch AI Subprocess & Bell Service status
+    from app.door_service import door_service
+    from app.bell_service import bell_service
+    door_info = door_service.get_status()
+    bell_info = bell_service.get_status()
 
-    # 3. LiveHub Frame Age in ms
+    # 3. Real Doorbell Storage Metrics
+    from app.config import settings
+    clips_count = 0
+    clips_size_mb = 0.0
+    try:
+        if settings.CLIPS_DIR.exists():
+            for root, _, files in os.walk(settings.CLIPS_DIR):
+                for f in files:
+                    if f.endswith(".mp4"):
+                        clips_count += 1
+                        try:
+                            clips_size_mb += os.path.getsize(os.path.join(root, f)) / (1024 * 1024)
+                        except Exception:
+                            pass
+        clips_size_mb = round(clips_size_mb, 1)
+    except Exception:
+        pass
+
+    ring_segments_count = 0
+    ring_size_mb = 0.0
+    shm_ring = Path("/dev/shm/deurbel_ring")
+    if shm_ring.exists():
+        try:
+            for f in shm_ring.glob("seg_*.ts"):
+                ring_segments_count += 1
+                ring_size_mb += f.stat().st_size / (1024 * 1024)
+            ring_size_mb = round(ring_size_mb, 1)
+        except Exception:
+            pass
+
+    # 4. Active Connected App Clients
+    from app.push_service import ws_manager
+    connected_clients = []
+    try:
+        connected_clients = list(ws_manager._connections.keys())
+    except Exception:
+        pass
+
+    # 5. LiveHub & Camera State
     from app.live_hub import live_hub
-    frame_age_ms = 0
-    if live_hub.latest_frame_ts > 0:
-        frame_age_ms = int((time.time() - live_hub.latest_frame_ts) * 1000)
-
+    frame_age_ms = int((time.time() - live_hub.latest_frame_ts) * 1000) if live_hub.latest_frame_ts > 0 else 0
     creds = await get_camera_credentials()
 
     from app.sdk_alarm_listener import sdk_alarm_listener
-    from app.ring_detector import ring_detector
     from app.network_sniffer import network_sniffer
+
     sdk_status = {
         "connected": sdk_alarm_listener.is_connected,
         "user_id": sdk_alarm_listener._user_id,
@@ -430,55 +336,34 @@ async def get_admin_system_status(request: Request):
         "channel1": sdk_alarm_listener._alarm_handle_deploy1 >= 0,
         "listen_handle": sdk_alarm_listener._listen_handle >= 0,
         "target": f"{creds.get('ip', '192.168.2.31')}:{creds.get('port', 8000)}",
-        "commands_monitored": {
-            "0x1132": "COMM_UPLOAD_VIDEO_INTERCOM_EVENT (byte 44 in (1, 0))",
-            "0x1133": "COMM_ALARM_VIDEO_INTERCOM (byte 44 in (1, 14))",
-            "0x4000": "COMM_ALARM_V30 (dwAlarmType == 0)",
-            "0x5002/0x6009": "COMM_ISAPI_ALARM (ring/call)",
-        },
         "recent_events_count": len(sdk_alarm_listener.get_recent_events()),
-    }
-    shazam_status = {
-        "active": ring_detector._running,
-        "threshold": ring_detector.ncc_trigger_threshold,
-        "fingerprint": os.path.exists(ring_detector.fingerprint_path),
-        "recent_count": len(ring_detector.get_recent_detections()),
     }
     sniffer_status = {
         "running": network_sniffer._running,
         "iface": network_sniffer.iface,
         "doorbell_ip": network_sniffer.doorbell_ip,
         "gateway_ip": network_sniffer.gateway_ip,
-        "recent_bursts_count": len(network_sniffer.recent_bursts),
         "signature": network_sniffer.known_signature,
-        "learner": network_sniffer.get_learner_status(),
         "timing": network_sniffer.get_timing_analysis(),
-    }
-
-    from app.ring_coordinator import ring_coordinator
-    dual_ring_status = {
-        "shazam_active": ring_detector._running,
-        "sniffer_active": network_sniffer._running,
-        "iface": network_sniffer.iface,
-        "recent_verifications": ring_coordinator.get_recent_verifications() if hasattr(ring_coordinator, "get_recent_verifications") else [],
     }
 
     return {
         "status": "ok",
-        "cpu_percent": cpu_pct,
-        "ram_percent": ram_pct,
-        "ram_used_mb": ram_used_mb,
-        "disk_used_mb": storage_stats["used_mb"],
-        "disk_max_gb": max_storage_gb,
-        "disk_usage_percent": storage_stats["usage_percent"],
-        "total_clips": storage_stats["total_clips"],
+        "backend": backend_metrics,
+        "door_watch": door_info,
+        "bell_service": bell_info,
+        "storage": {
+            "clips_count": clips_count,
+            "clips_size_mb": clips_size_mb,
+            "ring_segments_count": ring_segments_count,
+            "ring_size_mb": ring_size_mb,
+        },
+        "connected_clients": connected_clients,
         "frame_age_ms": frame_age_ms,
         "live_fresh": live_hub.is_fresh(),
         "doorbell_ip": creds.get("ip", ""),
         "sdk_alarm_listener": sdk_status,
-        "shazam_status": shazam_status,
         "network_sniffer": sniffer_status,
-        "dual_ring": dual_ring_status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -542,105 +427,6 @@ async def admin_test_push(request: Request):
     }
     await push_event("AI_DETECTION", test_data)
     return {"status": "ok", "message": "🔔 Foxway Test Melding: Push-verbinding werkt 100%!"}
-
-
-# ── 50-Triggers Benchmark & Mode Switcher (v3.6.6) ──────────────────────────
-
-class RingTriggerModeRequest(BaseModel):
-    mode: str
-
-
-@router.get("/api/v1/admin/ring-comparison-benchmark")
-async def get_ring_comparison_benchmark(request: Request):
-    """Returns the 50-triggers benchmark summary and recent trials."""
-    require_admin(request)
-    from app.models import get_ring_comparison_summary, get_recent_comparison_trials
-    from app.ring_coordinator import ring_coordinator
-    summary = await get_ring_comparison_summary()
-    trials = await get_recent_comparison_trials(limit=50)
-    return {
-        "status": "ok",
-        "current_mode": ring_coordinator.mode,
-        "summary": summary,
-        "trials": trials,
-    }
-
-
-@router.post("/api/v1/admin/ring-trigger-mode")
-async def set_ring_trigger_mode(req: RingTriggerModeRequest, request: Request):
-    """Sets the ring trigger mode: SHAZAM_PRIMARY, SNIFFER_PRIMARY, or DUAL_CONFIRM."""
-    require_admin(request)
-    valid_modes = {"SHAZAM_PRIMARY", "SNIFFER_PRIMARY", "DUAL_CONFIRM"}
-    if req.mode not in valid_modes:
-        raise HTTPException(status_code=400, detail=f"Invalid mode. Must be one of: {valid_modes}")
-
-    from app.models import set_system_setting
-    from app.ring_coordinator import ring_coordinator
-    await set_system_setting("ring_trigger_mode", req.mode)
-    ring_coordinator.set_mode(req.mode)
-    logger.info("🔧 Ring trigger mode set to %s by admin", req.mode)
-    return {"status": "ok", "mode": req.mode, "message": f"Aanbelmodus ingesteld op {req.mode}"}
-
-
-
-@router.get("/api/v1/admin/inspector-snapshot/{log_id}")
-async def get_inspector_snapshot_endpoint(log_id: int, request: Request):
-    """Serve debug/inspector snapshot for AI audit log entry (v3.5.0)."""
-    require_admin(request)
-    from app.database import get_db
-    from app.recorder import resolve_clip_path
-    from fastapi.responses import FileResponse
-    async with get_db(write=False) as db:
-        cursor = await db.execute("SELECT id, snapshot_path, timestamp, category FROM ai_audit_logs WHERE id = ?", (log_id,))
-        row = await cursor.fetchone()
-        if not row:
-            raise HTTPException(404, "Audit log not found")
-
-    snap_path = row["snapshot_path"]
-    # Check direct path
-    if snap_path and os.path.exists(snap_path) and os.path.getsize(snap_path) > 0:
-        return FileResponse(snap_path, media_type="image/jpeg")
-
-    # Try resolving via resolve_clip_path
-    base = os.path.basename(snap_path) if snap_path else f"{log_id}.jpg"
-    resolved = resolve_clip_path(base, ext=".jpg")
-    if resolved and resolved.exists() and resolved.stat().st_size > 0:
-        return FileResponse(str(resolved), media_type="image/jpeg")
-
-    # Check clean snapshot
-    clean_stem = base.replace("_debug.jpg", "").replace(".jpg", "")
-    alt_snap = settings.SNAPSHOTS_DIR / f"{clean_stem}.jpg"
-    if alt_snap.exists() and alt_snap.stat().st_size > 0:
-        return FileResponse(str(alt_snap), media_type="image/jpeg")
-
-    # Fallback: extract frame 1 from matching mp4
-    v_resolved = resolve_clip_path(f"{clean_stem}.mp4", ext=".mp4")
-    if v_resolved and v_resolved.exists():
-        extracted_path = settings.SNAPSHOTS_DIR / f"{clean_stem}_debug.jpg"
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "nice", "-n", "15",
-                "ffmpeg", "-y",
-                "-ss", "1.0",
-                "-i", str(v_resolved),
-                "-vframes", "1",
-                "-q:v", "2",
-                str(extracted_path),
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.communicate()
-            if extracted_path.exists() and extracted_path.stat().st_size > 0:
-                return FileResponse(str(extracted_path), media_type="image/jpeg")
-        except Exception:
-            pass
-
-    # Instant live snapshot fallback
-    instant_snap = settings.SNAPSHOTS_DIR / "instant.jpg"
-    if instant_snap.exists() and instant_snap.stat().st_size > 0:
-        return FileResponse(str(instant_snap), media_type="image/jpeg")
-
-    raise HTTPException(404, "Snapshot image not found")
 
 
 @router.get("/api/v1/admin/ring-verifications")
