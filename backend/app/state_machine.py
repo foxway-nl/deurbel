@@ -318,23 +318,6 @@ class CallStateMachine:
 
         return {"status": "ENDED"}
 
-    # ── QUICK-REPLY (claims + sends audio) ────────────────────────────
-
-    async def quick_reply(self, call_id: str, user_id: str, user_name: str, reply_id: str) -> dict:
-        """
-        Claim the call on behalf of the user and queue the pre-recorded
-        audio reply for backchannel injection.
-        """
-        result = await self.claim(call_id, user_id, user_name)
-        if result["status"] not in ("CLAIMED", "ALREADY_CLAIMED"):
-            return result
-        # Actual audio injection is handled by the caller (main.py routes)
-        return {
-            "status": "QUICK_REPLY_SENT",
-            "reply_id": reply_id,
-            "claimed_by": user_name,
-        }
-
     # ── STATUS ────────────────────────────────────────────────────────
 
     async def status(self) -> dict:

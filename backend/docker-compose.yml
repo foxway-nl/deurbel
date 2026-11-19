@@ -43,9 +43,8 @@ services:
       - /dev/shm:/dev/shm
       # NAS storage mount — clips, snapshots, and SQLite database
       - /mnt/opslag/deurbel:/mnt/opslag/deurbel
-      # Live app code and audio replies mount
+      # Live app code mount
       - ./app:/app/app
-      - ./audio_replies:/app/audio_replies
       # Optional: Firebase service account credentials
       # - ./firebase-sa.json:/app/firebase-sa.json:ro
     ports:

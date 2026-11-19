@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # ── Doorbell Audio Detection (doorbell_detector / bell_service) ────
     DOORBELL_THRESHOLD: float = float(os.environ.get("DOORBELL_THRESHOLD", "0.30"))
     DOORBELL_COOLDOWN: float = float(os.environ.get("DOORBELL_COOLDOWN", "8.0"))
-    BELL_REF_PATH: str = os.environ.get("BELL_REF_PATH", "/mnt/opslag/deurbel/backend/app/assets/bel.mp4")
+    BELL_REF_PATH: str = os.environ.get("BELL_REF_PATH", "/mnt/opslag/deurbel/backend/app/assets/bel.wav")
 
     # ── Doorbell Hardware ──────────────────────────────────────────────
     DOORBELL_IP: str = ""
@@ -35,11 +35,6 @@ class Settings(BaseSettings):
     STORAGE_PATH: Path = Path("/mnt/opslag/deurbel")
     CLIPS_DIR: Path = Path("/mnt/opslag/deurbel/clips")
     SNAPSHOTS_DIR: Path = Path("/mnt/opslag/deurbel/snapshots")
-    AUDIO_REPLIES_DIR: Path = (
-        Path("/mnt/opslag/deurbel/backend/audio_replies")
-        if Path("/mnt/opslag/deurbel/backend/audio_replies").exists()
-        else Path("/app/audio_replies")
-    )
     DB_PATH: Path = Path("/mnt/opslag/deurbel/foxway.db")
 
     # ── Auth / JWT ─────────────────────────────────────────────────────

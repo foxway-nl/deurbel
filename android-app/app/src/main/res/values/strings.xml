@@ -29,10 +29,6 @@
     <string name="call_answered_by">Beantwoord door %1$s</string>
     <string name="call_missed">Gemiste oproep</string>
 
-    <!-- Quick replies -->
-    <string name="quick_reply_package">📦 Zet pakketje bij de deur</string>
-    <string name="quick_reply_coming">🏃 Ik kom eraan</string>
-
     <!-- Live view -->
     <string name="live_view_title">Live Kijken</string>
     <string name="live_view_ptt">Houd ingedrukt om te spreken</string>

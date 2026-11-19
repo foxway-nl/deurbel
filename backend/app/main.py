@@ -80,7 +80,6 @@ from app.models import (
     ClipInfo,
     PairRequest,
     PairResponse,
-    QuickReplyRequest,
     TrimRequest,
     UserInfo,
     init_db,
@@ -111,7 +110,6 @@ from app.recorder import (
     fetch_snapshot,
     get_manual_recording_status,
     get_storage_stats,
-    inject_audio_reply,
     remove_clip,
     ring_buffer,
     start_manual_recording,
@@ -1074,39 +1072,6 @@ async def hangup_call_active(body: Optional[dict] = None):
     if not call_id:
         raise HTTPException(404, "No active call to hangup")
     return await hangup_call(call_id)
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  ROUTE: Quick Reply
-# ══════════════════════════════════════════════════════════════════════
-
-@app.post("/api/v1/call/{call_id}/quick-reply")
-@app.post("/api/call/{call_id}/quick-reply")
-async def quick_reply(call_id: str, body: QuickReplyRequest):
-    """
-    Send a pre-recorded audio reply through the doorbell speaker and
-    atomically claim the call.
-    """
-    result = await call_sm.quick_reply(
-        call_id, body.user_name.lower().replace(" ", "_"), body.user_name, body.reply_id
-    )
-
-    if result["status"] in ("NOT_FOUND", "INVALID_STATE"):
-        raise HTTPException(400, f"Cannot send quick reply: {result['status']}")
-
-    # Fire-and-forget audio injection in the background
-    asyncio.create_task(inject_audio_reply(body.reply_id))
-
-    return result
-
-
-@app.post("/api/call/quick-reply")
-async def quick_reply_active(body: QuickReplyRequest):
-    """Send quick reply to active ringing call."""
-    call_id = body.call_id or (call_sm.current_call.call_id if call_sm.current_call else None)
-    if not call_id:
-        raise HTTPException(404, "No active call for quick reply")
-    return await quick_reply(call_id, body)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2457,7 +2422,6 @@ async def audio_speak_endpoint(
     """
     Stream audio directly to the EZVIZ DB1 Pro outdoor speaker.
     - If reply_id == 'test_tone' or no params provided: sends 1000Hz test tone.
-    - If reply_id matches a pre-recorded greeting, plays that file.
     - If file is uploaded, transcodes via FFmpeg to 8000Hz G.711 and streams it.
     """
     logger.info("Audio speak endpoint: reply_id=%s, file=%s", reply_id, file.filename if file else None)
@@ -2466,11 +2430,7 @@ async def audio_speak_endpoint(
         content = await file.read()
         ok = await play_audio_to_doorbell_async(audio_data=content)
     elif reply_id and reply_id != "test_tone":
-        possible_path = settings.AUDIO_REPLIES_DIR / f"{reply_id}.wav"
-        if possible_path.exists():
-            ok = await play_audio_to_doorbell_async(file_path=possible_path)
-        else:
-            raise HTTPException(404, f"Reply audio file '{reply_id}.wav' not found")
+        raise HTTPException(404, f"Audio replies are not supported: {reply_id}")
     else:
         # Default: 1000 Hz 3s test tone via ISAPI / Port 8000 SDK
         ok = await asyncio.to_thread(send_test_tone_to_doorbell)

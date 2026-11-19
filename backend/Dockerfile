@@ -15,7 +15,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Application code
 COPY app/ app/
-COPY audio_replies/ audio_replies/
 
 # Storage directories (will be bind-mounted in production)
 RUN mkdir -p /mnt/opslag/deurbel/clips /mnt/opslag/deurbel/snapshots

@@ -114,14 +114,6 @@ class CallHangupRequest(BaseModel):
     reason: Optional[str] = "Normal hangup"
 
 
-class QuickReplyRequest(BaseModel):
-    audio_file: Optional[str] = None
-    reply_id: Optional[str] = None
-    user_id: Optional[str] = None
-    user_name: Optional[str] = None
-    call_id: Optional[str] = None
-
-
 class CallStatusResponse(BaseModel):
     state: CallState
     call_id: Optional[str] = None

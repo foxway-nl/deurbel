@@ -42,12 +42,6 @@ data class ClaimResponse(
     @SerializedName("answered_by") val answeredBy: String? = null
 )
 
-/** POST /api/v1/call/{call_id}/quick-reply request */
-data class QuickReplyRequest(
-    @SerializedName("reply_id") val replyId: String,
-    @SerializedName("user_name") val userName: String
-)
-
 /** POST /api/v1/clips/{clip_id}/trim request */
 data class TrimRequest(
     @SerializedName("start_sec") val startSec: Double,

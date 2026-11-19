@@ -1042,65 +1042,6 @@ async def trim_clip(clip_id: str, start_sec: float, end_sec: float) -> Optional[
     return output_path
 
 
-# ──────────────────────────────────────────────────────────────────────
-#  Quick-reply audio injection (PCMA backchannel)
-# ──────────────────────────────────────────────────────────────────────
-
-
-async def inject_audio_reply(reply_id: str) -> bool:
-    """
-    Stream a pre-recorded WAV file into the go2rtc RTSP backchannel as
-    ``pcm_alaw`` (8 kHz mono G.711 A-law), which the EZVIZ DB1 Pro
-    plays through its external speaker.
-
-    Audio files are stored in ``/app/audio_replies/{reply_id}.wav``.
-    """
-    audio_path = settings.AUDIO_REPLIES_DIR / f"{reply_id}.wav"
-    if not audio_path.exists():
-        logger.error("Audio reply file not found: %s", audio_path)
-        return False
-
-    # Primary: route directly to EZVIZ DB1 Pro speaker via hardware audio bridge
-    try:
-        from app.audio_bridge import play_audio_to_doorbell_async
-        ok = await play_audio_to_doorbell_async(file_path=audio_path)
-        if ok:
-            logger.info("Audio reply '%s' played successfully via audio bridge", reply_id)
-            return True
-    except Exception as e:
-        logger.warning("Audio bridge play failed for '%s': %s. Trying RTSP backchannel fallback...", reply_id, e)
-
-    backchannel_url = f"{settings.GO2RTC_RTSP_URL}?backchannel=1"
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-re",  # Real-time playback speed
-        "-i", str(audio_path),
-        "-acodec", "pcm_alaw",
-        "-ar", "8000",
-        "-ac", "1",
-        "-f", "rtsp",
-        "-rtsp_transport", "tcp",
-        backchannel_url,
-    ]
-
-    logger.info("Injecting audio reply '%s' → backchannel", reply_id)
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            logger.warning("Audio injection exited %d: %s", proc.returncode, stderr.decode()[-300:])
-            return False
-        logger.info("Audio reply '%s' injected successfully", reply_id)
-        return True
-    except Exception:
-        logger.exception("Audio injection failed for '%s'", reply_id)
-        return False
 
 
 # ──────────────────────────────────────────────────────────────────────

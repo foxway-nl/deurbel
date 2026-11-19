@@ -34,12 +34,6 @@ interface FoxwayApi {
     @POST("/api/v1/call/{callId}/hangup")
     suspend fun hangup(@Path("callId") callId: String): Response<Map<String, String>>
 
-    @POST("/api/v1/call/{callId}/quick-reply")
-    suspend fun quickReply(
-        @Path("callId") callId: String,
-        @Body request: QuickReplyRequest
-    ): Response<Map<String, String>>
-
     // ── FCM token ────────────────────────────────────────────────────
 
     @PUT("/api/v1/devices/{userId}/fcm-token")
@@ -95,11 +89,6 @@ interface FoxwayApi {
 
     @POST("/api/v1/test/audio-loopback")
     suspend fun testAudioLoopback(): Response<AudioLoopbackResponse>
-
-    @POST("/api/v1/audio/speak")
-    suspend fun speakAudio(
-        @Query("reply_id") replyId: String? = null
-    ): Response<Map<String, Any>>
 
     // ── WebRTC WHEP Proxy ────────────────────────────────────────────
 
