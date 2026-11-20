@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-EZVIZ DB1 Pro ding-dong detector, versie 2 (regel-gebaseerd, veel strenger dan v1).
+EZVIZ DB1 Pro ding-dong detector, versie 2.1 (regel-gebaseerd, veel strenger dan v1).
 
 Waarom v2?  v1 vergeleek het hele spectrum met een sjabloon. Stemmen en kindergegil kunnen
 dan toevallig genoeg lijken. v2 kijkt alleen naar wat de bel ECHT uniek maakt: een aantal
@@ -47,6 +47,7 @@ I_DING, I_DONG = 0, 1
 DING_SEC = [2, 3, 4]
 DONG_SEC = [5, 6]
 I_DOM_DING, I_DOM_DONG = 7, 8
+MAX_COOLDOWN = 4.0
 
 
 @dataclass
@@ -61,11 +62,11 @@ class Params:
     min_sec_dong: int = 1   # aantal nevenlijnen (van 2) in de dong
     n_a_min: int = 5        # ding minstens 5 frames (0,16 s)
     n_a_max: int = 18       # ding hoogstens 18 frames (0,58 s): langer = constante toon
-    n_b: int = 5            # dong minstens 5 frames (0,16 s) -> dan meteen melden (<200ms detectie)
+    n_b: int = 8            # dong minstens 8 frames (0,26 s) -> dan meteen melden
     hole: int = 3           # maximaal zoveel frames tussen ding en dong
     gap_min: float = 0.15   # s tussen begin ding en begin dong
     gap_max: float = 0.60
-    min_dom_db: float = 9.0  # piek-dominantie (t.o.v. directe buren b+-2) minimaal zoveel dB
+    min_dom_db: float = -99.0  # optioneel filter piek-dominantie (dB); -99 = uit. Op echte bellen ligt dit vaak onder 9 dB, dus niet aanzetten
 
 
 def build_template(path=None, verbose=True):
@@ -74,7 +75,7 @@ def build_template(path=None, verbose=True):
     p = Params()
     if path:
         try:
-            ev, _ = scan_array(load_audio(path), p, 0.0, 8.0)
+            ev, _ = scan_array(load_audio(path), p, 0.0, 3.0)
             if verbose:
                 print("referentie " + ("OK: bel herkend" if ev else
                       "WAARSCHUWING: bel niet herkend in referentie (dong te kort afgeknipt of ander geluid?)"), flush=True)
@@ -95,27 +96,16 @@ _B = [int(round(f / BIN_HZ)) for f in LINE_HZ]
 
 
 def line_prominence(frames):
-    """frames [n, NFFT] -> [n, 9]:
-    0..6: dB van elke lijn boven de mediaan van de omgeving (+-300 Hz).
-    7: piek-dominantie ding (726,56 Hz t.o.v. directe buren b+-2).
-    8: piek-dominantie dong (562,5 Hz t.o.v. directe buren b+-2).
-    """
+    """frames [n, NFFT] -> [n, 7]: dB van elke lijn boven de mediaan van de omgeving (+-300 Hz)."""
     db = 10 * np.log10(np.abs(np.fft.rfft(frames * _WIN, axis=1)) ** 2 + 1e-12)
     out = np.empty((len(frames), len(_B) + 2), np.float32)
     for k, b in enumerate(_B):
         pk = db[:, b - 1:b + 2].max(axis=1)
         bg = np.median(np.concatenate([db[:, b - 48:b - 5], db[:, b + 6:b + 49]], axis=1), axis=1)
         out[:, k] = pk - bg
-
-    b_ding, b_dong = _B[I_DING], _B[I_DONG]
-    pk_ding = db[:, b_ding - 1:b_ding + 2].max(axis=1)
-    nbr_ding = np.maximum(db[:, b_ding - 2], db[:, b_ding + 2])
-    out[:, I_DOM_DING] = pk_ding - nbr_ding
-
-    pk_dong = db[:, b_dong - 1:b_dong + 2].max(axis=1)
-    nbr_dong = np.maximum(db[:, b_dong - 2], db[:, b_dong + 2])
-    out[:, I_DOM_DONG] = pk_dong - nbr_dong
-
+    for col, i in ((I_DOM_DING, I_DING), (I_DOM_DONG, I_DONG)):
+        b = _B[i]
+        out[:, col] = db[:, b - 1:b + 2].max(axis=1) - np.maximum(db[:, b - 2], db[:, b + 2])
     return out
 
 
@@ -135,11 +125,13 @@ def _runs(m):
 
 # ---------------------------------------------------------------- detector
 class Detector:
-    def __init__(self, template=None, threshold=0.30, cooldown=8.0, clip_dir=None, verbose=True,
+    def __init__(self, template=None, threshold=0.30, cooldown=3.0, clip_dir=None, verbose=True,
                  clip_s=8.0, near_miss=True, **_ignored):
         self.p = template if isinstance(template, Params) else Params()
         self.thr = threshold
-        self.cool = cooldown
+        self.cool = min(float(cooldown), MAX_COOLDOWN)    # 1 bel geeft al max. 1 melding; lange cooldown slikt snel 2e aanbellen in
+        if cooldown > MAX_COOLDOWN and verbose:
+            print(f"[bel] cooldown {cooldown:.0f}s teruggezet naar {MAX_COOLDOWN:.0f}s (tweede aanbellen binnen {cooldown:.0f}s werd anders gemist)", flush=True)
         self.clip_dir = clip_dir
         self.verbose = verbose
         self.near_miss = near_miss
@@ -229,8 +221,8 @@ class Detector:
             elif not (p.gap_min <= gap <= p.gap_max):
                 why = f"afstand ding-dong {gap:.2f}s"
             else:
-                sd = sum(int((H[max(0, a0 - 2):a1 + 4, k] >= p.ts).sum() >= p.sec_frames) for k in DING_SEC)
-                so = sum(int((H[max(0, b0 - 2):b1 + 1, k] >= p.ts).sum() >= p.sec_frames) for k in DONG_SEC)
+                sd = sum(int((H[a0:a1 + 4, k] >= p.ts).sum() >= p.sec_frames) for k in DING_SEC)
+                so = sum(int((H[b0 - 2:b1 + 1, k] >= p.ts).sum() >= p.sec_frames) for k in DONG_SEC)
                 if sd < p.min_sec_ding:
                     why = f"nevenlijnen ding {sd}/{len(DING_SEC)}"
                 elif so < p.min_sec_dong:
@@ -243,7 +235,11 @@ class Detector:
 
         score = float(min(1.0, min(pa[a0:a1 + 1].mean() / 40, pb[b0:b1 + 1].mean() / 30)))
         self.best = max(self.best, score)
-        if score < self.thr or (t_now - self.last_fire) <= self.cool:
+        if score < self.thr:
+            return None
+        if (t_now - self.last_fire) <= self.cool:
+            if self.verbose:
+                print(f"[bel] geldige bel genegeerd: cooldown ({t_now - self.last_fire:.1f}s na vorige melding)", flush=True)
             return None
         self.last_fire = t_now
         ding_t = t_now - (n - 1 - a0) * FRAME_S - NFFT / SR / 2
@@ -281,7 +277,7 @@ class Detector:
             print("[bel] clip opgeslagen:", fn, flush=True)
 
 
-def scan_array(x, template=None, threshold=0.30, cooldown=8.0, verbose=False):
+def scan_array(x, template=None, threshold=0.30, cooldown=3.0, verbose=False):
     d = Detector(template, threshold, cooldown, verbose=verbose, near_miss=False)
     x = np.concatenate([np.zeros(SR, np.float32), np.asarray(x, np.float32), np.zeros(SR, np.float32)])
     ev = []
@@ -384,8 +380,7 @@ def main():
     ap.add_argument("--rtsp", help="rtsp url (bijv. go2rtc) om live te luisteren")
     ap.add_argument("--webhook", help="URL die een POST krijgt bij aanbellen")
     ap.add_argument("--threshold", type=float, default=0.30)
-    ap.add_argument("--cooldown", type=float, default=8.0)
-    ap.add_argument("--min-dom", type=float, default=None, help="minimale piek-dominantie in dB")
+    ap.add_argument("--cooldown", type=float, default=3.0, help="s tussen meldingen (max 4)")
     ap.add_argument("--clip-dir", help="sla bij elke melding/bijna-melding 8 s audio op (voor afstellen)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
@@ -393,8 +388,6 @@ def main():
     if a.selftest:
         return selftest(a.ref or a.test)
     T = build_template(a.ref)
-    if a.min_dom is not None:
-        T.min_dom_db = a.min_dom
     if a.test:
         x = np.concatenate([np.zeros(SR, np.float32), load_audio(a.test), np.zeros(SR, np.float32)])
         d = Detector(T, a.threshold, a.cooldown, clip_dir=a.clip_dir, near_miss=True)
