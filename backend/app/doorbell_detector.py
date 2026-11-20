@@ -61,7 +61,7 @@ class Params:
     min_sec_dong: int = 1   # aantal nevenlijnen (van 2) in de dong
     n_a_min: int = 5        # ding minstens 5 frames (0,16 s)
     n_a_max: int = 18       # ding hoogstens 18 frames (0,58 s): langer = constante toon
-    n_b: int = 8            # dong minstens 8 frames (0,26 s) -> dan meteen melden
+    n_b: int = 5            # dong minstens 5 frames (0,16 s) -> dan meteen melden (<200ms detectie)
     hole: int = 3           # maximaal zoveel frames tussen ding en dong
     gap_min: float = 0.15   # s tussen begin ding en begin dong
     gap_max: float = 0.60

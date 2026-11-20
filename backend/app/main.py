@@ -128,6 +128,7 @@ logging.basicConfig(
     format="%(asctime)s  %(name)-22s  %(levelname)-5s  %(message)s",
     datefmt="%H:%M:%S",
 )
+logging.getLogger("foxway").setLevel(logging.INFO)
 logger = logging.getLogger("foxway.main")
 
 # ── State Machine Singleton ──────────────────────────────────────────
@@ -2443,6 +2444,26 @@ async def audio_speak_endpoint(
             "target": f"EZVIZ DB1 Pro ({creds['ip']})",
         }
     raise HTTPException(status_code=500, detail="Failed to stream audio to doorbell speaker")
+
+
+@app.post("/api/v1/doorbell/play-chime")
+@app.post("/api/v1/admin/play-chime")
+async def play_doorbell_chime():
+    """
+    Speelt bel.wav direct af via de outdoor speaker van de deurbel (Poort 8000 C-SDK),
+    zodat de microfoon en ding-dong detector het akoestisch oppikken.
+    """
+    logger.info("Speel ding-dong melodie (bel.wav) af via deurbel speaker...")
+    chime_path = Path("/mnt/opslag/deurbel/backend/app/assets/bel.wav")
+    if not chime_path.exists():
+        raise HTTPException(404, "bel.wav niet gevonden")
+    ok = await play_audio_to_doorbell_async(file_path=chime_path)
+    if ok:
+        return {
+            "status": "success",
+            "message": "Ding-dong melodie succesvol afgespeeld op de deurbel speaker",
+        }
+    raise HTTPException(status_code=500, detail="Kon deurbel speaker niet bereiken")
 
 
 

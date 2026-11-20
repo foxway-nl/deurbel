@@ -146,8 +146,8 @@ class CallStateMachine:
 
             logger.info("New call %s — RINGING (source=%s)", call_id, trigger_source)
 
-            # Persist initial call log
-            await save_call_log(call_id, CallState.RINGING.value)
+            # Persist initial call log as background task to eliminate SQLite write-lock latency
+            asyncio.create_task(save_call_log(call_id, CallState.RINGING.value))
 
         from app.recorder import get_day_clip_dir
         day_dir = get_day_clip_dir()
@@ -176,6 +176,16 @@ class CallStateMachine:
                     "🔔 Doorbell ring while recording active (clip=%s) — merging call %s into existing clip",
                     active_cid, call_id,
                 )
+                if active_cid:
+                    try:
+                        from app.database import get_db
+                        async with get_db(write=True) as db:
+                            await db.execute(
+                                "UPDATE clips SET category = 'ring', answered_by = ? WHERE clip_id = ?",
+                                (f"Aanbellen [{trigger_source}]", active_cid)
+                            )
+                    except Exception as cat_err:
+                        logger.warning("Failed upgrading active clip category to ring: %s", cat_err)
                 if self.on_start_recording:
                     try:
                         call.recorder_task = await self.on_start_recording(call_id, clip_path, trigger_source=trigger_source)

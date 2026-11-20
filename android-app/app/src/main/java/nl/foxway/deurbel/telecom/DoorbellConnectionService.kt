@@ -177,12 +177,16 @@ class DoorbellConnectionService : ConnectionService() {
             // Bypasses Android 10-14 background activity launch restrictions and wakes screen
             showIncomingCallNotification(context, callId, snapshotUrl)
 
+            // 2. Direct zero-latency CallActivity launch on ms 0 (no Telecom IPC wait)
+            if (!CallActivity.isCallActivityVisible) {
+                launchCallActivity(context, callId, snapshotUrl, false)
+            }
+
             try {
                 registerPhoneAccount(context)
                 val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
                 if (telecomManager == null) {
                     Log.w(TAG, "TelecomManager unavailable, falling back to direct CallActivity")
-                    launchCallActivity(context, callId, snapshotUrl, false)
                     return
                 }
 
@@ -200,12 +204,9 @@ class DoorbellConnectionService : ConnectionService() {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     telecomManager.addNewIncomingCall(handle, extras)
                     Log.i(TAG, "addNewIncomingCall successfully submitted to Android Telecom")
-                } else {
-                    launchCallActivity(context, callId, snapshotUrl, false)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "addNewIncomingCall failed, launching CallActivity fallback", e)
-                launchCallActivity(context, callId, snapshotUrl, false)
+                Log.e(TAG, "addNewIncomingCall failed: ${e.message}", e)
             }
         }
 

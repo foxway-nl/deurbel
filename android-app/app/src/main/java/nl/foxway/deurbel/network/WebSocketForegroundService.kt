@@ -134,6 +134,7 @@ class WebSocketForegroundService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var connectivityManager: android.net.ConnectivityManager? = null
     private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+    private var serviceWakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -145,6 +146,15 @@ class WebSocketForegroundService : Service() {
 
         val eventPrefs = getSharedPreferences("foxway_events", Context.MODE_PRIVATE)
         lastEventId = eventPrefs.getLong("last_seen_event_id", 0L)
+
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            serviceWakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Foxway:ServiceWakeLock")
+            serviceWakeLock?.setReferenceCounted(false)
+            serviceWakeLock?.acquire(24 * 3600 * 1000L)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed acquiring service partial wake lock: ${e.message}")
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -197,7 +207,7 @@ class WebSocketForegroundService : Service() {
             }
         }
 
-        // Start 2-second polling fallback loop (Task 3)
+        // Start 1-second polling fallback loop (Task 3)
         pollJob?.cancel()
         pollJob = serviceScope.launch(Dispatchers.IO) {
             while (isActive) {
@@ -206,11 +216,11 @@ class WebSocketForegroundService : Service() {
                 } catch (e: Exception) {
                     Log.w(TAG, "Event poll failed: ${e.message}")
                 }
-                delay(2000L)
+                delay(1000L)
             }
         }
 
-        Log.i(TAG, "Service started, WebSocket & 2s Polling Fallback active (lastEventId=$lastEventId)")
+        Log.i(TAG, "Service started, WebSocket & 1s Polling Fallback active (lastEventId=$lastEventId)")
         return START_STICKY
     }
 
@@ -218,6 +228,12 @@ class WebSocketForegroundService : Service() {
         super.onDestroy()
         eventCollectorJob?.cancel()
         pollJob?.cancel()
+        try {
+            if (serviceWakeLock?.isHeld == true) {
+                serviceWakeLock?.release()
+            }
+        } catch (_: Exception) {}
+        serviceWakeLock = null
         persistentWebSocket.stop()
         try {
             networkCallback?.let { connectivityManager?.unregisterNetworkCallback(it) }

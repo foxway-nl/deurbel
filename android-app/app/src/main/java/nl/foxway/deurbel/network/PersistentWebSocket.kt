@@ -29,8 +29,8 @@ class PersistentWebSocket(
 
     companion object {
         private const val TAG = "PersistentWS"
-        private const val HEARTBEAT_INTERVAL_MS = 25_000L
-        private val BACKOFF_STEPS = longArrayOf(1_000L, 3_000L, 5_000L, 15_000L)
+        private const val HEARTBEAT_INTERVAL_MS = 12_000L
+        private val BACKOFF_STEPS = longArrayOf(500L, 2_000L, 5_000L, 15_000L)
     }
 
     private val gson = Gson()
@@ -48,11 +48,12 @@ class PersistentWebSocket(
     private var backoffIndex = 0
     private var currentLatch: CompletableDeferred<Unit>? = null
     private var isRunning = false
+    private var immediateReconnect = false
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS) // no read timeout for persistent WS
-        .pingInterval(20, TimeUnit.SECONDS)
+        .pingInterval(10, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
@@ -72,6 +73,7 @@ class PersistentWebSocket(
     fun forceReconnect(reason: String) {
         Log.i(TAG, "forceReconnect called: $reason")
         backoffIndex = 0
+        immediateReconnect = true
         try {
             webSocket?.cancel()
         } catch (_: Exception) {}
@@ -172,11 +174,16 @@ class PersistentWebSocket(
 
             if (!isRunning) break
 
-            val delayMs = BACKOFF_STEPS[backoffIndex.coerceAtMost(BACKOFF_STEPS.size - 1)]
-            Log.i(TAG, "Reconnecting in ${delayMs}ms… (step $backoffIndex)")
-            delay(delayMs)
-            if (backoffIndex < BACKOFF_STEPS.size - 1) {
-                backoffIndex++
+            if (immediateReconnect) {
+                immediateReconnect = false
+                Log.i(TAG, "Reconnecting immediately (network switch)...")
+            } else {
+                val delayMs = BACKOFF_STEPS[backoffIndex.coerceAtMost(BACKOFF_STEPS.size - 1)]
+                Log.i(TAG, "Reconnecting in ${delayMs}ms… (step $backoffIndex)")
+                delay(delayMs)
+                if (backoffIndex < BACKOFF_STEPS.size - 1) {
+                    backoffIndex++
+                }
             }
         }
     }

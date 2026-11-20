@@ -122,6 +122,11 @@ class BellService:
         cmd = [
             "ffmpeg",
             "-loglevel", "error",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-probesize", "32",
+            "-analyzeduration", "0",
+            "-avioflags", "direct",
             "-rtsp_transport", "tcp",
             "-i", self.rtsp_url,
             "-vn",

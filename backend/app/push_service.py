@@ -81,26 +81,33 @@ class WebSocketManager:
 
     async def broadcast(self, event: str, data: dict, exclude_user: Optional[str] = None) -> int:
         """
-        Broadcast a JSON event to all connected WebSocket clients.
+        Broadcast a JSON event to all connected WebSocket clients in parallel.
         Returns the number of successful deliveries.
         """
         async with self._lock:
             snapshot = list(self._connections.items())
 
-        delivered = 0
-        stale: list[str] = []
+        if not snapshot:
+            return 0
 
-        for uid, ws in snapshot:
+        stale: list[str] = []
+        payload = {"event": event, "data": data}
+
+        async def _send_one(uid: str, ws: WebSocket) -> bool:
             if uid == exclude_user:
-                continue
+                return False
             try:
                 if ws.application_state == WebSocketState.CONNECTED:
-                    await ws.send_json({"event": event, "data": data})
-                    delivered += 1
+                    await asyncio.wait_for(ws.send_json(payload), timeout=0.40)
+                    return True
                 else:
                     stale.append(uid)
             except Exception:
                 stale.append(uid)
+            return False
+
+        results = await asyncio.gather(*[_send_one(uid, ws) for uid, ws in snapshot], return_exceptions=True)
+        delivered = sum(1 for r in results if r is True)
 
         # Clean up dead sockets
         if stale:
@@ -238,14 +245,18 @@ async def send_fcm_to_all(event: str, data: dict, exclude_user: Optional[str] = 
 
 async def push_event(event: str, data: dict, exclude_user: Optional[str] = None) -> None:
     """
-    Broadcast *event* to every registered family device via both
-    WebSocket (instant) and FCM (wakeup fallback) in parallel.
+    Broadcast *event* to every registered family device via WebSocket (instant, 0ms)
+    and dispatch FCM wakeup fallback in the background.
     """
-    ws_count, fcm_count = await asyncio.gather(
-        ws_manager.broadcast(event, data, exclude_user=exclude_user),
-        send_fcm_to_all(event, data, exclude_user=exclude_user),
-    )
-    logger.info(
-        "Push %s → WS=%d, FCM=%d (excl=%s)",
-        event, ws_count, fcm_count, exclude_user,
-    )
+    # 1. Instant Zero-Latency WebSocket broadcast
+    ws_count = await ws_manager.broadcast(event, data, exclude_user=exclude_user)
+
+    # 2. Background FCM dispatch (does not block zero-latency call flow)
+    async def _bg_fcm():
+        try:
+            fcm_count = await send_fcm_to_all(event, data, exclude_user=exclude_user)
+            logger.info("Push %s → WS=%d, FCM=%d (excl=%s)", event, ws_count, fcm_count, exclude_user)
+        except Exception as fcm_err:
+            logger.debug("Background FCM error for %s: %s", event, fcm_err)
+
+    asyncio.create_task(_bg_fcm())

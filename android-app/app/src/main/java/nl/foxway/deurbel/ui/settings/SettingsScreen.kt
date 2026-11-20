@@ -143,6 +143,8 @@ fun SettingsScreen(
     var showLogsDialog by remember { mutableStateOf(false) }
     var isTriggeringShelly by remember { mutableStateOf(false) }
     var shellyTriggerResult by remember { mutableStateOf<String?>(null) }
+    var isPlayingChime by remember { mutableStateOf(false) }
+    var chimeResult by remember { mutableStateOf<String?>(null) }
 
     val modernSwitchColors = SwitchDefaults.colors(
         checkedThumbColor = EmeraldPrimary,
@@ -1000,6 +1002,56 @@ fun SettingsScreen(
                     }
 
                     shellyTriggerResult?.let {
+                        Text(text = it, style = MaterialTheme.typography.bodySmall, color = CyanAccent)
+                    }
+
+                    // Knop 2b: Test Ding-Dong Melodie op Deurbel Speaker
+                    Button(
+                        onClick = {
+                            coroutineScope.launch {
+                                try {
+                                    isPlayingChime = true
+                                    chimeResult = "🎵 Melodie wordt afgespeeld op de deurbel speaker..."
+                                    val api = ApiClientFactory.createApi()
+                                    val resp = api.playDoorbellChime()
+                                    if (resp.isSuccessful) {
+                                        chimeResult = "✅ Melodie klinkt buiten op de deurbel! Luisteren naar akoestische detectie..."
+                                    } else {
+                                        chimeResult = "⚠️ Fout: HTTP ${resp.code()}"
+                                    }
+                                } catch (e: Exception) {
+                                    chimeResult = "❌ Fout: ${e.localizedMessage}"
+                                } finally {
+                                    isPlayingChime = false
+                                }
+                            }
+                        },
+                        enabled = !isPlayingChime,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = EmeraldPrimary,
+                            disabledContainerColor = EmeraldPrimary.copy(alpha = 0.6f)
+                        ),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                    ) {
+                        if (isPlayingChime) {
+                            CircularProgressIndicator(color = BackgroundDark, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                        } else {
+                            Icon(imageVector = Icons.Default.VolumeUp, contentDescription = null, tint = BackgroundDark, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Test Ding-Dong op Deurbel Speaker",
+                                color = BackgroundDark,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+
+                    chimeResult?.let {
                         Text(text = it, style = MaterialTheme.typography.bodySmall, color = CyanAccent)
                     }
 

@@ -160,6 +160,9 @@ interface FoxwayApi {
     @POST("/api/v1/webhook/shelly-ring")
     suspend fun triggerShellyWebhook(@Query("force") force: Boolean = true): Response<Map<String, Any>>
 
+    @POST("/api/v1/doorbell/play-chime")
+    suspend fun playDoorbellChime(): Response<Map<String, Any>>
+
     // ── Live Stream Anti-Freeze Restart ──────────────────────────────
 
     @POST("/api/v1/live/restart")
