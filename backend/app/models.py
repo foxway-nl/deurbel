@@ -789,15 +789,29 @@ async def sync_and_index_clips_on_disk() -> dict:
                 await db.execute("UPDATE clips SET category = ? WHERE clip_id = ?", (cat, cid))
                 updated_categories += 1
 
-        # 2. Map ring events to clips
+        # 2. Map ring events and call logs to clips
         # Any clip that corresponds to a call_logs entry or ring event:
         await db.execute(
             """
             UPDATE clips SET category = 'ring'
             WHERE clip_id IN (SELECT call_id FROM call_logs)
                OR clip_id IN (SELECT clip_id FROM events WHERE category = 'ring' OR type LIKE '%ring%')
+               OR video_path IN (SELECT clip_path FROM call_logs WHERE clip_path IS NOT NULL)
             """
         )
+
+        # Also update answered_by from call_logs where clip has empty or generic answered_by
+        call_rows_cur = await db.execute("SELECT call_id, clip_path, answered_by FROM call_logs WHERE clip_path IS NOT NULL")
+        all_call_rows = await call_rows_cur.fetchall()
+        for cl in all_call_rows:
+            c_path = cl["clip_path"]
+            c_ans = cl["answered_by"] or "Aanbellen [SHAZAM_CHIME]"
+            if c_path:
+                await db.execute(
+                    "UPDATE clips SET category = 'ring', answered_by = ? WHERE video_path = ? AND (answered_by IS NULL OR answered_by = '' OR answered_by LIKE 'AI:%')",
+                    (c_ans, c_path),
+                )
+                updated_categories += 1
 
         # Correlate ring events with near-simultaneous clips (within +-30s)
         evt_cur = await db.execute("SELECT id, created_at, clip_id FROM events WHERE category = 'ring' OR type LIKE '%ring%'")
@@ -851,6 +865,15 @@ async def sync_and_index_clips_on_disk() -> dict:
                 snap_path = str(thumb_cand) if thumb_cand.exists() else ""
                 cat = "ring" if ("call" in cid or "ring" in cid) else "motion"
                 ans = "Aanbellen" if cat == "ring" else "Gearchiveerde opname"
+                async with get_db(write=False) as chk_db:
+                    c_cur = await chk_db.execute(
+                        "SELECT call_id, answered_by FROM call_logs WHERE call_id = ? OR clip_path LIKE ?",
+                        (cid, f"%{cid}.mp4"),
+                    )
+                    c_row = await c_cur.fetchone()
+                    if c_row:
+                        cat = "ring"
+                        ans = c_row["answered_by"] or "Aanbellen [SHAZAM_CHIME]"
 
                 await save_clip(
                     clip_id=cid,
@@ -889,9 +912,76 @@ async def delete_clip(clip_id: str) -> bool:
 async def update_clip(clip_id: str, **fields) -> None:
     if not fields:
         return
-    set_clause = ", ".join(f"{k} = ?" for k in fields)
-    values = list(fields.values()) + [clip_id]
     async with get_db(write=True) as db:
+        cur = await db.execute("SELECT category, answered_by, call_id FROM clips WHERE clip_id = ?", (clip_id,))
+        existing = await cur.fetchone()
+
+        call_cur = await db.execute(
+            "SELECT call_id, answered_by FROM call_logs WHERE call_id = ? OR clip_path LIKE ?",
+            (clip_id, f"%{clip_id}.mp4"),
+        )
+        call_row = await call_cur.fetchone()
+
+        if existing:
+            # Sticky Ring: If existing row has ring or is linked to call_logs, never strip 'ring'
+            if "category" in fields:
+                existing_cat = (existing["category"] or "").lower()
+                new_cat = (fields["category"] or "").lower()
+                has_ring = "ring" in existing_cat or call_row is not None or "ring" in new_cat
+
+                all_cats = set()
+                if existing_cat:
+                    all_cats.update(c.strip() for c in existing_cat.split(",") if c.strip())
+                if new_cat:
+                    all_cats.update(c.strip() for c in new_cat.split(",") if c.strip())
+                if has_ring:
+                    all_cats.add("ring")
+
+                sorted_cats = sorted(list(all_cats), key=lambda c: 0 if c == "ring" else 1 if c == "person" else 2)
+                fields["category"] = ",".join(sorted_cats)
+
+            if "answered_by" in fields:
+                existing_ans = existing["answered_by"] or ""
+                new_ans = fields["answered_by"] or ""
+                if ("aanbel" in existing_ans.lower() or "shazam" in existing_ans.lower()) and not ("aanbel" in new_ans.lower() or "shazam" in new_ans.lower()):
+                    fields["answered_by"] = existing_ans
+                elif call_row and not ("aanbel" in new_ans.lower() or "shazam" in new_ans.lower()):
+                    fields["answered_by"] = call_row["answered_by"] or "Aanbellen [SHAZAM_CHIME]"
+        else:
+            # Self-healing if row was purged while recording
+            if fields.get("status") == "READY":
+                cat = fields.get("category", "motion")
+                if call_row:
+                    cat = "ring"
+                ans = fields.get("answered_by", "")
+                if call_row and not ("aanbel" in ans.lower() or "shazam" in ans.lower()):
+                    ans = call_row["answered_by"] or "Aanbellen [SHAZAM_CHIME]"
+                await db.execute(
+                    """
+                    INSERT INTO clips (clip_id, call_id, created_at, duration, snapshot_path, video_path, answered_by, status, category, file_size)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(clip_id) DO UPDATE SET
+                        duration = excluded.duration,
+                        status = excluded.status,
+                        file_size = excluded.file_size
+                    """,
+                    (
+                        clip_id,
+                        call_row["call_id"] if call_row else clip_id,
+                        datetime.now(timezone.utc).isoformat(),
+                        fields.get("duration", 0.0),
+                        fields.get("snapshot_path", ""),
+                        fields.get("video_path", ""),
+                        ans,
+                        "READY",
+                        cat,
+                        fields.get("file_size", 0),
+                    )
+                )
+                return
+
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [clip_id]
         await db.execute(
             f"UPDATE clips SET {set_clause} WHERE clip_id = ?",
             values,

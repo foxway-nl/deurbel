@@ -1368,7 +1368,7 @@ async def cleanup_expired_clips() -> int:
     return stats.get("removed_count", 0)
 
 
-async def sweep_stuck_recordings(max_age_seconds: float = 40.0) -> int:
+async def sweep_stuck_recordings(max_age_seconds: float = 240.0) -> int:
     """
     Sweeper that finalizes or cleans up recordings stuck in 'RECORDING' state older than max_age_seconds (v3.5.1).
     - If .mp4 file exists and size > 10 KB: updates status to READY, probes duration, ensures thumbnail.
@@ -1391,6 +1391,10 @@ async def sweep_stuck_recordings(max_age_seconds: float = 40.0) -> int:
         now_t = time.time()
         for row in rows:
             clip_id = row["clip_id"]
+
+            # Active recording protection: never sweep or purge the currently recording session!
+            if is_recording_active() and clip_id == _active_recording_info.get("clip_id"):
+                continue
             created_at_str = row["created_at"]
             age_sec = 0.0
             try:

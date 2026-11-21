@@ -162,7 +162,7 @@ async def _stuck_recording_sweeper_loop() -> None:
     while True:
         try:
             from app.recorder import sweep_stuck_recordings
-            await sweep_stuck_recordings(max_age_seconds=40.0)
+            await sweep_stuck_recordings(max_age_seconds=240.0)
         except Exception:
             logger.debug("Error in stuck recording sweeper loop")
         await asyncio.sleep(15.0)
@@ -1147,7 +1147,7 @@ async def get_clips(
 ):
     """List all clips sorted newest first with duration, size, server-side filtering & pagination (v3.5.1)."""
     from app.recorder import resolve_clip_path, ensure_thumbnail, sweep_stuck_recordings
-    await sweep_stuck_recordings(max_age_seconds=40.0)
+    await sweep_stuck_recordings(max_age_seconds=240.0)
     clips, total_count = await list_clips(category=category, date=date, limit=limit, offset=offset)
     result = []
     for c in clips:
@@ -2450,14 +2450,42 @@ async def audio_speak_endpoint(
 @app.post("/api/v1/admin/play-chime")
 async def play_doorbell_chime():
     """
-    Speelt bel.wav direct af via de outdoor speaker van de deurbel (Poort 8000 C-SDK),
-    zodat de microfoon en ding-dong detector het akoestisch oppikken.
+    Speelt bel.wav gekalibreerd af via de outdoor speaker van de deurbel (Poort 8000 C-SDK),
+    zodat de microfoon en ding-dong detector het akoestisch oppikken zonder speaker-oversturing.
     """
-    logger.info("Speel ding-dong melodie (bel.wav) af via deurbel speaker...")
-    chime_path = Path("/mnt/opslag/deurbel/backend/app/assets/bel.wav")
-    if not chime_path.exists():
-        raise HTTPException(404, "bel.wav niet gevonden")
-    ok = await play_audio_to_doorbell_async(file_path=chime_path)
+    logger.info("Speel gekalibreerde ding-dong melodie af via deurbel speaker...")
+    speaker_path = Path("/mnt/opslag/deurbel/backend/app/assets/bel_speaker.wav")
+    orig_path = Path("/mnt/opslag/deurbel/backend/app/assets/bel.wav")
+
+    if not speaker_path.exists():
+        if orig_path.exists():
+            try:
+                import subprocess
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", str(orig_path), "-filter:a", "volume=-12dB,apad=pad_dur=1.0", "-ar", "16000", "-ac", "1", str(speaker_path)],
+                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            except Exception as fe:
+                logger.warning("Kon bel_speaker.wav niet aanmaken, val terug op bel.wav: %s", fe)
+                speaker_path = orig_path
+        else:
+            raise HTTPException(404, "bel.wav niet gevonden")
+
+    target_audio = speaker_path if speaker_path.exists() else orig_path
+
+    # Coordinated ring dispatch at t=0.5s so the phone rings as expected during the speaker test
+    async def _timed_ring_dispatch():
+        await asyncio.sleep(0.5)
+        try:
+            from app.state_machine import call_sm
+            await call_sm.ring(force=True, trigger_source="SPEAKER_CHIME_TEST")
+            logger.info("🔔 [play_doorbell_chime] Oproep geactiveerd via SPEAKER_CHIME_TEST")
+        except Exception as re:
+            logger.warning("Fout bij activeren oproep tijdens speaker chime test: %s", re)
+
+    asyncio.create_task(_timed_ring_dispatch())
+
+    ok = await play_audio_to_doorbell_async(file_path=target_audio)
     if ok:
         return {
             "status": "success",
